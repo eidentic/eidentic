@@ -1,6 +1,6 @@
 {
   "name": "@eidentic/pgvector",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "license": "Apache-2.0",
   "publishConfig": {
@@ -47,7 +47,7 @@
     "pg": "^8.21.0",
     "@types/pg": "^8.11.0"
   },
-  "description": "pgvector adapter for Eidentic \u2014 vector search over PostgreSQL (pg / pglite) using the pgvector extension.",
+  "description": "pgvector adapter for Eidentic — vector search over PostgreSQL (pg / pglite) using the pgvector extension.",
   "keywords": [
     "ai",
     "agents",

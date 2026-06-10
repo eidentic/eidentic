@@ -1,6 +1,6 @@
 {
   "name": "@eidentic/e2b",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "license": "Apache-2.0",
   "publishConfig": {
@@ -45,7 +45,7 @@
   "devDependencies": {
     "@e2b/code-interpreter": "^2.6.0"
   },
-  "description": "E2B Firecracker sandbox adapter for Eidentic \u2014 run untrusted code in isolated microVMs via the E2B API.",
+  "description": "E2B Firecracker sandbox adapter for Eidentic — run untrusted code in isolated microVMs via the E2B API.",
   "keywords": [
     "ai",
     "agents",

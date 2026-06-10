@@ -1,6 +1,6 @@
 {
   "name": "@eidentic/core",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "license": "Apache-2.0",
   "publishConfig": {
@@ -39,7 +39,7 @@
     "@eidentic/model": "workspace:*",
     "@eidentic/skills": "workspace:*"
   },
-  "description": "Core agent primitives for Eidentic \u2014 the Agent class, tool registry, memory/graph/skill tools, strategies, guardrails, and permission model.",
+  "description": "Core agent primitives for Eidentic — the Agent class, tool registry, memory/graph/skill tools, strategies, guardrails, and permission model.",
   "keywords": [
     "ai",
     "agents",

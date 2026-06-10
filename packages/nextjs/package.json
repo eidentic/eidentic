@@ -1,6 +1,6 @@
 {
   "name": "@eidentic/nextjs",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "license": "Apache-2.0",
   "publishConfig": {
@@ -44,7 +44,7 @@
       "optional": false
     }
   },
-  "description": "Next.js App Router integration for Eidentic \u2014 `withEidentic` route helper and `eidenticNextConfig` for native-addon bundling.",
+  "description": "Next.js App Router integration for Eidentic — `withEidentic` route helper and `eidenticNextConfig` for native-addon bundling.",
   "keywords": [
     "ai",
     "agents",

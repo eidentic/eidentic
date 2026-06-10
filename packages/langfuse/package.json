@@ -1,6 +1,6 @@
 {
   "name": "@eidentic/langfuse",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "license": "Apache-2.0",
   "publishConfig": {
@@ -34,7 +34,7 @@
   "dependencies": {
     "@eidentic/types": "workspace:*"
   },
-  "description": "Langfuse OTLP tracing adapter for Eidentic \u2014 export agent spans to Langfuse with zero extra dependencies.",
+  "description": "Langfuse OTLP tracing adapter for Eidentic — export agent spans to Langfuse with zero extra dependencies.",
   "keywords": [
     "ai",
     "agents",

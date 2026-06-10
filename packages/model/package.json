@@ -1,6 +1,6 @@
 {
   "name": "@eidentic/model",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "license": "Apache-2.0",
   "publishConfig": {
@@ -48,7 +48,7 @@
     "@ai-sdk/anthropic": "^3.0.0",
     "tsx": "^4.19.0"
   },
-  "description": "Model and embedder wrappers for Eidentic \u2014 AIModel and AIEmbedder over AI SDK providers, with live price tables and Ollama support.",
+  "description": "Model and embedder wrappers for Eidentic — AIModel and AIEmbedder over AI SDK providers, with live price tables and Ollama support.",
   "keywords": [
     "ai",
     "agents",

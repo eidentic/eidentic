@@ -1,6 +1,6 @@
 {
   "name": "@eidentic/tools",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "license": "Apache-2.0",
   "publishConfig": {
@@ -36,7 +36,7 @@
     "@eidentic/types": "workspace:*",
     "zod": "^4.0.0"
   },
-  "description": "Built-in agent tools for Eidentic \u2014 file I/O, bash execution, web fetch, web search (Tavily / Exa / Serper / SearXNG), and sandbox confinement.",
+  "description": "Built-in agent tools for Eidentic — file I/O, bash execution, web fetch, web search (Tavily / Exa / Serper / SearXNG), and sandbox confinement.",
   "keywords": [
     "ai",
     "agents",

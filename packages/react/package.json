@@ -1,6 +1,6 @@
 {
   "name": "@eidentic/react",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "license": "Apache-2.0",
   "publishConfig": {
@@ -44,7 +44,7 @@
   "dependencies": {
     "@eidentic/types": "workspace:*"
   },
-  "description": "React hooks for Eidentic agent UIs \u2014 streaming chat, async runs, workflow tracking, and human-in-the-loop suspension.",
+  "description": "React hooks for Eidentic agent UIs — streaming chat, async runs, workflow tracking, and human-in-the-loop suspension.",
   "keywords": [
     "ai",
     "agents",

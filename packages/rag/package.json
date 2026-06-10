@@ -1,6 +1,6 @@
 {
   "name": "@eidentic/rag",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "license": "Apache-2.0",
   "publishConfig": {
@@ -44,7 +44,7 @@
       "optional": true
     }
   },
-  "description": "RAG pipeline utilities for Eidentic \u2014 chunk text, ingest documents (PDF / HTML / Markdown), and load content into agent memory.",
+  "description": "RAG pipeline utilities for Eidentic — chunk text, ingest documents (PDF / HTML / Markdown), and load content into agent memory.",
   "keywords": [
     "ai",
     "agents",

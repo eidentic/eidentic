@@ -1,6 +1,6 @@
 {
   "name": "@eidentic/memory",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "license": "Apache-2.0",
   "publishConfig": {
@@ -34,7 +34,7 @@
   "dependencies": {
     "@eidentic/types": "workspace:*"
   },
-  "description": "Self-improving memory engine for Eidentic \u2014 four-tier recall (lexical + semantic RRF), self-editing blocks, temporal graph, and sleep-time consolidation.",
+  "description": "Self-improving memory engine for Eidentic — four-tier recall (lexical + semantic RRF), self-editing blocks, temporal graph, and sleep-time consolidation.",
   "keywords": [
     "ai",
     "agents",

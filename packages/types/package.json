@@ -1,6 +1,6 @@
 {
   "name": "@eidentic/types",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "license": "Apache-2.0",
   "publishConfig": {
@@ -36,7 +36,7 @@
     "build": "tsup src/index.ts src/testing.ts --format esm,cjs --dts --clean",
     "typecheck": "tsc --noEmit"
   },
-  "description": "Shared TypeScript types and port interfaces for Eidentic \u2014 the canonical protocol types, store/vector/auth/sandbox ports, errors, and observability.",
+  "description": "Shared TypeScript types and port interfaces for Eidentic — the canonical protocol types, store/vector/auth/sandbox ports, errors, and observability.",
   "keywords": [
     "ai",
     "agents",

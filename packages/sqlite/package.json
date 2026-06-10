@@ -1,6 +1,6 @@
 {
   "name": "@eidentic/sqlite",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "license": "Apache-2.0",
   "publishConfig": {
@@ -40,7 +40,7 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.0"
   },
-  "description": "SQLite store adapter for Eidentic \u2014 durable agent memory, sessions, facts, and durable-execution state over better-sqlite3 (Node/Bun).",
+  "description": "SQLite store adapter for Eidentic — durable agent memory, sessions, facts, and durable-execution state over better-sqlite3 (Node/Bun).",
   "keywords": [
     "ai",
     "agents",

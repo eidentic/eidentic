@@ -1,6 +1,6 @@
 {
   "name": "@eidentic/skills",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "license": "Apache-2.0",
   "publishConfig": {
@@ -35,7 +35,7 @@
     "@eidentic/types": "workspace:*",
     "yaml": "^2"
   },
-  "description": "Skill substrate for Eidentic \u2014 parse SKILL.md manifests, manage skill banks, run test-gated executable skills, and evolve skills with LLM feedback.",
+  "description": "Skill substrate for Eidentic — parse SKILL.md manifests, manage skill banks, run test-gated executable skills, and evolve skills with LLM feedback.",
   "keywords": [
     "ai",
     "agents",

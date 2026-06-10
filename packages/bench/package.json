@@ -1,6 +1,6 @@
 {
   "name": "@eidentic/bench",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "license": "Apache-2.0",
   "publishConfig": {
@@ -36,7 +36,7 @@
     "@eidentic/memory": "workspace:*",
     "@eidentic/eval": "workspace:*"
   },
-  "description": "Memory benchmark harness for Eidentic \u2014 run LongMemEval / LoCoMo / temporal-reasoning benchmarks with deterministic recall metrics.",
+  "description": "Memory benchmark harness for Eidentic — run LongMemEval / LoCoMo / temporal-reasoning benchmarks with deterministic recall metrics.",
   "keywords": [
     "ai",
     "agents",

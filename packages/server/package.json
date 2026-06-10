@@ -1,6 +1,6 @@
 {
   "name": "@eidentic/server",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "license": "Apache-2.0",
   "publishConfig": {
@@ -42,7 +42,7 @@
   "optionalDependencies": {
     "@hono/node-server": "^2.0.0"
   },
-  "description": "Hono HTTP server for Eidentic agents \u2014 streaming query endpoint, async runs, workflow registry, auth, rate-limiting, and quotas.",
+  "description": "Hono HTTP server for Eidentic agents — streaming query endpoint, async runs, workflow registry, auth, rate-limiting, and quotas.",
   "keywords": [
     "ai",
     "agents",

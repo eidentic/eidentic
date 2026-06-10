@@ -1,6 +1,6 @@
 {
   "name": "@eidentic/libsql",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "license": "Apache-2.0",
   "publishConfig": {
@@ -35,7 +35,7 @@
     "@eidentic/types": "workspace:*",
     "@libsql/client": "^0.17.3"
   },
-  "description": "LibSQL / Turso store adapter for Eidentic \u2014 durable agent memory and session state over libSQL (edge-compatible, no native addon).",
+  "description": "LibSQL / Turso store adapter for Eidentic — durable agent memory and session state over libSQL (edge-compatible, no native addon).",
   "keywords": [
     "ai",
     "agents",

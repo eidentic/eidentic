@@ -1,6 +1,6 @@
 {
   "name": "@eidentic/postgres",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "license": "Apache-2.0",
   "publishConfig": {
@@ -47,7 +47,7 @@
     "pg": "^8.21.0",
     "@types/pg": "^8.11.0"
   },
-  "description": "PostgreSQL store adapter for Eidentic \u2014 durable agent memory, sessions, facts, and durable-execution state over pg / pglite.",
+  "description": "PostgreSQL store adapter for Eidentic — durable agent memory, sessions, facts, and durable-execution state over pg / pglite.",
   "keywords": [
     "ai",
     "agents",

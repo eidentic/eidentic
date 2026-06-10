@@ -1,7 +1,0 @@
----
-"@eidentic/types": minor
-"@eidentic/skills": minor
-"@eidentic/core": minor
----
-
-Skill System substrate (§7, v1): the durable foundation for reusable, discoverable skills. New drop-in `SkillPort` (`catalog`/`search`/`use`/`recordOutcome`) in `@eidentic/types`, mirroring `MemoryPort` so `@eidentic/core` depends only on `@eidentic/types`. New `@eidentic/skills` package (runtime-dep = only `@eidentic/types`) ships `parseSkillMd` — a dependency-free, agentskills.io-compatible `SKILL.md` frontmatter parser (`name`, multi-line `description`, inline `allowed-tools`) — and `SkillSet`, an in-memory + directory-backed implementation with 3-tier progressive disclosure (Tier-1 catalog, Tier-2 body on `skill_use`, Tier-3 per-skill `.memory.md`), description-scored search, and a `SkillProvenance` record (source + sha256 content hash + author). `@eidentic/core` exposes read-only `skill_search`/`skill_use` tools and injects a deterministic `<skills>` catalog block into the system prompt whenever an `Agent` is given `skills`. Drop-in unchanged: skills are opt-in and the no-skills loop/registry/prompt path is byte-for-byte identical. Explicitly deferred (off-by-default research bets, §7.7/§0-C12): the self-evolution loop and external optimizer integration, sandboxed executable-skill code execution (§10), signing/verification enforcement, `allowed-tools` capability enforcement (recorded, not enforced in v1), human-gated mutation, skill merge/prune consolidation, and registry import.

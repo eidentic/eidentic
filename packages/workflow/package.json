@@ -1,6 +1,6 @@
 {
   "name": "@eidentic/workflow",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "license": "Apache-2.0",
   "publishConfig": {
@@ -35,7 +35,7 @@
     "@eidentic/core": "workspace:*",
     "@eidentic/types": "workspace:*"
   },
-  "description": "Durable workflow orchestration for Eidentic \u2014 composable steps, parallel execution, retries, branching, agent integration, and persistent run registry.",
+  "description": "Durable workflow orchestration for Eidentic — composable steps, parallel execution, retries, branching, agent integration, and persistent run registry.",
   "keywords": [
     "ai",
     "agents",

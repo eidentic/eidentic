@@ -1,6 +1,6 @@
 {
   "name": "@eidentic/qdrant",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "license": "Apache-2.0",
   "publishConfig": {
@@ -45,7 +45,7 @@
   "devDependencies": {
     "@qdrant/js-client-rest": "^1.18.0"
   },
-  "description": "Qdrant vector store adapter for Eidentic \u2014 fast ANN search for agent memory using a Qdrant-compatible API.",
+  "description": "Qdrant vector store adapter for Eidentic — fast ANN search for agent memory using a Qdrant-compatible API.",
   "keywords": [
     "ai",
     "agents",

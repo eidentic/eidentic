@@ -1,6 +1,6 @@
 {
   "name": "@eidentic/better-auth",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "license": "Apache-2.0",
   "publishConfig": {
@@ -47,7 +47,7 @@
     "@eidentic/server": "workspace:*",
     "@eidentic/core": "workspace:*"
   },
-  "description": "Better-auth session adapter for Eidentic \u2014 verify better-auth sessions and map them to Eidentic's AuthPort.",
+  "description": "Better-auth session adapter for Eidentic — verify better-auth sessions and map them to Eidentic's AuthPort.",
   "keywords": [
     "ai",
     "agents",

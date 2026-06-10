@@ -1,6 +1,6 @@
 {
   "name": "@eidentic/eval",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "license": "Apache-2.0",
   "publishConfig": {
@@ -38,7 +38,7 @@
     "@eidentic/core": "workspace:*",
     "zod": "^4.0.0"
   },
-  "description": "Evaluation harness for Eidentic agents \u2014 scorers, LLM-as-judge, dataset management, CI pass-rate gate, and production trace promotion.",
+  "description": "Evaluation harness for Eidentic agents — scorers, LLM-as-judge, dataset management, CI pass-rate gate, and production trace promotion.",
   "keywords": [
     "ai",
     "agents",

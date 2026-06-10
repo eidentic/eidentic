@@ -1,6 +1,6 @@
 {
   "name": "@eidentic/a2a",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "license": "Apache-2.0",
   "publishConfig": {
@@ -48,7 +48,7 @@
     "@a2a-js/sdk": "^0.3.13",
     "zod": "^4.0.0"
   },
-  "description": "Agent-to-Agent (A2A) interoperability for Eidentic \u2014 expose an agent as an A2A endpoint or call a remote A2A agent as a tool.",
+  "description": "Agent-to-Agent (A2A) interoperability for Eidentic — expose an agent as an A2A endpoint or call a remote A2A agent as a tool.",
   "keywords": [
     "ai",
     "agents",
