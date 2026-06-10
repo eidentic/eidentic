@@ -103,10 +103,47 @@ const report = await runWriteQualityBench(memory, {
 });
 ```
 
-### Real dataset loaders (gated)
+### LoCoMo fair-run harness
+
+The LoCoMo harness is a rigorous end-to-end benchmark: ingest → retrieve → answer → LLM judge.
+It enforces strict fair-run rules (both speakers as humans, structural timestamps, topK ≤ 10,
+mandatory full-context baseline). See [BASELINES.md](./BASELINES.md) for the full methodology.
 
 ```ts
-import { loadLongMemEval, loadLoCoMo } from "@eidentic/bench";
+import { loadLoCoMo, runLocomoBench, renderLocomoReportMarkdown } from "@eidentic/bench";
+import { Memory } from "@eidentic/memory";
+import { InMemoryStore, InMemoryVectorStore, FakeEmbedder } from "@eidentic/types/testing";
+
+// Download data/locomo10.json first — CC BY-NC 4.0, do not commit
+const dataset = await loadLoCoMo("data/locomo10.json");
+
+const report = await runLocomoBench({
+  dataPath: "data/locomo10.json",
+  dataset,
+  answerModel: myModel,
+  judgeModel: myJudgeModel,
+  mode: "full-context",  // or "memory" with memoryFactory
+  categories: [1, 2, 3, 4, 5],
+  memoryFactory: (sampleId) => new Memory({
+    store: new InMemoryStore(),
+    vector: new InMemoryVectorStore(),
+    embedder: new FakeEmbedder(32),
+  }),
+});
+
+console.log("J(1-4):", report.overallJ14.accuracy);
+console.log(renderLocomoReportMarkdown([report]));
+```
+
+Run the full pilot:
+```bash
+ANTHROPIC_API_KEY=... pnpm --filter eidentic-examples bench:locomo -- --mode full-context --samples 2
+```
+
+### LongMemEval loader (retrieval benchmark, gated)
+
+```ts
+import { loadLongMemEval } from "@eidentic/bench";
 
 const dataset = await loadLongMemEval("/path/to/longmemeval.json");
 const report = await runMemoryBench(() => myMemory(), dataset, { topK: 10 });

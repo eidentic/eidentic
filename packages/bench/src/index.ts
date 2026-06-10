@@ -20,8 +20,33 @@ export { recallAtK, factRecall, normalizeText, normalizedIncludes } from "./reca
 // Bundled synthetic dataset (retrieval)
 export { syntheticDataset } from "./datasets/synthetic.js";
 
-// Dataset loaders (gated — requires real dataset files)
-export { loadLongMemEval, loadLoCoMo } from "./loaders.js";
+// Legacy retrieval-style LoCoMo loader (maps to BenchDataset)
+export { loadLongMemEval } from "./loaders.js";
+// Legacy re-export preserved for backward compat (the old wrong-schema loadLoCoMo)
+export { loadLoCoMo as loadLoCoMoLegacy } from "./loaders.js";
+
+// LoCoMo real-schema loader + fair-run harness
+export { loadLoCoMo, LOCOMO_SOURCE_SHA } from "./locomo-loader.js";
+export { runLocomoBench } from "./locomo-run.js";
+export { renderLocomoReportMarkdown } from "./locomo-render.js";
+export type {
+  LocomoReport,
+  LocomoQuestionResult,
+  LocomoBenchOptions,
+  CategoryStats,
+  TokenSummary,
+  MemoryFactory,
+} from "./locomo-run.js";
+export type { PriceTable } from "./locomo-render.js";
+export type {
+  LocomoDataset,
+  LocomoSample,
+  LocomoSession,
+  LocomoTurn,
+  LocomoQA,
+  LocomoCategory,
+} from "./locomo-types.js";
+export { resolveEvidence } from "./locomo-types.js";
 
 // Write-quality benchmark
 export { runWriteQualityBench, CONTRADICTION_FIXTURES, JUNK_STREAM_FIXTURES } from "./write-quality.js";
