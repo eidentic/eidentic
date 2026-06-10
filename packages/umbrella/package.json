@@ -1,0 +1,69 @@
+{
+  "name": "eidentic",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eidentic/eidentic.git",
+    "directory": "packages/umbrella"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "eidentic": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@eidentic/cli": "workspace:*",
+    "@eidentic/core": "workspace:*",
+    "@eidentic/types": "workspace:*",
+    "@eidentic/model": "workspace:*",
+    "@eidentic/sqlite": "workspace:*",
+    "@eidentic/memory": "workspace:*"
+  },
+  "peerDependencies": {
+    "ai": "^6.0.0"
+  },
+  "devDependencies": {
+    "ai": "^6.0.0"
+  },
+  "description": "Agents that remember. TypeScript SDK for AI agents with self-improving memory, durable workflows, and production fundamentals built in.",
+  "keywords": [
+    "ai",
+    "agents",
+    "typescript",
+    "eidentic",
+    "memory",
+    "workflow",
+    "mcp",
+    "durable"
+  ],
+  "homepage": "https://github.com/eidentic/eidentic#readme",
+  "bugs": {
+    "url": "https://github.com/eidentic/eidentic/issues"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ]
+}

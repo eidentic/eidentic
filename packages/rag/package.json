@@ -1,0 +1,65 @@
+{
+  "name": "@eidentic/rag",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eidentic/eidentic.git",
+    "directory": "packages/rag"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts --clean",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@eidentic/tools": "workspace:*",
+    "@eidentic/types": "workspace:*",
+    "node-html-parser": "^7.1.0"
+  },
+  "peerDependencies": {
+    "pdf-parse": "^1.1.1"
+  },
+  "peerDependenciesMeta": {
+    "pdf-parse": {
+      "optional": true
+    }
+  },
+  "description": "RAG pipeline utilities for Eidentic — chunk text, ingest documents (PDF / HTML / Markdown), and load content into agent memory.",
+  "keywords": [
+    "ai",
+    "agents",
+    "typescript",
+    "eidentic",
+    "rag",
+    "document-loading",
+    "chunking",
+    "memory"
+  ],
+  "homepage": "https://github.com/eidentic/eidentic#readme",
+  "bugs": {
+    "url": "https://github.com/eidentic/eidentic/issues"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

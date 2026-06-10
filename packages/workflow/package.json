@@ -1,0 +1,56 @@
+{
+  "name": "@eidentic/workflow",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eidentic/eidentic.git",
+    "directory": "packages/workflow"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts --clean",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@eidentic/core": "workspace:*",
+    "@eidentic/types": "workspace:*"
+  },
+  "description": "Durable workflow orchestration for Eidentic — composable steps, parallel execution, retries, branching, agent integration, and persistent run registry.",
+  "keywords": [
+    "ai",
+    "agents",
+    "typescript",
+    "eidentic",
+    "workflow",
+    "orchestration",
+    "durable",
+    "parallel"
+  ],
+  "homepage": "https://github.com/eidentic/eidentic#readme",
+  "bugs": {
+    "url": "https://github.com/eidentic/eidentic/issues"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

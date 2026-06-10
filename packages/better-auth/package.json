@@ -1,0 +1,68 @@
+{
+  "name": "@eidentic/better-auth",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eidentic/eidentic.git",
+    "directory": "packages/better-auth"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts --clean",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@eidentic/types": "workspace:*"
+  },
+  "peerDependencies": {
+    "better-auth": "^1.6.14"
+  },
+  "peerDependenciesMeta": {
+    "better-auth": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "better-auth": "^1.6.14",
+    "@eidentic/server": "workspace:*",
+    "@eidentic/core": "workspace:*"
+  },
+  "description": "Better-auth session adapter for Eidentic — verify better-auth sessions and map them to Eidentic's AuthPort.",
+  "keywords": [
+    "ai",
+    "agents",
+    "typescript",
+    "eidentic",
+    "auth",
+    "better-auth",
+    "authentication",
+    "session"
+  ],
+  "homepage": "https://github.com/eidentic/eidentic#readme",
+  "bugs": {
+    "url": "https://github.com/eidentic/eidentic/issues"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -1,0 +1,65 @@
+{
+  "name": "@eidentic/nextjs",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eidentic/eidentic.git",
+    "directory": "packages/nextjs"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts --clean",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@eidentic/core": "workspace:*",
+    "@eidentic/server": "workspace:*",
+    "@eidentic/types": "workspace:*"
+  },
+  "peerDependencies": {
+    "next": ">=14"
+  },
+  "peerDependenciesMeta": {
+    "next": {
+      "optional": false
+    }
+  },
+  "description": "Next.js App Router integration for Eidentic — `withEidentic` route helper and `eidenticNextConfig` for native-addon bundling.",
+  "keywords": [
+    "ai",
+    "agents",
+    "typescript",
+    "eidentic",
+    "nextjs",
+    "app-router",
+    "server-components",
+    "streaming"
+  ],
+  "homepage": "https://github.com/eidentic/eidentic#readme",
+  "bugs": {
+    "url": "https://github.com/eidentic/eidentic/issues"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -1,0 +1,104 @@
+[
+  {
+    "sample_id": "fixture-001",
+    "conversation": {
+      "speaker_a": "Alice",
+      "speaker_b": "Bob",
+      "session_1_date_time": "10:00 am on 1 March, 2023",
+      "session_1": [
+        { "speaker": "Alice", "dia_id": "D1:1", "text": "Hey Bob! I just got a new job at TechCorp." },
+        { "speaker": "Bob",   "dia_id": "D1:2", "text": "Congratulations Alice! When do you start?" },
+        { "speaker": "Alice", "dia_id": "D1:3", "text": "I start on March 15th. I'm really excited!" }
+      ],
+      "session_2_date_time": "3:00 pm on 20 March, 2023",
+      "session_2": [
+        { "speaker": "Bob",   "dia_id": "D2:1", "text": "How's the new job going at TechCorp, Alice?" },
+        { "speaker": "Alice", "dia_id": "D2:2", "text": "It's going great! My manager is named Sarah." },
+        { "speaker": "Bob",   "dia_id": "D2:3", "text": "That's wonderful to hear!" }
+      ]
+    },
+    "qa": [
+      {
+        "question": "Where does Alice work?",
+        "answer": "TechCorp",
+        "category": 4,
+        "evidence": ["D1:1"]
+      },
+      {
+        "question": "When did Alice say she would start her new job?",
+        "answer": "March 15th",
+        "category": 2,
+        "evidence": ["D1:3"]
+      },
+      {
+        "question": "What is Alice's manager's name at TechCorp?",
+        "answer": "Sarah",
+        "category": 1,
+        "evidence": ["D1:1", "D2:2"]
+      },
+      {
+        "question": "Where is TechCorp's headquarters located?",
+        "category": 5,
+        "evidence": [],
+        "adversarial_answer": "San Francisco"
+      },
+      {
+        "question": "What is Bob's job title?",
+        "category": 5,
+        "evidence": [],
+        "adversarial_answer": "Software Engineer"
+      },
+      {
+        "question": "Did Alice express any feelings about her new job?",
+        "answer": "excited",
+        "category": 3,
+        "evidence": ["D1:3"]
+      }
+    ]
+  },
+  {
+    "sample_id": "fixture-002",
+    "conversation": {
+      "speaker_a": "Carol",
+      "speaker_b": "Dave",
+      "session_1_date_time": "2:00 pm on 5 April, 2023",
+      "session_1": [
+        { "speaker": "Carol", "dia_id": "D1:1", "text": "Dave, did you know I've been learning Spanish for 6 months?" },
+        { "speaker": "Dave",  "dia_id": "D1:2", "text": "That's impressive Carol! Are you taking classes?" },
+        { "speaker": "Carol", "dia_id": "D1:3", "text": "Yes, at the community center every Tuesday." }
+      ],
+      "session_2_date_time": "11:30 am on 10 May, 2023",
+      "session_2": [
+        { "speaker": "Dave",  "dia_id": "D2:1", "text": "How are your Spanish classes going?" },
+        { "speaker": "Carol", "dia_id": "D2:2", "text": "Really well! I passed my B1 exam last week." },
+        { "speaker": "Dave",  "dia_id": "D2:3", "text": "Wow, B1 already after just a few months! You're doing great." }
+      ]
+    },
+    "qa": [
+      {
+        "question": "How long has Carol been learning Spanish?",
+        "answer": "6 months",
+        "category": 4,
+        "evidence": ["D1:1"]
+      },
+      {
+        "question": "Where does Carol take Spanish classes?",
+        "answer": "community center",
+        "category": 1,
+        "evidence": ["D1:3"]
+      },
+      {
+        "question": "What exam did Carol pass?",
+        "answer": "B1",
+        "category": 2,
+        "evidence": ["D2:2"]
+      },
+      {
+        "question": "What day of the week does Carol attend Spanish classes?",
+        "answer": "Tuesday",
+        "category": 3,
+        "evidence": ["D1:3"]
+      }
+    ]
+  }
+]

@@ -1,0 +1,66 @@
+{
+  "name": "@eidentic/e2b",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eidentic/eidentic.git",
+    "directory": "packages/e2b"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts --clean",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@eidentic/types": "workspace:*"
+  },
+  "peerDependencies": {
+    "@e2b/code-interpreter": ">=2"
+  },
+  "peerDependenciesMeta": {
+    "@e2b/code-interpreter": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@e2b/code-interpreter": "^2.6.0"
+  },
+  "description": "E2B Firecracker sandbox adapter for Eidentic — run untrusted code in isolated microVMs via the E2B API.",
+  "keywords": [
+    "ai",
+    "agents",
+    "typescript",
+    "eidentic",
+    "e2b",
+    "sandbox",
+    "code-interpreter",
+    "security"
+  ],
+  "homepage": "https://github.com/eidentic/eidentic#readme",
+  "bugs": {
+    "url": "https://github.com/eidentic/eidentic/issues"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -1,0 +1,45 @@
+name: Refresh default price table
+
+on:
+  schedule:
+    # Every Monday at 06:00 UTC
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  update-prices:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Regenerate prices
+        run: pnpm --filter @eidentic/model gen:prices
+
+      - name: Open PR if prices changed
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "chore(prices): refresh default price table from LiteLLM"
+          title: "chore(prices): refresh default price table from LiteLLM"
+          body: |
+            Automated weekly refresh of `packages/model/src/prices.ts` from the
+            LiteLLM [model_prices_and_context_window.json](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json).
+
+            Token usage is always exact; USD figures are estimates — verify against your provider's current pricing page.
+          branch: chore/refresh-prices
+          delete-branch: true
+          labels: "chore,pricing"
