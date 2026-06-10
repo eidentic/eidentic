@@ -1,0 +1,6 @@
+---
+"@eidentic/types": minor
+"@eidentic/core": minor
+---
+
+GuardrailPort for input/output content guardrails (D7). Adds `GuardrailPort` to `@eidentic/types` with `checkInput`/`checkOutput` methods that can `allow`, `block` (terminate run with new `subtype: "guardrail"`), or `redact` (replace text in-place) text before it reaches the model or before it is returned to the caller. Wire via `AgentConfig.guardrails` (single port or array; off by default — zero overhead when absent). Multiple guardrails run in array order; the first `block` wins; `redact` results chain (each guardrail sees the previous guardrail's redacted output). Input guardrails fire after the user event is persisted (audit log retains the original) but before the first model call; output guardrails fire on the final assistant text before the terminal `result` event. Ships with `regexPiiGuardrail(opts?)` in `@eidentic/core`: a pure-JS, zero-external-dep PII detector/redactor covering emails, phone numbers (US + international), credit card numbers (grouped 13–19 digit), and US SSN/ITIN — `mode: "redact"` (default) or `"block"`, with per-direction `check` option. Enterprise deployments can implement the same `GuardrailPort` interface to wire in external content-moderation APIs (Azure Content Safety, Perspective API, etc.).

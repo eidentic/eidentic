@@ -1,0 +1,66 @@
+{
+  "name": "@eidentic/pinecone",
+  "version": "0.0.0",
+  "type": "module",
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eidentic/eidentic.git",
+    "directory": "packages/pinecone"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts --clean",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@eidentic/types": "workspace:*"
+  },
+  "peerDependencies": {
+    "@pinecone-database/pinecone": ">=6"
+  },
+  "peerDependenciesMeta": {
+    "@pinecone-database/pinecone": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@pinecone-database/pinecone": "^7.2.0"
+  },
+  "description": "Pinecone vector store adapter for Eidentic \u2014 fully-managed vector search for agent memory via the Pinecone API.",
+  "keywords": [
+    "ai",
+    "agents",
+    "typescript",
+    "eidentic",
+    "pinecone",
+    "vector-store",
+    "memory",
+    "rag"
+  ],
+  "homepage": "https://github.com/eidentic/eidentic#readme",
+  "bugs": {
+    "url": "https://github.com/eidentic/eidentic/issues"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -1,0 +1,256 @@
+# Eidentic
+
+**Production-grade agentic AI for TypeScript.** Self-improving memory, self-developing
+skills, and multi-agent orchestration — with the production fundamentals (durability,
+cost control, rate-limiting, security, GDPR erasure) that other frameworks make you bolt
+on yourself. Fully open (Apache-2.0, no enterprise gating). Runs on **Node, Bun, Deno,
+and the edge**.
+
+[![CI](https://github.com/eidentic/eidentic/actions/workflows/ci.yml/badge.svg)](https://github.com/eidentic/eidentic/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/eidentic)](https://www.npmjs.com/package/eidentic)
+![Runtimes](https://img.shields.io/badge/runtimes-Node%20·%20Bun%20·%20Deno%20·%20Edge-blue)
+![License](https://img.shields.io/badge/license-Apache--2.0-blue)
+
+> **Status: 0.x — APIs stabilizing toward v1; see [STABILITY](STABILITY.md).**
+> We'd rather over-disclose gaps than oversell — see the
+> [benchmarks](docs/BENCHMARKS.md) for honest, reproducible numbers.
+
+```ts
+import { Agent, AIModel, SqliteStore } from "eidentic";
+import { anthropic } from "@ai-sdk/anthropic";
+
+const agent = new Agent({
+  id: "support",
+  model: new AIModel(anthropic("claude-sonnet-4-5")),
+  store: new SqliteStore("./eidentic.sqlite"),
+});
+
+for await (const ev of agent.query("What did we decide last week?", { sessionId: "u-42" })) {
+  console.log(ev);
+}
+```
+
+## Why Eidentic?
+
+Most agent frameworks lead one lane — memory, or coding/sandbox, or DX, or durable
+orchestration, or skills. **Few ship all of it together, and production-readiness is
+usually behind an enterprise tier.** Eidentic's thesis: *everything in one composable,
+fully-open package.*
+
+**1. Memory that improves itself.** Not just vector recall — a four-tier engine with
+self-editing memory blocks, a **temporal knowledge graph** (facts with validity over time;
+contradictions invalidate rather than delete), sleep-time consolidation, and passive fact
+extraction. ([memory docs](docs/design/master-design.md))
+
+**2. Production fundamentals, built in — not bolted on.** Durable checkpoint/resume with
+exactly-once tool dispatch, **enforced cost ceilings** ($/token/turn) with **per-turn cost
+visibility**, **built-in rate-limiting + quotas**, OpenTelemetry GenAI spans, deny-by-default
+permissions, sandboxed code/command execution, secrets the model never sees, and **one-call
+right-to-erasure (GDPR)** that fans out across every store. For offline workloads there's a
+**batch runner** and **scheduled/background runs**. And because shipping an agent without
+tests is shipping blind, there's a built-in **eval harness with a CI pass-rate gate** plus
+one-call **promotion of a production trace into a regression test** — every incident becomes
+a test, not a repeat. Several of these are unique or near-unique among open frameworks.
+
+**3. Composable, fully open, runs everywhere.** Ports-and-adapters architecture: swap the
+store (SQLite / libSQL / Postgres), vector backend (LanceDB / pgvector / Qdrant /
+Pinecone), or embedder without touching agent code. Ingest PDF / HTML / Markdown out of the
+box; interop via **MCP (with OAuth) and A2A**. Apache-2.0, no code-gating. Verified on Node,
+Bun, and Deno in CI.
+
+## Two ways to use Eidentic
+
+Eidentic is a **library first**. You don't have to run a separate service — you `import` it
+straight into your own backend and call `agent.query()`. Running it as a standalone HTTP
+service is an *optional* second mode for when you want agents-as-a-service.
+
+### 1. Embedded — drop it into your app (the common path)
+
+One install, then construct an agent and stream it from any request handler. The agent runs
+server-side (it holds your model key); your frontend just calls your endpoint.
+
+```bash
+npm install eidentic ai @ai-sdk/anthropic
+```
+
+**Next.js (App Router)** — `app/api/chat/route.ts`:
+
+> **Next.js / serverless:** use `@eidentic/libsql` (pure-JS, bundler-friendly), not `SqliteStore`.
+> The native `better-sqlite3` addon behind `SqliteStore` doesn't bundle under Next/Turbopack
+> (`Dynamic require not supported`). `npm install @eidentic/libsql` and keep the route on the
+> Node runtime. (For Node servers/scripts, `SqliteStore` is great — see the snippet at the top.)
+
+```ts
+import { Agent, AIModel } from "eidentic";
+import { LibsqlStore } from "@eidentic/libsql";
+import { anthropic } from "@ai-sdk/anthropic";
+
+export const runtime = "nodejs"; // native/edge-safe store; not the edge runtime
+
+const agent = new Agent({
+  id: "support",
+  model: new AIModel(anthropic("claude-sonnet-4-5")),
+  store: new LibsqlStore("file:eidentic.db"),
+});
+
+export async function POST(req: Request) {
+  const { message, sessionId } = await req.json();
+  const stream = new ReadableStream({
+    async start(c) {
+      for await (const ev of agent.query(message, { sessionId, signal: req.signal }))
+        c.enqueue(new TextEncoder().encode(JSON.stringify(ev) + "\n"));
+      c.close();
+    },
+  });
+  return new Response(stream, { headers: { "content-type": "application/x-ndjson" } });
+}
+```
+
+**Express:**
+
+```ts
+app.post("/chat", async (req, res) => {
+  res.type("application/x-ndjson");
+  const controller = new AbortController();
+  res.on("close", () => { if (!res.writableEnded) controller.abort(); });
+  for await (const ev of agent.query(req.body.message, { sessionId: req.body.sessionId, signal: controller.signal }))
+    res.write(JSON.stringify(ev) + "\n");
+  res.end();
+});
+```
+
+**Cloudflare Workers / edge** — same `Agent`, swap the store for a libSQL/Postgres adapter:
+
+```ts
+export default {
+  async fetch(req: Request) {
+    const { message, sessionId } = await req.json();
+    const stream = new ReadableStream({
+      async start(c) {
+        for await (const ev of agent.query(message, { sessionId, signal: req.signal }))
+          c.enqueue(new TextEncoder().encode(JSON.stringify(ev) + "\n"));
+        c.close();
+      },
+    });
+    return new Response(stream, { headers: { "content-type": "application/x-ndjson" } });
+  },
+};
+```
+
+A complete, runnable version (plain `node:http`, no extra packages) is in
+[`examples/hello-embedded.ts`](examples/hello-embedded.ts) — `pnpm --filter eidentic-examples hello:embedded`.
+
+### 2. Server — agents-as-a-service (optional)
+
+When you'd rather not hand-write the endpoint, or want a dedicated multi-tenant agent backend
+with auth, sessions, and streaming out of the box, `@eidentic/server` gives you a ready Hono app:
+
+```ts
+import { createServer, serveNode, ApiKeyAuth } from "@eidentic/server";
+
+const app = createServer({
+  agents: { support: agent },
+  auth: ApiKeyAuth({ key_live_123: { userId: "u1" } }),
+});
+await serveNode(app, { port: 3000 }); // POST /v1/agents/support/query → SSE
+```
+
+Or scaffold a project and boot it in dev:
+
+```bash
+npm create eidentic@latest my-agent
+cd my-agent && eidentic dev   # loads eidentic.config.ts and serves it
+```
+
+## What's in the box
+
+| Area | Highlights |
+|---|---|
+| **Agent** | Stateful ReAct loop · event-sourced sessions · composable strategies (reflection / plan-and-execute) · token streaming |
+| **Memory** | Lexical + semantic recall (RRF fusion) · self-editing blocks · temporal knowledge graph · sleep-time consolidation · passive extraction · TTL/dedup |
+| **Skills** | `SKILL.md` prompt skills · test-gated executable skills (ed25519-signed) · optional self-evolution |
+| **Multi-agent** | `spawn_agent` delegation with context isolation + shared budget · MCP host & server · A2A protocol |
+| **Execution** | Durable checkpoint/resume (exactly-once) · human-in-the-loop suspension · cooperative cancellation · context compaction |
+| **Security & ops** | Deny-by-default permissions · sandboxed exec (E2B) · secret isolation · cost governor · rate-limit + quotas · OTel · GDPR erasure |
+| **Stores** | SQLite · libSQL/Turso · Postgres · vector: LanceDB / pgvector / Qdrant / Pinecone · local + hosted embedders |
+| **DX** | `npx eidentic init` scaffold · Studio dev dashboard (`npx eidentic studio`) · eval harness · memory benchmark suite |
+
+Every feature ships a runnable `examples/hello-*.ts` (most mock the model, so no API key
+needed). See the [**feature tour**](docs/TESTING.md) for how to run each one.
+
+## Quickstart
+
+```bash
+pnpm install
+pnpm -r build
+pnpm --filter eidentic-examples hello          # mock model — no key needed
+```
+
+Use a real model (set `ANTHROPIC_API_KEY`), or stream tokens live:
+
+```bash
+pnpm --filter eidentic-examples hello:real
+pnpm --filter eidentic-examples hello:stream
+```
+
+## Debugging
+
+Set `DEBUG=eidentic:*` for verbose, namespaced loop logs (model calls, tool dispatch, memory
+recall, compaction, cost) with secret values redacted. Scope it (`DEBUG=eidentic:tool,eidentic:cost`)
+to focus. It's the fastest way to see what an agent actually did when something looks off.
+
+```bash
+DEBUG=eidentic:* pnpm --filter eidentic-examples hello
+```
+
+## Package layout
+
+The `eidentic` umbrella package bundles **core, types, model, sqlite, and memory** — one
+install for the common case. Everything else is a separate, opt-in package you add when
+you need it. This keeps cold-start footprint small and avoids pulling in native addons you
+don't use.
+
+| Install separately | Purpose |
+|---|---|
+| `@eidentic/server` | Hono HTTP server with auth + SSE streaming |
+| `@eidentic/react` | React hooks (`useAgent`, `useEidenticStream`, `useAsyncRun`, …) |
+| `@eidentic/nextjs` | Next.js App Router adapter (`withEidentic`, `eidenticNextConfig`) |
+| `@eidentic/studio` | Dev dashboard — sessions, memory, skills, workflows |
+| `@eidentic/workflow` | Multi-step workflow orchestration |
+| `@eidentic/libsql` | libSQL/Turso store (pure-JS, works under Next.js/Bun/edge) |
+| `@eidentic/mcp` | MCP host + server |
+| … | pgvector, lancedb, qdrant, pinecone, e2b, langfuse, eval, bench |
+
+New users sometimes `npm install eidentic` and wonder why `@eidentic/server` is missing —
+this is by design. See the table above and install only what you need.
+
+## Production checklist
+
+A few defaults are safe for local development but need attention before going public:
+
+- **Studio defaults to NoAuth.** `serveStudio` and `createStudioApi` expose full
+  read/write access to agent memory and session traces. Never bind Studio to a
+  publicly reachable address without configuring `ApiKeyAuth` (or a custom `AuthPort`).
+  It is strictly a dev tool.
+- **`@eidentic/server` also defaults to NoAuth.** Add `ApiKeyAuth` (or your own `AuthPort`)
+  before deploying. Combine with your load-balancer's rate-limiting or use the built-in
+  quota/rate-limit options — the server has no default cap on request volume.
+- **`SkillBank` and executable skills.** If you allow agent-authored or user-submitted
+  skills, set `requireSigned: true` so only ed25519-signed bundles are accepted. The
+  default quarantine gate helps, but signed skills are the recommended production posture.
+- **Langfuse / observability.** If you use `@eidentic/langfuse`, pass `redactAttributes`
+  to strip PII or secrets from span attributes before they leave your network. The default
+  records all tool inputs and outputs verbatim.
+
+## Docs
+
+- [Deployment guide](docs/DEPLOYMENT.md) — Node, Docker, edge, Next.js, scaling & ops
+- [Benchmarks](docs/BENCHMARKS.md) — methodology + numbers
+- [Runtime support matrix](docs/RUNTIMES.md) — Node / Bun / Deno / edge
+- [Feature tour](docs/TESTING.md) — run every feature
+- [Design spec](docs/design/master-design.md) — the full architecture
+- [Stability policy](STABILITY.md) — versioning contract, stability tiers, conformance-suite promise
+
+## License
+
+Apache-2.0.

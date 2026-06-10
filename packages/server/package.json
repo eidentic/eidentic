@@ -1,0 +1,63 @@
+{
+  "name": "@eidentic/server",
+  "version": "0.0.0",
+  "type": "module",
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eidentic/eidentic.git",
+    "directory": "packages/server"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts --clean",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@eidentic/core": "workspace:*",
+    "@eidentic/types": "workspace:*",
+    "@eidentic/workflow": "workspace:*",
+    "ai": "^6.0.0",
+    "cron-parser": "^5.5.0",
+    "hono": "^4.12.0"
+  },
+  "optionalDependencies": {
+    "@hono/node-server": "^2.0.0"
+  },
+  "description": "Hono HTTP server for Eidentic agents \u2014 streaming query endpoint, async runs, workflow registry, auth, rate-limiting, and quotas.",
+  "keywords": [
+    "ai",
+    "agents",
+    "typescript",
+    "eidentic",
+    "server",
+    "hono",
+    "api",
+    "streaming"
+  ],
+  "homepage": "https://github.com/eidentic/eidentic#readme",
+  "bugs": {
+    "url": "https://github.com/eidentic/eidentic/issues"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
