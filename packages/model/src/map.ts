@@ -51,9 +51,12 @@ export function mapMessages(
             if (b.type === "text") return [{ type: "text" as const, text: b.text }];
             if (b.type === "image") {
               const img = b.image;
+              const source = img.url ? new URL(img.url) : img.data;
+              // An image block with neither url nor data has nothing to forward.
+              if (source === undefined) return [];
               const imagePart: ImagePart = {
                 type: "image" as const,
-                image: img.url ? new URL(img.url) : img.data,
+                image: source,
                 ...(img.mediaType ? { mediaType: img.mediaType } : {}),
               };
               return [imagePart];

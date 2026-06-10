@@ -555,7 +555,7 @@ export async function runEval(
   // ── Markdown report ──────────────────────────────────────────────────────
   const markdownReport = evalMod.renderReportMarkdown(
     report as Parameters<typeof evalMod.renderReportMarkdown>[0],
-    compareResult ? { compare: compareResult as Parameters<typeof evalMod.renderReportMarkdown>[1]["compare"] } : {},
+    compareResult ? { compare: compareResult as NonNullable<Parameters<typeof evalMod.renderReportMarkdown>[1]>["compare"] } : {},
   );
 
   // ── Write markdown report ────────────────────────────────────────────────
