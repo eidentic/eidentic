@@ -306,24 +306,24 @@ describe("cachedModel – complete()", () => {
   });
 
   it("respects TTL: expired entries (expiresAt <= now) are not served from cache", async () => {
-    // Use a very short TTL and real time to verify expiry.
+    // Deterministic expiry via an injected fake clock (no real-time races).
+    let now = 1_000;
     const base = new MockModel([resp("live1"), resp("live2")]);
-    const model = cachedModel(base, { ttlMs: 1 }); // 1 ms TTL
+    const model = cachedModel(base, { ttlMs: 50, clock: () => now });
 
-    // Call 1: miss → live call, entry cached
+    // Call 1: miss → live call, entry cached (expires at 1050)
     const r1 = await model.complete(req);
     expect((r1.content[0] as any).text).toBe("live1");
     expect(model.stats()).toMatchObject({ hits: 0, misses: 1, size: 1 });
 
-    // Serve from warm LRU immediately (TTL not yet expired)
+    // Within TTL → served from warm LRU
+    now = 1_049;
     const r1b = await model.complete(req);
     expect((r1b.content[0] as any).text).toBe("live1");
     expect(model.stats()).toMatchObject({ hits: 1, misses: 1 });
 
-    // Wait for the 1 ms TTL to expire
-    await new Promise((resolve) => setTimeout(resolve, 10));
-
-    // Call 2: LRU entry stale → live call
+    // Advance past expiry → LRU entry stale → live call
+    now = 1_050;
     const r2 = await model.complete(req);
     expect((r2.content[0] as any).text).toBe("live2");
     expect(model.stats()).toMatchObject({ hits: 1, misses: 2 });
