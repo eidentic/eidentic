@@ -135,25 +135,60 @@ The real datasets are not bundled (large + license-bound). To run benchmarks aga
      npx vitest run packages/bench/test/bench.live.test.ts
    ```
 
-### LoCoMo
+### LoCoMo — fair-run harness
 
-1. Request access: https://github.com/snap-research/locomo
-2. Download the JSON dataset file.
-3. Run:
+The LoCoMo harness (`runLocomoBench`) is a full end-to-end benchmark with an LLM judge.
+It is stricter than a retrieval-only recall@K measure.
+
+1. Download the dataset (CC BY-NC 4.0 — do **not** commit):
    ```bash
-   EIDENTIC_BENCH_LOCOMO=/path/to/locomo.json \
-     npx vitest run packages/bench/test/bench.live.test.ts
+   mkdir -p data
+   git clone --depth 1 https://github.com/snap-research/locomo /tmp/locomo-src
+   cp /tmp/locomo-src/data/locomo10.json data/locomo10.json
    ```
 
-Both loaders produce a `BenchDataset` compatible with `runMemoryBench`. You can evaluate your own
-Memory configuration (different vector backend, embedder, reranker) by passing a custom `makeMemory`
-factory:
+2. Run the gated integration test (verifies dataset stats):
+   ```bash
+   EIDENTIC_TEST_LOCOMO=1 npx vitest run packages/bench/test/locomo.test.ts
+   ```
 
-```ts
-import { runMemoryBench, loadLongMemEval } from "@eidentic/bench";
-import { Memory } from "@eidentic/memory";
-// wire your real vector store, embedder, etc.
-const dataset = await loadLongMemEval("/path/to/longmemeval.json");
-const report = await runMemoryBench(() => new Memory({ store, vector, embedder }), dataset, { topK: 10 });
-console.log("recall@10:", report.recallAtK.mean);
-```
+3. Run a pilot with real models:
+   ```bash
+   ANTHROPIC_API_KEY=... pnpm --filter eidentic-examples bench:locomo -- \
+     --mode full-context --samples 2 --out report.json --md report.md
+   ```
+
+#### Fair-run rules (non-negotiable)
+
+These rules came from a public methodology dispute. They are baked into the harness:
+
+1. **Both speakers are human.** Turns ingested as `[SpeakerName]: text`, never as user/assistant roles.
+2. **Timestamps are structural.** Session headers (`Session N — <date>`) + `ingestedAt` metadata.
+3. **topK ≤ 10 in memory mode.** Larger topK trivialises retrieval quality.
+4. **Full-context baseline is mandatory** alongside any memory-mode result.
+5. **Strict judge.** Correct only when model answer contains the gold answer's specific information. Vague/topical-only = wrong. Equivalent date expressions for the same date = correct.
+6. **Category 5 (adversarial).** Correct = model declined; adversarial trap match = wrong.
+7. **Primary metric J(1–4).** Denominator = cat 1–4 questions actually run (max 1540 on full dataset). Category 5 refusal rate reported separately.
+8. **Data license.** CC BY-NC 4.0 — raw JSON must not be committed; only results are publishable.
+
+#### Dataset stats (actual counts from locomo10.json)
+
+| Category | Count | Semantic label |
+|----------|-------|----------------|
+| 1        | 282   | multi-hop      |
+| 2        | 321   | temporal       |
+| 3        | 96    | open-domain    |
+| 4        | 841   | single-hop     |
+| 5        | 446   | adversarial    |
+| **Total**| **1986** |              |
+| **Cat 1–4** | **1540** | (primary denominator) |
+
+Dataset source SHA: `3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376` (snap-research/locomo, depth-1 clone).
+
+#### Published results (pending first official run)
+
+| System / Mode | Cat1 | Cat2 | Cat3 | Cat4 | J(1–4) | Cat5 refusal | Answer model | Judge model | topK | n-Q | Seed |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| _(pending)_ | — | — | — | — | — | — | — | — | — | — | — |
+
+_Run `bench:locomo` with real models and paste the generated Markdown here._
