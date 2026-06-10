@@ -5,7 +5,7 @@
  * Requires data/locomo10.json at the project root (gitignored; CC BY-NC 4.0).
  *
  * Usage:
- *   ANTHROPIC_API_KEY=... tsx examples/bench-locomo.ts [flags]
+ *   OPENAI_API_KEY=... tsx examples/bench-locomo.ts [flags]
  *
  * Flags:
  *   --mode memory|full-context   (default: full-context)
@@ -26,10 +26,11 @@
 
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { anthropic } from "@ai-sdk/anthropic";
+import { openai } from "@ai-sdk/openai";
 import { AIModel } from "@eidentic/model";
+import { LocalEmbedder } from "@eidentic/transformers";
 import { Memory } from "@eidentic/memory";
-import { InMemoryStore, InMemoryVectorStore, FakeEmbedder } from "@eidentic/types/testing";
+import { InMemoryStore, InMemoryVectorStore } from "@eidentic/types/testing";
 import {
   loadLoCoMo,
   runLocomoBench,
@@ -68,11 +69,11 @@ const checkpointPath = process.argv.includes("--checkpoint")
 
 const DATA_PATH = resolve(process.cwd(), "data/locomo10.json");
 
-if (!process.env["ANTHROPIC_API_KEY"]) {
+if (!process.env["OPENAI_API_KEY"]) {
   console.error(
-    "Error: ANTHROPIC_API_KEY is required.\n" +
+    "Error: OPENAI_API_KEY is required.\n" +
     "Set the env var and re-run:\n" +
-    "  ANTHROPIC_API_KEY=... tsx examples/bench-locomo.ts",
+    "  OPENAI_API_KEY=... tsx examples/bench-locomo.ts",
   );
   process.exit(1);
 }
@@ -91,24 +92,22 @@ console.log();
 
 // Answer model: claude-haiku-4-5 for cost-effective piloting
 // Replace with claude-sonnet-4-5 or another model for production runs
-const answerModel = new AIModel(anthropic("claude-haiku-4-5"));
-answerModel.modelId = "claude-haiku-4-5";
+const answerModel = new AIModel(openai(process.env["EIDENTIC_BENCH_ANSWER_MODEL"] ?? "gpt-4o-mini"));
+answerModel.modelId = process.env["EIDENTIC_BENCH_ANSWER_MODEL"] ?? "gpt-4o-mini";
 
 // Judge model: claude-sonnet-4-5 for strict, capable judging
-const judgeModel = new AIModel(anthropic("claude-sonnet-4-5"));
-judgeModel.modelId = "claude-sonnet-4-5";
+const judgeModel = new AIModel(openai(process.env["EIDENTIC_BENCH_JUDGE_MODEL"] ?? "gpt-4o-mini"));
+judgeModel.modelId = process.env["EIDENTIC_BENCH_JUDGE_MODEL"] ?? "gpt-4o-mini";
 
 // ── Memory factory (used only when mode="memory") ──────────────────────────────
+
+const localEmbedder = await LocalEmbedder.create();
 
 function memoryFactory(): Memory {
   return new Memory({
     store: new InMemoryStore(),
     vector: new InMemoryVectorStore(),
-    // FakeEmbedder is BM25-only; for a real evaluation replace with AIEmbedder:
-    //   import { AIEmbedder } from "@eidentic/model";
-    //   import { openai } from "@ai-sdk/openai";
-    //   new AIEmbedder(openai.embedding("text-embedding-3-small"))
-    embedder: new FakeEmbedder(128),
+    embedder: localEmbedder,
   });
 }
 
