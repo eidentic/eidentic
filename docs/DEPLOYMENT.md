@@ -438,7 +438,7 @@ export default async function handler(req: Request): Promise<Response> {
 handler that takes care of streaming, request cancellation, session wiring, and
 protocol negotiation.
 
-**See the full guide:** [eidentic.dev/guides/nextjs](https://eidentic.dev/guides/nextjs) (source: [eidentic/docs](https://github.com/eidentic/docs))
+**See the full guide:** [docs.eidentic.dev/guides/nextjs](https://docs.eidentic.dev/guides/nextjs) (source: [eidentic/docs](https://github.com/eidentic/docs))
 
 Key points for deployment:
 
