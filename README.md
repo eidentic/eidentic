@@ -250,7 +250,7 @@ A few defaults are safe for local development but need attention before going pu
 - [Feature tour](docs/TESTING.md) — run every feature locally
 - [Design spec](docs/design/master-design.md) — the full architecture
 - [Stability policy](STABILITY.md) — versioning contract, stability tiers, conformance-suite promise
-- [Full docs](https://eidentic.dev) — guides, API reference, and examples ([source](https://github.com/eidentic/docs))
+- [Full docs](https://docs.eidentic.dev) — guides, API reference, and examples ([source](https://github.com/eidentic/docs))
 
 ## License
 
