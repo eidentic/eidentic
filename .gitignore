@@ -1,0 +1,22 @@
+node_modules
+dist
+.turbo
+*.tsbuildinfo
+coverage
+*.sqlite
+*.sqlite-journal
+.DS_Store
+eidentic-demo.sqlite
+eidentic-lance/
+.env
+.env*
+!.env.example
+docs/plans/
+
+# internal working files (never commit)
+.claude/
+LAUNCH-KIT.md
+AUDIT-*.md
+
+# generated example data
+examples/eidentic-lance/

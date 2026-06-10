@@ -1,0 +1,11 @@
+export { Memory, TRANSIENT_MARKERS, ConsentRejectedError } from "./memory.js";
+export type { MemoryOptions, BlockHealth, DedupeOptions, DedupeResult, RecencyOptions } from "./memory.js";
+export { reciprocalRankFusion } from "./rrf.js";
+export { BlockEditor } from "./blocks.js";
+export type { BlockSpec, BlockEditorOptions } from "./blocks.js";
+export { Consolidator } from "./consolidate.js";
+export type { ConsolidatorOptions, ConsolidationResult, ExtractedFact } from "./consolidate.js";
+export { passiveExtract } from "./passive.js";
+export type { PassiveFact } from "./passive.js";
+export { ConsolidationScheduler } from "./scheduler.js";
+export type { ConsolidationSchedulerOptions, MaintenanceResult } from "./scheduler.js";

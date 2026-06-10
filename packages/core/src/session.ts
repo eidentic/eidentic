@@ -1,0 +1,110 @@
+import { EVENT_SCHEMA_VERSION, StoreConflictError, upcastEvents, type EventKind, type StoredEvent, type StorePort, type Upcaster, type Usage } from "@eidentic/types";
+
+export interface SessionDeps {
+  sessionId: string;
+  agentId: string;
+  now: () => string; // injected clock
+  newId: () => string; // injected id generator
+  /** Optional upcaster registry — applied to events loaded from the store (§19.1). */
+  upcasters?: Record<number, Upcaster>;
+  /** Fix 1: owner identity recorded into SessionRecord on creation for multi-tenant ownership. */
+  userId?: string;
+  /** Fix 1: org identity recorded into SessionRecord on creation for multi-tenant ownership. */
+  orgId?: string;
+  /** H1 fix: API key recorded into SessionRecord so apiKey-only principals own their sessions. */
+  apiKey?: string;
+}
+
+export class Session {
+  private constructor(
+    private readonly store: StorePort,
+    private readonly deps: SessionDeps,
+    private _seq: number,
+    private _cache: StoredEvent[],
+  ) {}
+
+  static async open(store: StorePort, deps: SessionDeps): Promise<Session> {
+    let session = await store.getSession(deps.sessionId);
+    if (!session) {
+      session = {
+        id: deps.sessionId,
+        agentId: deps.agentId,
+        createdAt: deps.now(),
+        ...(deps.userId !== undefined ? { userId: deps.userId } : {}),
+        ...(deps.orgId !== undefined ? { orgId: deps.orgId } : {}),
+        ...(deps.apiKey !== undefined ? { apiKey: deps.apiKey } : {}),
+      };
+      await store.createSession(session);
+    } else if (session.agentId !== deps.agentId) {
+      throw new StoreConflictError(
+        `session ${deps.sessionId} belongs to a different agent (owner: ${session.agentId}, requester: ${deps.agentId})`,
+      );
+    } else {
+      // Defense-in-depth for Finding #1 (IDOR): if the stored session has an owner identity
+      // and the caller's identity is set but does NOT match, reject the open.
+      // This covers core/nextjs/A2A/MCP entry points that bypass the HTTP server ownership check.
+      //
+      // Rules:
+      //  - If the session has no recorded userId/orgId (legacy/NoAuth), always allow (back-compat).
+      //  - If the caller supplies a userId and the session has a userId → they must match.
+      //  - If the caller supplies an orgId and the session has an orgId → they must match.
+      //  - A mismatch on any set pair is a conflict.
+      const sessionOwned = session.userId !== undefined || session.orgId !== undefined;
+      if (sessionOwned) {
+        const userIdMismatch =
+          deps.userId !== undefined &&
+          session.userId !== undefined &&
+          deps.userId !== session.userId;
+        const orgIdMismatch =
+          deps.orgId !== undefined &&
+          session.orgId !== undefined &&
+          deps.orgId !== session.orgId;
+        // Both ids supplied by caller but neither matches a stored id → also a conflict.
+        const noMatchAtAll =
+          deps.userId !== undefined &&
+          deps.orgId !== undefined &&
+          session.userId !== deps.userId &&
+          session.orgId !== deps.orgId &&
+          (session.userId !== undefined || session.orgId !== undefined);
+        if (userIdMismatch || orgIdMismatch || noMatchAtAll) {
+          throw new StoreConflictError(
+            `session ${deps.sessionId} is owned by a different principal`,
+          );
+        }
+      }
+    }
+    const raw = await store.readEvents(deps.sessionId);
+    // §19.1: apply the upcaster chain so the loop always sees events at EVENT_SCHEMA_VERSION.
+    // At v1 with no upcasters this is an identity pass (same array reference, zero allocation).
+    const existing = upcastEvents(raw, deps.upcasters);
+    const nextSeq = existing.length === 0 ? 0 : existing[existing.length - 1]!.seq + 1;
+    return new Session(store, deps, nextSeq, existing);
+  }
+
+  get seq(): number {
+    return this._seq;
+  }
+  get id(): string {
+    return this.deps.sessionId;
+  }
+
+  async append(kind: EventKind, payload: unknown, meta?: { usage?: Usage }): Promise<StoredEvent> {
+    const event: StoredEvent = {
+      id: this.deps.newId(),
+      sessionId: this.deps.sessionId,
+      seq: this._seq++,
+      kind,
+      schemaVersion: EVENT_SCHEMA_VERSION,
+      payload,
+      meta,
+      createdAt: this.deps.now(),
+    };
+    await this.store.appendEvents([event]);
+    this._cache.push(event);
+    return event;
+  }
+
+  events(): StoredEvent[] {
+    return this._cache;
+  }
+}

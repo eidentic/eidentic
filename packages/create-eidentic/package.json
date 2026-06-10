@@ -1,0 +1,49 @@
+{
+  "name": "create-eidentic",
+  "version": "0.0.0",
+  "type": "module",
+  "license": "Apache-2.0",
+  "description": "Scaffold a new Eidentic agent project \u2014 `npm create eidentic@latest` for default, Next.js chat, or Bun agent templates.",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eidentic/eidentic.git",
+    "directory": "packages/create-eidentic"
+  },
+  "bin": {
+    "create-eidentic": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --clean",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@clack/prompts": "^1.5.1",
+    "picocolors": "^1.1.1"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "typescript",
+    "eidentic",
+    "scaffold",
+    "create",
+    "starter",
+    "template"
+  ],
+  "homepage": "https://github.com/eidentic/eidentic#readme",
+  "bugs": {
+    "url": "https://github.com/eidentic/eidentic/issues"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
