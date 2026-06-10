@@ -23,3 +23,6 @@ examples/eidentic-lance/
 
 # benchmark datasets (license-bound CC BY-NC 4.0 — never commit raw data; only results are published)
 data/
+
+# generated type stubs
+.astro/

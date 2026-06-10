@@ -1,0 +1,13 @@
+=== LoCoMo Benchmark Pilot ===
+
+  Mode:        memory
+  Samples:     10
+  Questions:   all
+  Categories:  1, 2, 3, 4, 5
+  topK:        10 (memory mode)
+  Seed:        42
+  Checkpoint:  bench-results/mem.ckpt.jsonl
+
+Loading dataset ...
+  Loaded 10 samples
+
