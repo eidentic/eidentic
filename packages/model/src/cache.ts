@@ -102,6 +102,11 @@ export interface CachedModelOptions {
   shouldCache?: (req: ModelRequest, result: ModelResponse) => boolean;
   /** Called on every cache hit (key, cached response). Use for metrics. */
   onCacheHit?: (key: string, result: ModelResponse) => void;
+  /**
+   * Clock used for TTL bookkeeping. Defaults to `Date.now`.
+   * Inject a fake clock in tests for deterministic expiry behaviour.
+   */
+  clock?: () => number;
 }
 
 /** Runtime statistics exposed by `cachedModel`. */
@@ -144,13 +149,14 @@ export function cachedModel(
   const maxEntries = opts.maxEntries ?? 500;
   const keyFn = opts.keyFn ?? defaultKeyFn;
   const shouldCache = opts.shouldCache ?? (() => true);
+  const clock = opts.clock ?? Date.now;
 
   const lru = new LRUCache(maxEntries);
   let hits = 0;
   let misses = 0;
 
   async function getFromCache(key: string): Promise<ModelResponse | undefined> {
-    const now = Date.now();
+    const now = clock();
 
     // 1. Check LRU first
     const local = lru.get(key);
@@ -173,7 +179,7 @@ export function cachedModel(
   }
 
   async function setInCache(key: string, value: ModelResponse): Promise<void> {
-    const expiresAt = ttlMs === Infinity ? Infinity : Date.now() + ttlMs;
+    const expiresAt = ttlMs === Infinity ? Infinity : clock() + ttlMs;
     lru.set(key, { value, expiresAt });
     if (opts.store) {
       await opts.store.set(key, value, ttlMs === Infinity ? undefined : ttlMs);
