@@ -26,3 +26,6 @@ data/
 
 # generated type stubs
 .astro/
+
+# local benchmark outputs (contain non-redistributable dataset content)
+bench-results/
