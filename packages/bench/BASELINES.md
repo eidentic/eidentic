@@ -185,10 +185,14 @@ These rules came from a public methodology dispute. They are baked into the harn
 
 Dataset source SHA: `3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376` (snap-research/locomo, depth-1 clone).
 
-#### Published results (pending first official run)
+#### Published results (first official run, 2026-06-10)
 
-| System / Mode | Cat1 | Cat2 | Cat3 | Cat4 | J(1–4) | Cat5 refusal | Answer model | Judge model | topK | n-Q | Seed |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| _(pending)_ | — | — | — | — | — | — | — | — | — | — | — |
+| System / Mode | Cat1 (multi-hop) | Cat2 (temporal) | Cat3 (open-domain) | Cat4 (single-hop) | J(1–4) | Cat5 refusal | Answer model | Judge model | Embedder | topK | n-Q | Seed |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| full-context | 46.8% (132/282) | 31.2% (100/321) | 28.1% (27/96) | 81.9% (689/841) | **61.6%** (948/1540) | 69.5% (310/446) | gpt-4o-mini | gpt-4o-mini | — | — | 1,986 | 42 |
+| memory | 30.5% (86/282) | 43.3% (139/321) | 28.1% (27/96) | 68.5% (576/841) | **53.8%** (828/1540) | 85.2% (380/446) | gpt-4o-mini | gpt-4o-mini | text-embedding-3-small | 10 | 1,986 | 42 |
 
-_Run `bench:locomo` with real models and paste the generated Markdown here._
+Tokens per query: full-context 19,030 · memory 893 (95.3% reduction). Memory-mode totals:
+1.73M input / 42k output tokens across all 1,986 questions (answer + judge phases). Zero
+per-question errors in either run. Single run per mode; variance across seeds not yet
+characterized. Interpretation and caveats: see `docs/BENCHMARKS.md`.

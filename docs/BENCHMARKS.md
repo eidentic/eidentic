@@ -105,22 +105,51 @@ synthetic gold facts are verbatim substrings of ingested turns, so both retrieva
 perfectly by construction. See [`packages/bench/BASELINES.md`](../packages/bench/BASELINES.md)
 for the dataset design and CI regression thresholds.
 
-### Answer-accuracy numbers — pending (and why we won't fake them)
+### LoCoMo answer accuracy — first official run (June 2026)
 
-The headline memory metric in this space is **answer accuracy on LongMemEval / LoCoMo**,
-LLM-judged. Producing a credible number requires:
+[LoCoMo](https://github.com/snap-research/locomo) (Snap Research, CC BY-NC 4.0) evaluates
+long-term conversational memory: 10 multi-session conversations, 1,986 QA pairs. Following
+the dataset's established scoring practice, the primary metric J(1–4) covers the 1,540
+non-adversarial questions; category 5 (adversarial/unanswerable) is reported separately as a
+refusal rate. Both rows below were produced by the same script in this repo
+(`examples/bench-locomo.ts`), same models, same judge, same seed — full run, no sampling.
 
-1. the licensed datasets (gated downloads), and
-2. a real model run for generation **and** for the LLM judge.
+| Mode | Multi-hop | Temporal | Open-domain | Single-hop | **J(1–4)** | Cat5 refusal | Tokens/query |
+|---|---|---|---|---|---|---|---|
+| Full-context baseline | **46.8%** | 31.2% | 28.1% | **81.9%** | **61.6%** | 69.5% | 19,030 |
+| Eidentic memory | 30.5% | **43.3%** | 28.1% | 68.5% | 53.8% | **85.2%** | **893** |
 
-The runner is ready — see `BASELINES.md` for the exact command — but we have not funded that
-run yet, and we will publish the number only when we can do so honestly and reproducibly, with
-the script in this repo. We'd rather show a blank here than a number we can't stand behind —
-benchmark integrity matters.
+What the numbers say, honestly:
+
+- **Temporal reasoning: memory beats full-context by +12.1 points** (43.3% vs 31.2%). The
+  temporal knowledge graph and date-anchored ingestion answer "when did X happen?" questions
+  that get lost in a 19k-token context window.
+- **Adversarial robustness: 85.2% vs 69.5% refusal rate** — retrieval-grounded answers
+  hallucinate less on unanswerable questions.
+- **Token cost: 893 vs 19,030 tokens per query (95.3% less).** At production volume this is
+  the difference between a viable feature and an invoice problem.
+- **Where full-context wins:** single-hop and multi-hop recall (retrieval misses evidence
+  that brute-force context inclusion catches). Overall J(1–4) is 7.8 points behind the
+  baseline. We publish that gap rather than hide it; closing it is roadmap work, and the
+  full-context baseline is exactly the bar every memory system should be measured against.
+
+**Configuration (full disclosure):** answer + judge model `gpt-4o-mini`, embedder
+`text-embedding-3-small`, topK 10, seed 42, single run, dataset SHA `3eb6f2c5`. The judge is
+strict (vague/topical-only answers score as wrong) but gpt-4o-mini judges are known to be
+lenient relative to humans; treat absolute numbers as comparable within this table, not
+across differently-judged tables elsewhere. Raw per-question outputs contain dataset content
+(CC BY-NC) and are not redistributed. Reproduce with the command in
+[`packages/bench/BASELINES.md`](../packages/bench/BASELINES.md).
+
+### LongMemEval — pending
+
+The LongMemEval runner ships in `@eidentic/bench`; we will publish numbers when we can run it
+with the same standards (full disclosure, full-context baseline, reproducible script). We'd
+rather show a blank than a number we can't stand behind.
 
 ## What we deliberately do **not** claim yet
 
-- No LongMemEval / LoCoMo answer-accuracy numbers (see above).
+- No LongMemEval answer-accuracy numbers yet (see above).
 - No agent-task benchmark (τ-bench / SWE-bench) — Eidentic is a framework, not a tuned agent;
   a reference-agent run is future work.
 - All numbers are single-machine, point-in-time (June 2026). They measure framework overhead,

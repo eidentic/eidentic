@@ -28,7 +28,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { openai } from "@ai-sdk/openai";
 import { AIModel } from "@eidentic/model";
-import { LocalEmbedder } from "@eidentic/transformers";
+import { AIEmbedder } from "@eidentic/model";
 import { Memory } from "@eidentic/memory";
 import { InMemoryStore, InMemoryVectorStore } from "@eidentic/types/testing";
 import {
@@ -102,7 +102,7 @@ judgeModel.modelId = process.env["EIDENTIC_BENCH_JUDGE_MODEL"] ?? "gpt-4o-mini";
 
 // ── Memory factory (used only when mode="memory") ──────────────────────────────
 
-const localEmbedder = await LocalEmbedder.load();
+const localEmbedder = await AIEmbedder.create(openai.embedding("text-embedding-3-small"));
 
 function memoryFactory(): Memory {
   return new Memory({
