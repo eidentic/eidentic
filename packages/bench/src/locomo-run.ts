@@ -237,19 +237,15 @@ async function ingestSampleIntoMemory(
 
   for (const sess of sample.sessions) {
     const dateLabel = sess.dateTime ? ` — ${sess.dateTime}` : "";
-    const headerText = `Session ${sess.index}${dateLabel}`;
-    events.push({
-      id: `${sample.sampleId}:sess:${sess.index}:header`,
-      scope,
-      text: headerText,
-      metadata: { ingestedAt: sess.dateTimeMs || undefined },
-    });
+    const header = `Session ${sess.index}${dateLabel}`;
 
+    // Turn-level entries: the session date travels WITH each turn so a
+    // retrieved snippet is temporally anchored ("yesterday" is resolvable).
     for (const turn of sess.turns) {
       events.push({
         id: `${sample.sampleId}:turn:${turn.diaId}`,
         scope,
-        text: `[${turn.speaker}]: ${turn.text}`,
+        text: `[${header}] [${turn.speaker}]: ${turn.text}`,
         metadata: {
           diaId: turn.diaId,
           sessionIndex: sess.index,
@@ -257,6 +253,19 @@ async function ingestSampleIntoMemory(
         },
       });
     }
+
+    // Session-level chunk: one coherent entry per session so questions whose
+    // evidence spans several adjacent turns retrieve complete context.
+    const sessionText = [
+      header,
+      ...sess.turns.map((t) => `[${t.speaker}]: ${t.text}`),
+    ].join("\n");
+    events.push({
+      id: `${sample.sampleId}:sess:${sess.index}:chunk`,
+      scope,
+      text: sessionText,
+      metadata: { sessionIndex: sess.index, ingestedAt: sess.dateTimeMs || undefined },
+    });
   }
 
   await memory.ingest(events);
@@ -281,6 +290,8 @@ async function callJudge(
       type: "object",
       properties: { correct: { type: "boolean" } },
       required: ["correct"],
+      // OpenAI strict structured-output mode requires this to be explicit.
+      additionalProperties: false,
     },
   });
 

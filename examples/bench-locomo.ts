@@ -52,6 +52,7 @@ function flagNum(flag: string, def: number): number {
 
 const mode = flagStr("--mode", "full-context") as "memory" | "full-context";
 const sampleLimit = flagNum("--samples", 10);
+const concurrency = flagNum("--concurrency", 1);
 const questionLimit = process.argv.includes("--questions")
   ? flagNum("--questions", 0) || undefined
   : undefined;
@@ -101,7 +102,7 @@ judgeModel.modelId = process.env["EIDENTIC_BENCH_JUDGE_MODEL"] ?? "gpt-4o-mini";
 
 // ── Memory factory (used only when mode="memory") ──────────────────────────────
 
-const localEmbedder = await LocalEmbedder.create();
+const localEmbedder = await LocalEmbedder.load();
 
 function memoryFactory(): Memory {
   return new Memory({
@@ -136,6 +137,7 @@ const report = await runLocomoBench({
   questionLimit,
   seed,
   topK,
+  concurrency,
   checkpointPath,
   memoryFactory: mode === "memory" ? memoryFactory : undefined,
   onProgress: (done, total) => {
