@@ -54,8 +54,8 @@ type TerminationSubtype =
 
 `CostBreakdown` separates foreground, background (memory/consolidation), and cached
 tokens, with per-model dollar amounts — Constitution #5 (transparent cost). Every
-`result` carries usage/cost even on error subtypes (a Claude-SDK lesson: error paths must
-still report cost).
+`result` carries usage/cost even on error subtypes (a hard-won production lesson: error
+paths must still report cost).
 
 The same event stream is what the SDK `query()` async-iterates, what the server streams
 over SSE, and what the tracer consumes. One protocol, three consumers.

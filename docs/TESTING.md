@@ -64,7 +64,7 @@ DEBUG=eidentic:* pnpm -C examples hello:<name>
 |---|---|---|
 | Multi-agent | `spawn_agent` delegation with context isolation + shared tree budget | `hello:multi-agent` |
 | MCP host | Consume external MCP servers' tools as first-class Eidentic tools | `hello:mcp` |
-| MCP server | Expose Eidentic tools/agents AS an MCP server (Claude Desktop, etc.) | `hello:mcp-server` |
+| MCP server | Expose Eidentic tools/agents as an MCP server (any MCP-compatible client) | `hello:mcp-server` |
 | A2A | Agent-to-Agent protocol: expose an agent + consume a remote one | `hello:a2a` |
 
 ## Execution & control (production fundamentals)

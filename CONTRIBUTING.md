@@ -1,7 +1,7 @@
 # Contributing to Eidentic
 
-Thanks for your interest in Eidentic — an open-source, TypeScript-first SDK for building
-production agentic AI systems. This guide covers local setup and our workflow conventions.
+Eidentic is an open-source, TypeScript-first SDK for building production AI agents. This
+guide covers local setup and workflow conventions.
 
 ## Prerequisites
 
@@ -15,7 +15,7 @@ production agentic AI systems. This guide covers local setup and our workflow co
 ```bash
 pnpm install          # installs deps and compiles native addons
 pnpm -r build         # build all packages (emits dist/)
-pnpm test             # run the full test suite (Vitest)
+npx vitest run        # run the full test suite
 pnpm -r typecheck     # typecheck every package
 ```
 
@@ -35,15 +35,20 @@ pnpm --filter eidentic-examples hello
 ## Repository layout
 
 ```
-packages/
-  types/         @eidentic/types        — zero-dep contracts, message protocol, ports, test fakes
-  sqlite/        @eidentic/sqlite       — StorePort on better-sqlite3
-  model/         @eidentic/model        — ModelPort on Vercel AI SDK v6
-  core/          @eidentic/core         — agent loop, tools, session, Agent
-examples/        runnable demos
+packages/        32 published packages (see root README for full list)
+  types/         @eidentic/types   — zero-dep contracts, message protocol, ports, test fakes
+  core/          @eidentic/core    — agent loop, tools, session, Agent
+  model/         @eidentic/model   — ModelPort on Vercel AI SDK v6
+  sqlite/        @eidentic/sqlite  — StorePort on better-sqlite3
+  memory/        @eidentic/memory  — four-tier memory engine
+  … (see packages/)
+examples/        runnable demos (hello-*.ts, one per feature)
 docs/
-  design/        the architecture spec (sections 00–20)
-  plans/         implementation plans
+  design/        architecture spec — sections 00–20 plus master-design.md
+  BENCHMARKS.md  methodology and reproducible numbers
+  DEPLOYMENT.md  Node, Docker, edge, Next.js deployment guide
+  RUNTIMES.md    runtime compatibility matrix
+  TESTING.md     feature tour — run every example
 ```
 
 The architecture and every locked decision live in [`docs/design`](docs/design/master-design.md).

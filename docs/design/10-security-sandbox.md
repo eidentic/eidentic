@@ -61,7 +61,7 @@ Since prevention is imperfect, containment is primary:
 
 ## 10.4 Permission system
 
-Deny-by-default, evaluated in strict order (Claude-SDK-proven), changeable mid-session:
+Deny-by-default, evaluated in strict order, changeable mid-session:
 
 ```
 1. Hooks (PreToolUse)        → can deny outright

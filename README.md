@@ -32,14 +32,14 @@ for await (const ev of agent.query("What did we decide last week?", { sessionId:
 ## Why Eidentic?
 
 Most agent frameworks lead one lane — memory, or coding/sandbox, or DX, or durable
-orchestration, or skills. **Few ship all of it together, and production-readiness is
-usually behind an enterprise tier.** Eidentic's thesis: *everything in one composable,
+orchestration, or skills. **Rarely do all of these ship together, and production-readiness
+is usually behind an enterprise tier.** Eidentic's thesis: *everything in one composable,
 fully-open package.*
 
 **1. Memory that improves itself.** Not just vector recall — a four-tier engine with
 self-editing memory blocks, a **temporal knowledge graph** (facts with validity over time;
-contradictions invalidate rather than delete), sleep-time consolidation, and passive fact
-extraction. ([memory docs](docs/design/master-design.md))
+contradictions invalidate rather than accumulate), sleep-time consolidation, and passive
+fact extraction. ([design spec](docs/design/master-design.md))
 
 **2. Production fundamentals, built in — not bolted on.** Durable checkpoint/resume with
 exactly-once tool dispatch, **enforced cost ceilings** ($/token/turn) with **per-turn cost
@@ -53,9 +53,9 @@ a test, not a repeat. Several of these are unique or near-unique among open fram
 
 **3. Composable, fully open, runs everywhere.** Ports-and-adapters architecture: swap the
 store (SQLite / libSQL / Postgres), vector backend (LanceDB / pgvector / Qdrant /
-Pinecone), or embedder without touching agent code. Ingest PDF / HTML / Markdown out of the
-box; interop via **MCP (with OAuth) and A2A**. Apache-2.0, no code-gating. Verified on Node,
-Bun, and Deno in CI.
+Pinecone), or embedder without touching agent code. Ingest PDF, HTML, and Markdown out of
+the box; interop via **MCP (with OAuth) and A2A**. Apache-2.0, no code-gating. Verified on
+Node, Bun, and Deno in CI.
 
 ## Two ways to use Eidentic
 
@@ -174,20 +174,21 @@ cd my-agent && eidentic dev   # loads eidentic.config.ts and serves it
 | **Stores** | SQLite · libSQL/Turso · Postgres · vector: LanceDB / pgvector / Qdrant / Pinecone · local + hosted embedders |
 | **DX** | `npx eidentic init` scaffold · Studio dev dashboard (`npx eidentic studio`) · eval harness · memory benchmark suite |
 
-Every feature ships a runnable `examples/hello-*.ts` (most mock the model, so no API key
-needed). See the [**feature tour**](docs/TESTING.md) for how to run each one.
+Every feature ships a runnable `examples/hello-*.ts` (most use a mock model, so no API key
+needed). See the [**feature tour**](docs/TESTING.md) for the full list and how to run each one.
 
-## Quickstart
+## Quickstart (from this repo)
 
 ```bash
 pnpm install
 pnpm -r build
-pnpm --filter eidentic-examples hello          # mock model — no key needed
+pnpm --filter eidentic-examples hello          # mock model — no API key needed
 ```
 
-Use a real model (set `ANTHROPIC_API_KEY`), or stream tokens live:
+Run against a real model or stream tokens live:
 
 ```bash
+export ANTHROPIC_API_KEY=sk-ant-...
 pnpm --filter eidentic-examples hello:real
 pnpm --filter eidentic-examples hello:stream
 ```
@@ -205,9 +206,9 @@ DEBUG=eidentic:* pnpm --filter eidentic-examples hello
 ## Package layout
 
 The `eidentic` umbrella package bundles **core, types, model, sqlite, and memory** — one
-install for the common case. Everything else is a separate, opt-in package you add when
-you need it. This keeps cold-start footprint small and avoids pulling in native addons you
-don't use.
+install for the common case. All 32 packages are in this monorepo; optional adapters are
+separate installs so you only pay for what you use. This keeps cold-start footprint small
+and avoids pulling in native addons you don't need.
 
 | Install separately | Purpose |
 |---|---|
@@ -220,8 +221,8 @@ don't use.
 | `@eidentic/mcp` | MCP host + server |
 | … | pgvector, lancedb, qdrant, pinecone, e2b, langfuse, eval, bench |
 
-New users sometimes `npm install eidentic` and wonder why `@eidentic/server` is missing —
-this is by design. See the table above and install only what you need.
+`npm install eidentic` gives you the core stack. Optional packages — server, React hooks,
+vector stores, sandbox — are separate installs by design. See the table above.
 
 ## Production checklist
 
@@ -244,11 +245,12 @@ A few defaults are safe for local development but need attention before going pu
 ## Docs
 
 - [Deployment guide](docs/DEPLOYMENT.md) — Node, Docker, edge, Next.js, scaling & ops
-- [Benchmarks](docs/BENCHMARKS.md) — methodology + numbers
+- [Benchmarks](docs/BENCHMARKS.md) — methodology and reproducible numbers
 - [Runtime support matrix](docs/RUNTIMES.md) — Node / Bun / Deno / edge
-- [Feature tour](docs/TESTING.md) — run every feature
+- [Feature tour](docs/TESTING.md) — run every feature locally
 - [Design spec](docs/design/master-design.md) — the full architecture
 - [Stability policy](STABILITY.md) — versioning contract, stability tiers, conformance-suite promise
+- [Full docs](https://eidentic.dev) — guides, API reference, and examples ([source](https://github.com/eidentic/docs))
 
 ## License
 

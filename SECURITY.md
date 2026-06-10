@@ -21,8 +21,8 @@ Please include a description of the issue, steps to reproduce, and any proof-of-
 
 ## Response expectations
 
-- **Triage:** we aim to acknowledge receipt and confirm whether the report is in scope within **72 hours**.
-- **Fix and disclosure:** we will coordinate a fix and agree a disclosure timeline with the reporter. We follow responsible disclosure — we ask that you give us reasonable time to patch before publishing details publicly.
+- **Triage:** we aim to acknowledge receipt and confirm scope within **72 hours**.
+- **Fix and disclosure:** we coordinate a fix and agree a disclosure timeline with the reporter. We follow responsible disclosure — please allow reasonable time to patch before publishing details publicly.
 
 ## Scope notes
 

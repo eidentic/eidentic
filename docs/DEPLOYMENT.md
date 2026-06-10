@@ -1,6 +1,6 @@
 # Deployment Guide
 
-This guide covers every common way to ship a Eidentic agent to production: as a
+This guide covers every common way to ship an Eidentic agent to production: as a
 plain Node.js server, inside Docker, on serverless/edge platforms, and inside
 a Next.js app.
 

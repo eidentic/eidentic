@@ -1,9 +1,8 @@
 # Stability Policy
 
-Eidentic is pre-1.0 and moving toward a stable v1. The market punishes API churn — we treat
-stability as a differentiator, not a footnote. This document states exactly what you can
-rely on, at what version boundary breaking changes can occur, and which parts of the API are
-still being refined.
+Eidentic is pre-1.0, moving toward a stable v1. Stability is a differentiator, not a
+footnote. This document states exactly what you can rely on, at what version boundary
+breaking changes may occur, and which parts of the API are still being refined.
 
 ---
 
@@ -111,8 +110,8 @@ invalidates passing adapters without a MINOR-version bump and migration notes.
 
 ## Questions and upgrade guidance
 
-- **Changelog:** each release's breaking changes and migrations are listed in
-  [CHANGELOG.md](CHANGELOG.md) (coming soon — tracked in
-  [#issues](https://github.com/eidentic/eidentic/issues)).
-- **Questions:** open a discussion on GitHub or file an issue — stability concerns are
+- **Changelog:** breaking changes and migration notes are generated from changesets at each
+  release. See [GitHub releases](https://github.com/eidentic/eidentic/releases) for the
+  history once v1.0 ships.
+- **Questions:** open a discussion or file an issue on GitHub — stability concerns are
   treated as high-priority.

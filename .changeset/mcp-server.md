@@ -3,7 +3,7 @@
 ---
 
 MCP server side (§5.5 inverse): expose Eidentic tools and agents AS an MCP server so any MCP client
-(Claude Desktop, other agents) can call them via `tools/list` + `tools/call`.
+can call them via `tools/list` + `tools/call`.
 
 `serveTools(server, tools, opts?)` — structural seam (takes `McpServerLike`, not the raw SDK `Server`)
 that registers handlers onto any compatible server instance. The `McpServerLike` interface is
@@ -24,7 +24,7 @@ an `McpServerHandle` with `serveStdio()` and `serveHttp()` transport helpers.
 
 `createMcpServer(tools, opts?)` — positional-args builder (kept for back-compat); `mcpServer` is
 preferred for new code. Both dynamically import the SDK `Server` and expose `serveStdio()` (for
-claude_desktop stdio servers) and `serveHttp(opts?)` (Streamable HTTP, stateless or stateful).
+MCP stdio clients) and `serveHttp(opts?)` (Streamable HTTP, stateless or stateful).
 Dynamic import + actionable error if the SDK peer is missing, mirroring the host-side helpers.
 
 Conformance: faithful in-memory `FakeMcpServer` in `test/server.test.ts` covers `tools/list`,

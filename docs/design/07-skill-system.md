@@ -50,7 +50,7 @@ allowed-tools: [bash, read, write]   # optional capability scope (§7.6)
 
 ## 7.3 Progressive disclosure (3-tier loading)
 
-The Anthropic-proven loading model, which keeps 100 skills at ~5k tokens of startup cost:
+The 3-tier loading model keeps 100 skills at ~5k tokens of startup cost:
 
 1. **Tier 1 (always):** `name` + `description` for every installed skill (~100 tokens each)
    in the skill catalog (stable region of the window, §4.2).

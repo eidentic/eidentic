@@ -4,17 +4,17 @@
 
 Multi-agent is powerful and overhyped in equal measure (Gartner: >40% of agentic projects
 canceled by 2027; multi-agent burns ~15× chat tokens). Eidentic's design encodes the
-*settled* lesson from the June-2025 Cognition-vs-Anthropic debate rather than picking a side.
+*settled* lesson from the June-2025 industry debate rather than picking a side.
 
 ## 8.1 The settled rule
 
-Despite opposing blog titles, both camps agree on the actual decision rule:
+Despite opposing blog titles, both camps converge on the same decision rule:
 
 | Task shape | Architecture | Why |
 |------------|-------------|-----|
 | Deep, sequential, state-dependent (coding, writing) | **Single agent** | context continuity; no coordination overhead |
-| Broad, parallelizable, read-heavy (research, analysis) | **Multi-agent** | each sub-agent gets a clean context window (Anthropic: +90% on breadth-first research) |
-| Write-heavy parallelization (co-editing shared artifact) | **Avoid multi-agent** | conflicting writes; Cognition's "Flappy Bird" failure |
+| Broad, parallelizable, read-heavy (research, analysis) | **Multi-agent** | each sub-agent gets a clean context window (+90% on breadth-first research tasks) |
+| Write-heavy parallelization (co-editing shared artifact) | **Avoid multi-agent** | conflicting writes on shared state |
 
 Eidentic makes single-agent the default and multi-agent an explicit, justified choice — with
 the cost surfaced. We never market "more agents = better."
@@ -107,7 +107,7 @@ const supervisor = new Agent({
 
 ## 8.9 Traceability
 
-- Cognition "Flappy Bird" isolation failure → §8.3 explicit, minimal handoff.
+- Context isolation failure (shared state bleed) → §8.3 explicit, minimal handoff.
 - Multi-agent cost blowups → §8.6 shared-tree budget + per-child cost spans.
 - Shared-memory data loss → §8.4 CAS shared blocks.
 - Coordination-primitive deprecation → §8.7 one stable composable primitive.

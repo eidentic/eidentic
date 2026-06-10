@@ -10,7 +10,7 @@
 ## 4.1 Responsibilities
 
 The Context Engine owns *which tokens are in the window at every step, in what order, and
-why*. It implements Anthropic's five operations:
+why*. It implements five operations:
 
 1. **Select** — choose the high-signal tokens (memory blocks, recalled facts, recent events).
 2. **Compress** — summarize without losing signal (compaction, tool-result condensing).
@@ -44,8 +44,8 @@ content first, volatile content last:
 
 ## 4.3 KV-cache optimization (the 10× cost lever)
 
-Manus's 10× cost reduction was *entirely* KV-cache optimization (cached input ≈ $0.30/MTok
-vs $3/MTok uncached on Sonnet). Rules enforced by the engine:
+Manus's 10× cost reduction was *entirely* KV-cache optimization (cached tokens cost ~10%
+of uncached on typical models). Rules enforced by the engine:
 
 - **Append-only context.** Never mutate prior segments; any edit invalidates the cache from
   that point. New information is appended.
@@ -63,7 +63,7 @@ vs $3/MTok uncached on Sonnet). Rules enforced by the engine:
   Static per-agent tool filtering is set at session start (so it's part of the cached prefix);
   a mid-session permission-mode change (e.g. → `plan`) intentionally invalidates the cache
   from that point — accepted and rare. Sub-agents get their own fresh window/cache (§8.3).
-- **Explicit cache breakpoints** where the provider supports them (Anthropic), placed at
+- **Explicit cache breakpoints** where the provider supports prompt caching, placed at
   the stable/semi-stable boundary.
 
 The engine exposes **KV-cache hit rate** as a primary metric in traces (§11) — Manus's
@@ -71,8 +71,8 @@ single most important production number.
 
 ## 4.4 Compaction (progressive, threshold-triggered)
 
-Context rot is measurable: GPT-4o accuracy can fall 98% → 64% purely from how context is
-filled; degradation accelerates past ~100k tokens regardless of advertised window. The
+Context rot is measurable: LLM accuracy can fall from 98% → 64% purely from how context is
+filled; degradation accelerates past ~100k tokens regardless of advertised window size. The
 engine compacts at **configurable pre-rot thresholds** (default budgets below the model's
 true limit), in five progressive stages — cheapest first, only escalating as needed:
 
@@ -85,9 +85,9 @@ true limit), in five progressive stages — cheapest first, only escalating as n
 5. **Episodic extraction** — compress a conversation span into learned facts handed to the
    memory engine (§6), then drop the raw span.
 
-The **`onPreCompact` hook** fires first so the user can archive the full transcript before
-anything is dropped (a Claude-SDK pattern). Compaction is recorded as an event so the
-session log remains a faithful audit trail.
+The **`onPreCompact` hook** fires first so the caller can archive the full transcript before
+anything is dropped. Compaction is recorded as an event so the session log remains a
+faithful audit trail.
 
 **Anti-pattern avoided:** the observational-memory "death spiral" of feeding base64
 image data into a summarizer. The engine type-checks payloads; binary/oversized tool

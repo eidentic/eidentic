@@ -2,7 +2,7 @@
 "@eidentic/server": patch
 ---
 
-Fix three server-level resource leaks identified in the internal audit.
+Fix three server-level resource leaks.
 
 - **Rate-limiter memory leak** (`InMemoryTokenBucketLimiter`): the `buckets` Map
   previously grew one entry per unique tenant key forever. An opportunistic sweep
