@@ -20,9 +20,8 @@ export { recallAtK, factRecall, normalizeText, normalizedIncludes } from "./reca
 // Bundled synthetic dataset (retrieval)
 export { syntheticDataset } from "./datasets/synthetic.js";
 
-// Legacy retrieval-style LoCoMo loader (maps to BenchDataset)
-export { loadLongMemEval } from "./loaders.js";
-// Legacy re-export preserved for backward compat (the old wrong-schema loadLoCoMo)
+// Legacy retrieval-style loaders (map to BenchDataset — old wrong schemas, preserved for backward compat)
+export { loadLongMemEval as loadLongMemEvalLegacy } from "./loaders.js";
 export { loadLoCoMo as loadLoCoMoLegacy } from "./loaders.js";
 
 // LoCoMo real-schema loader + fair-run harness
@@ -47,6 +46,28 @@ export type {
   LocomoCategory,
 } from "./locomo-types.js";
 export { resolveEvidence } from "./locomo-types.js";
+
+// LongMemEval real-schema loader + fair-run harness
+export { loadLongMemEval, parseLmeDateTimeString, LONGMEMEVAL_SOURCE } from "./lme-loader.js";
+export { runLongMemEvalBench } from "./lme-run.js";
+export { renderLongMemEvalReportMarkdown } from "./lme-render.js";
+export type {
+  LmeReport,
+  LmeQuestionResult,
+  LmeBenchOptions,
+  LmeTypeStats,
+  LmeTokenSummary,
+  LmeMemoryFactory,
+} from "./lme-run.js";
+export type { LmePriceTable } from "./lme-render.js";
+export type {
+  LmeDataset,
+  LmeQuestion,
+  LmeSession,
+  LmeTurn,
+  LmeBaseType,
+  LmeQuestionType,
+} from "./lme-types.js";
 
 // Write-quality benchmark
 export { runWriteQualityBench, CONTRADICTION_FIXTURES, JUNK_STREAM_FIXTURES } from "./write-quality.js";

@@ -1,0 +1,114 @@
+[
+  {
+    "question_id": "lme-fixture-001",
+    "question_type": "single-session-user",
+    "question": "What instrument does the user play?",
+    "answer": "guitar",
+    "question_date": "2023/05/22 (Mon) 14:00",
+    "haystack_dates": [
+      "2023/05/10 (Wed) 09:00",
+      "2023/05/15 (Mon) 11:30",
+      "2023/05/20 (Sat) 16:00"
+    ],
+    "haystack_session_ids": ["session_001_a", "session_001_b", "session_001_c"],
+    "haystack_sessions": [
+      [
+        { "role": "user", "content": "I have been playing guitar since I was twelve years old." },
+        { "role": "assistant", "content": "That is wonderful! Guitar is a great instrument to learn young." }
+      ],
+      [
+        { "role": "user", "content": "Can you recommend some guitar practice exercises?" },
+        { "role": "assistant", "content": "Sure! Scales, chord transitions, and fingerpicking patterns are all essential." }
+      ],
+      [
+        { "role": "user", "content": "I performed at a small local venue last weekend." },
+        { "role": "assistant", "content": "Congratulations on your performance! How did it go?" }
+      ]
+    ],
+    "answer_session_ids": ["session_001_a"]
+  },
+  {
+    "question_id": "lme-fixture-002",
+    "question_type": "temporal-reasoning",
+    "question": "How many days passed between the user mentioning their guitar practice and their local venue performance?",
+    "answer": "10 days",
+    "question_date": "2023/05/22 (Mon) 14:00",
+    "haystack_dates": [
+      "2023/05/10 (Wed) 09:00",
+      "2023/05/15 (Mon) 11:30",
+      "2023/05/20 (Sat) 16:00"
+    ],
+    "haystack_session_ids": ["session_001_a", "session_001_b", "session_001_c"],
+    "haystack_sessions": [
+      [
+        { "role": "user", "content": "I have been playing guitar since I was twelve years old." },
+        { "role": "assistant", "content": "That is wonderful! Guitar is a great instrument to learn young." }
+      ],
+      [
+        { "role": "user", "content": "Can you recommend some guitar practice exercises?" },
+        { "role": "assistant", "content": "Sure! Scales, chord transitions, and fingerpicking patterns are all essential." }
+      ],
+      [
+        { "role": "user", "content": "I performed at a small local venue last weekend." },
+        { "role": "assistant", "content": "Congratulations on your performance! How did it go?" }
+      ]
+    ],
+    "answer_session_ids": ["session_001_b", "session_001_c"]
+  },
+  {
+    "question_id": "lme-fixture-003",
+    "question_type": "knowledge-update_abs",
+    "question": "What is the user's current favourite genre of music?",
+    "answer": "No information available",
+    "question_date": "2023/05/22 (Mon) 14:00",
+    "haystack_dates": [
+      "2023/05/10 (Wed) 09:00",
+      "2023/05/15 (Mon) 11:30",
+      "2023/05/20 (Sat) 16:00"
+    ],
+    "haystack_session_ids": ["session_001_a", "session_001_b", "session_001_c"],
+    "haystack_sessions": [
+      [
+        { "role": "user", "content": "I have been playing guitar since I was twelve years old." },
+        { "role": "assistant", "content": "That is wonderful! Guitar is a great instrument to learn young." }
+      ],
+      [
+        { "role": "user", "content": "Can you recommend some guitar practice exercises?" },
+        { "role": "assistant", "content": "Sure! Scales, chord transitions, and fingerpicking patterns are all essential." }
+      ],
+      [
+        { "role": "user", "content": "I performed at a small local venue last weekend." },
+        { "role": "assistant", "content": "Congratulations on your performance! How did it go?" }
+      ]
+    ],
+    "answer_session_ids": []
+  },
+  {
+    "question_id": "lme-fixture-004",
+    "question_type": "multi-session",
+    "question": "What did the user first discuss about guitar, and where did they later perform?",
+    "answer": "The user discussed playing guitar since age twelve, and later performed at a small local venue.",
+    "question_date": "2023/05/22 (Mon) 14:00",
+    "haystack_dates": [
+      "2023/05/10 (Wed) 09:00",
+      "2023/05/15 (Mon) 11:30",
+      "2023/05/20 (Sat) 16:00"
+    ],
+    "haystack_session_ids": ["session_001_a", "session_001_b", "session_001_c"],
+    "haystack_sessions": [
+      [
+        { "role": "user", "content": "I have been playing guitar since I was twelve years old." },
+        { "role": "assistant", "content": "That is wonderful! Guitar is a great instrument to learn young." }
+      ],
+      [
+        { "role": "user", "content": "Can you recommend some guitar practice exercises?" },
+        { "role": "assistant", "content": "Sure! Scales, chord transitions, and fingerpicking patterns are all essential." }
+      ],
+      [
+        { "role": "user", "content": "I performed at a small local venue last weekend." },
+        { "role": "assistant", "content": "Congratulations on your performance! How did it go?" }
+      ]
+    ],
+    "answer_session_ids": ["session_001_a", "session_001_c"]
+  }
+]

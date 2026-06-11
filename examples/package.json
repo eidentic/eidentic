@@ -32,6 +32,7 @@
     "hello:bench": "tsx hello-bench.ts",
     "hello:bench-write": "tsx hello-bench-write.ts",
     "bench:locomo": "tsx bench-locomo.ts",
+    "bench:longmemeval": "tsx bench-longmemeval.ts",
     "hello:skill-evolution": "tsx hello-skill-evolution.ts",
     "hello:studio": "tsx hello-studio.ts",
     "hello:mcp-server": "tsx hello-mcp-server.ts",
