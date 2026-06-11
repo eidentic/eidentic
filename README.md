@@ -11,6 +11,8 @@ Runs on **Node, Bun, Deno, and the edge**.
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/eidentic/eidentic)
 
+[![Featured on Product Hunt](https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1169568&theme=dark)](https://www.producthunt.com/products/eidentic?utm_source=badge-featured&utm_medium=badge)
+
 > **Status: 0.x — APIs stabilizing toward v1; see [STABILITY](STABILITY.md).**
 > We'd rather over-disclose gaps than oversell — see the
 > [benchmarks](docs/BENCHMARKS.md) for honest, reproducible numbers.
