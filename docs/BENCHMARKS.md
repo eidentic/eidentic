@@ -141,15 +141,34 @@ across differently-judged tables elsewhere. Raw per-question outputs contain dat
 (CC BY-NC) and are not redistributed. Reproduce with the command in
 [`packages/bench/BASELINES.md`](../packages/bench/BASELINES.md).
 
-### LongMemEval — pending
+### LongMemEval answer accuracy — first official run (June 2026)
 
-The LongMemEval runner ships in `@eidentic/bench`; we will publish numbers when we can run it
-with the same standards (full disclosure, full-context baseline, reproducible script). We'd
-rather show a blank than a number we can't stand behind.
+[LongMemEval](https://github.com/xiaowu0162/LongMemEval) (Wu et al., MIT-licensed) stresses
+long-term chat memory: 500 questions over haystacks averaging ~50 sessions (~115k tokens) each.
+Both rows below come from the same script (`examples/bench-longmemeval.ts`), same models, same
+seed — the full 500-question `longmemeval_s` split, no sampling, zero errors.
+
+| Mode | Single-session<br>(user) | Single-session<br>(asst.) | Single-session<br>(pref.) | Multi-session | Temporal | Knowledge<br>update | **Overall** | Tokens/query |
+|---|---|---|---|---|---|---|---|---|
+| Full-context baseline | 67.1% | 73.2% | 3.3% | 27.8% | 20.3% | 66.7% | **41.0%** | 99,435 |
+| Eidentic memory | **84.3%** | **92.9%** | **26.7%** | **42.1%** | **34.6%** | **70.5%** | **55.2%** | **2,550** |
+
+On LongMemEval, retrieval-based memory **beats the full-context baseline on every one of the six
+question types** and by **+14.2 points overall (55.2% vs 41.0%)** — at **~39× fewer tokens per
+query** (2,550 vs 99,435). The reason is structural: when ~115k tokens of haystack are stuffed
+into the context window, the relevant evidence gets lost among ~50 sessions of distractors;
+targeted retrieval surfaces it. This is the opposite trade-off from a small-haystack benchmark
+like LoCoMo, where full-context is competitive — the larger the history, the more memory wins.
+
+**Configuration (full disclosure):** answer + judge model `gpt-4o-mini`, embedder
+`text-embedding-3-small` (with retry/backoff for the provider's 1M-TPM limit — ~50M embedding
+tokens total), topK 10, seed 42, dataset HuggingFace `xiaowu0162/longmemeval` @ `2ec2a557`. Same
+gpt-4o-mini-judge leniency caveat as LoCoMo applies; numbers are comparable within this table.
+Raw per-question outputs contain dataset content and are not redistributed. Reproduce with the
+command in [`packages/bench/BASELINES.md`](../packages/bench/BASELINES.md).
 
 ## What we deliberately do **not** claim yet
 
-- No LongMemEval answer-accuracy numbers yet (see above).
 - No agent-task benchmark (τ-bench / SWE-bench) — Eidentic is a framework, not a tuned agent;
   a reference-agent run is future work.
 - All numbers are single-machine, point-in-time (June 2026). They measure framework overhead,

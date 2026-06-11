@@ -218,13 +218,22 @@ Average haystack: ~50 sessions per question, ~494 turns per question.
 
 Dataset source: HuggingFace `xiaowu0162/longmemeval`, snapshot `2ec2a557f339b6c0369619b1ed5793734cc87533`.
 
-#### Published results
+#### Published results (first official run, 2026-06-11)
 
-_Pending official run. Run the pilot command above and record results here._
+Full `longmemeval_s` split (500 questions), gpt-4o-mini answer+judge, text-embedding-3-small
+(maxRetries 10 for the 1M-TPM provider limit), topK 10, seed 42, dataset @ `2ec2a557`. Zero
+per-question errors in either run.
 
-| System / Mode | Single-session (user) | Single-session (asst.) | Single-session (pref.) | Multi-session | Temporal reasoning | Knowledge update | Overall accuracy | Abstention accuracy | Answer model | Judge model | topK | n-Q | Seed |
+| System / Mode | Single-session (user) | Single-session (asst.) | Single-session (pref.) | Multi-session | Temporal reasoning | Knowledge update | Overall accuracy | Tokens/query | Answer model | Judge model | topK | n-Q | Seed |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| _(pending)_ | — | — | — | — | — | — | — | — | — | — | — | — | — |
+| full-context | 67.1% (47/70) | 73.2% (41/56) | 3.3% (1/30) | 27.8% (37/133) | 20.3% (27/133) | 66.7% (52/78) | **41.0%** (205/500) | 99,435 | gpt-4o-mini | gpt-4o-mini | — | 500 | 42 |
+| memory | 84.3% (59/70) | 92.9% (52/56) | 26.7% (8/30) | 42.1% (56/133) | 34.6% (46/133) | 70.5% (55/78) | **55.2%** (276/500) | 2,550 | gpt-4o-mini | gpt-4o-mini | 10 | 500 | 42 |
+
+Memory beats full-context on **all six** question types and by **+14.2pp overall** at **~39× fewer
+tokens/query**. The standard `_s` split has no abstention variants. Interpretation + caveats:
+`docs/BENCHMARKS.md`. Note: against the provider's 1M-TPM embedding limit, high concurrency causes
+rate-limit failures — run memory mode at low concurrency (1–3) or rely on the embedder's retry
+budget; the run above completed clean after a low-concurrency retry pass over rate-limited items.
 
 ---
 

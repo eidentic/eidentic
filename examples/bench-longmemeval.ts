@@ -126,6 +126,9 @@ judgeModel.modelId =
 
 const localEmbedder = await AIEmbedder.create(
   openai.embedding("text-embedding-3-small"),
+  // High retry budget: LongMemEval haystacks embed ~50M tokens total; against a
+  // 1M-TPM provider limit the AI SDK backs off and retries on 429s rather than failing.
+  { maxRetries: 10 },
 );
 
 function memoryFactory(): Memory {
