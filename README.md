@@ -277,6 +277,15 @@ A few defaults are safe for local development but need attention before going pu
 - [Stability policy](STABILITY.md) — versioning contract, stability tiers, conformance-suite promise
 - [Full docs](https://docs.eidentic.dev) — guides, API reference, and examples ([source](https://github.com/eidentic/docs))
 
+### Use the docs with your AI tools
+
+Point your AI coding agent at Eidentic and it answers from the real, current docs:
+
+- **MCP (Cursor, Claude Code, Windsurf):** add the auto-generated server — `https://gitmcp.io/eidentic/eidentic`
+- **Context7:** write `use context7` in your prompt; the docs are indexed there.
+- **llms.txt:** [docs.eidentic.dev/llms.txt](https://docs.eidentic.dev/llms.txt) (index) · [llms-full.txt](https://docs.eidentic.dev/llms-full.txt) (full text)
+- Every docs page has **Copy page / Open in ChatGPT / Claude / Perplexity** actions.
+
 ## License
 
 Apache-2.0.
