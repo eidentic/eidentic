@@ -6,22 +6,31 @@ on:
       - "v*"
 
 permissions:
-  id-token: write
   contents: read
+  id-token: write # required for npm Trusted Publishing (OIDC) + provenance
 
 jobs:
   publish:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
+      # pnpm 10.4.1 (from packageManager) — works with OIDC; pnpm 11.0.0–11.1.2 had an OIDC regression
+      - uses: pnpm/action-setup@v4
+
+      # Node 24 ships npm 11.x — OIDC trusted publishing requires npm >= 11.5.1
       - uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: 24
+          cache: pnpm
           registry-url: https://registry.npmjs.org
+          # NOTE: do NOT set node-auth-token — its presence disables the OIDC flow
 
-      - run: npm ci
-      - run: npm run build
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
 
-      - run: npm publish --provenance --access public
+      # Recursive publish of every non-private workspace package.
+      # Provenance is attached automatically via OIDC; --no-git-checks is required in CI.
+      - run: pnpm -r publish --access public --no-git-checks
