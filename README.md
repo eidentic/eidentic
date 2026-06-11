@@ -177,6 +177,22 @@ cd my-agent && eidentic dev   # loads eidentic.config.ts and serves it
 Every feature ships a runnable `examples/hello-*.ts` (most use a mock model, so no API key
 needed). See the [**feature tour**](docs/TESTING.md) for the full list and how to run each one.
 
+## Benchmarks
+
+On two public long-term-memory benchmarks, Eidentic's retrieval-based memory **beats the
+full-context baseline** — at a fraction of the tokens. Same script, same models, same seed, full
+splits, full-context baseline included. Honest caveats and the per-category gaps where memory
+loses are published alongside.
+
+| Benchmark | Full-context | Eidentic memory | Tokens/query |
+|---|---|---|---|
+| [LongMemEval](docs/BENCHMARKS.md) (500 q, ~115k-token haystacks) | 41.0% | **55.2%** (+14.2pp, wins all 6 types) | **2.5k vs 99k** (~39× less) |
+| [LoCoMo](docs/BENCHMARKS.md) (1,540 q) | 61.6% | 53.8% (wins temporal +12pp, adversarial +16pp) | **0.9k vs 19k** (~21× less) |
+
+The larger the history, the more memory wins: stuffing ~115k tokens into the context window
+buries the evidence among distractors, while targeted retrieval surfaces it. Methodology,
+configuration, and reproduction commands: [**docs/BENCHMARKS.md**](docs/BENCHMARKS.md).
+
 ## Quickstart (from this repo)
 
 ```bash
