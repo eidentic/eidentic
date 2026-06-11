@@ -9,6 +9,7 @@ Runs on **Node, Bun, Deno, and the edge**.
 [![npm](https://img.shields.io/npm/v/eidentic)](https://www.npmjs.com/package/eidentic)
 ![Runtimes](https://img.shields.io/badge/runtimes-Node%20·%20Bun%20·%20Deno%20·%20Edge-blue)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/eidentic/eidentic)
 
 > **Status: 0.x — APIs stabilizing toward v1; see [STABILITY](STABILITY.md).**
 > We'd rather over-disclose gaps than oversell — see the
