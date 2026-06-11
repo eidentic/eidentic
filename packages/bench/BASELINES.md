@@ -125,15 +125,108 @@ These numbers are produced by the deterministic harness (InMemoryStore + InMemor
 
 The real datasets are not bundled (large + license-bound). To run benchmarks against them:
 
-### LongMemEval
+### LongMemEval — fair-run harness
 
-1. Request access: https://github.com/xiaowu0162/LongMemEval
-2. Download the JSON dataset file.
-3. Run:
-   ```bash
-   EIDENTIC_BENCH_LONGMEMEVAL=/path/to/longmemeval.json \
-     npx vitest run packages/bench/test/bench.live.test.ts
-   ```
+The LongMemEval harness (`runLongMemEvalBench`) is a full end-to-end benchmark with an LLM judge.
+Source paper: Wu et al., "LongMemEval: Benchmarking Chat Assistants on Long-Term Interactive Memory"
+
+#### License
+
+MIT — results are publishable; **raw data must not be committed to this repository**.
+Cite the dataset as: Wu et al., LongMemEval. https://github.com/xiaowu0162/LongMemEval
+
+#### Manual download steps
+
+```bash
+# Install the HuggingFace Hub Python library
+pip install huggingface_hub
+
+# Inspect available files (the dataset uses extension-free filenames)
+python3 -c "
+from huggingface_hub import list_repo_tree
+for f in list_repo_tree('xiaowu0162/longmemeval', repo_type='dataset'):
+    print(f.path, getattr(f, 'size', ''))
+"
+
+# Download the standard _s split (~278 MiB, ~500 questions)
+python3 -c "
+from huggingface_hub import hf_hub_download
+path = hf_hub_download(repo_id='xiaowu0162/longmemeval',
+    filename='longmemeval_s', repo_type='dataset')
+print('Downloaded to:', path)
+"
+
+# Copy to the gitignored data/ directory
+mkdir -p data
+cp <path_printed_above> data/longmemeval_s.json
+```
+
+HuggingFace repo: `xiaowu0162/longmemeval`
+Snapshot SHA used when this harness was written: `2ec2a557f339b6c0369619b1ed5793734cc87533`
+
+#### Run the gated integration test (verifies dataset stats)
+
+```bash
+EIDENTIC_TEST_LME=1 npx vitest run packages/bench/test/lme.test.ts
+```
+
+#### Run a pilot with real models
+
+```bash
+OPENAI_API_KEY=... pnpm --filter eidentic-examples bench:longmemeval -- \
+  --mode full-context --questions 50 --out lme-report.json --md lme-report.md
+
+# Memory mode (requires embedder)
+OPENAI_API_KEY=... pnpm --filter eidentic-examples bench:longmemeval -- \
+  --mode memory --questions 50 --topk 10 --out lme-memory-report.json
+```
+
+#### Fair-run rules (non-negotiable)
+
+These rules are baked into the harness:
+
+1. **Per-question memory scope.** Each question has its own haystack (~50 sessions average).
+   A fresh Memory instance is created per question; no cross-question contamination.
+2. **Dual-granularity ingest.** Per-turn entries carry the session date in text (temporally
+   anchored). An additional session-level chunk preserves multi-turn context.
+3. **Current date in prompt.** `question_date` is passed to the answer prompt so temporal
+   questions can reason about recency.
+4. **topK ≤ 10 in memory mode.** Larger topK trivialises retrieval quality.
+5. **Full-context baseline is mandatory** alongside any memory-mode result.
+   Haystacks exceeding the context cap (default 480k chars) truncate oldest sessions first;
+   truncation is recorded per-question in the report.
+6. **Strict judge.** Correct only when model answer contains the gold answer's specific
+   information. Vague/topical-only = wrong. Equivalent date expressions for the same
+   date/duration = correct (temporal-reasoning type).
+7. **Abstention accuracy reported separately.** Not folded into overall accuracy.
+8. **Data license.** MIT — raw JSON must not be committed; only results are publishable.
+
+#### Dataset stats (actual counts from longmemeval_s.json — 500 questions total)
+
+| Question type            | Count | Notes                                          |
+|--------------------------|-------|------------------------------------------------|
+| single-session-user      | 70    | Fact stated by the user in one session         |
+| single-session-assistant | 56    | Fact stated by the assistant in one session    |
+| single-session-preference| 30    | User preference expressed in one session       |
+| multi-session            | 133   | Evidence spans multiple sessions               |
+| temporal-reasoning       | 133   | Requires reasoning about time/dates            |
+| knowledge-update         | 78    | Fact was updated in a later session            |
+| **Total**                | **500** |                                              |
+
+No abstention (`*_abs`) variants in the standard `longmemeval_s.json` split.
+Average haystack: ~50 sessions per question, ~494 turns per question.
+
+Dataset source: HuggingFace `xiaowu0162/longmemeval`, snapshot `2ec2a557f339b6c0369619b1ed5793734cc87533`.
+
+#### Published results
+
+_Pending official run. Run the pilot command above and record results here._
+
+| System / Mode | Single-session (user) | Single-session (asst.) | Single-session (pref.) | Multi-session | Temporal reasoning | Knowledge update | Overall accuracy | Abstention accuracy | Answer model | Judge model | topK | n-Q | Seed |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| _(pending)_ | — | — | — | — | — | — | — | — | — | — | — | — | — |
+
+---
 
 ### LoCoMo — fair-run harness
 
