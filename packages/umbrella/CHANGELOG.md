@@ -1,5 +1,20 @@
 # eidentic
 
+## 0.1.1
+
+### Patch Changes
+
+- Republish all packages via GitHub Actions trusted publishing (OIDC). This is the
+  first release with provenance attestation — every package now carries a verifiable
+  build provenance statement linking it to its source commit and workflow.
+- Updated dependencies
+  - @eidentic/cli@0.1.1
+  - @eidentic/core@0.1.1
+  - @eidentic/memory@0.1.1
+  - @eidentic/model@0.1.1
+  - @eidentic/sqlite@0.1.1
+  - @eidentic/types@0.1.1
+
 ## 0.1.0
 
 ### Minor Changes
