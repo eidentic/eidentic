@@ -1,5 +1,13 @@
 # @eidentic/types
 
+## 0.1.1
+
+### Patch Changes
+
+- Republish all packages via GitHub Actions trusted publishing (OIDC). This is the
+  first release with provenance attestation — every package now carries a verifiable
+  build provenance statement linking it to its source commit and workflow.
+
 ## 0.1.0
 
 ### Minor Changes
