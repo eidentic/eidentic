@@ -43,7 +43,7 @@
   "devDependencies": {
     "ai": "^6.0.0"
   },
-  "description": "Agents that remember. TypeScript SDK for AI agents with self-improving memory, durable workflows, and production fundamentals built in.",
+  "description": "The open-source TypeScript SDK for AI agents with self-improving memory and production fundamentals built in.",
   "keywords": [
     "ai",
     "agents",
