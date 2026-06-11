@@ -1,0 +1,16 @@
+{
+  "$schema": "https://context7.com/schema/context7.json",
+  "projectTitle": "Eidentic",
+  "description": "The open-source TypeScript SDK for AI agents with self-improving memory and production fundamentals built in.",
+  "excludeFolders": ["node_modules", ".changeset", ".github", "examples", "scripts"],
+  "excludeFiles": ["CHANGELOG.md", "AUDIT-2026-06-10.md", "LAUNCH-KIT.md"],
+  "rules": [
+    "Eidentic is a TypeScript SDK published on npm as `eidentic` (umbrella) and `@eidentic/*` (32 packages). Always use the TypeScript API and ESM imports.",
+    "Construct an agent with `new Agent({ id, model, store })`; wrap any AI SDK provider via `new AIModel(provider(modelId))`.",
+    "Use `@eidentic/libsql` (LibsqlStore, pure-JS, no native addon) for Next.js/serverless; `@eidentic/sqlite` (SqliteStore) for Node/Bun.",
+    "`agent.query(input, { sessionId })` returns an async generator of StreamEvents; text deltas are `ev.type === 'stream.delta'` carrying `ev.delta.text`; the terminal event is `ev.type === 'result'`.",
+    "Memory: `new Memory({ store, vector, embedder, graph })` — four tiers (lexical+vector recall, self-editing blocks, temporal knowledge graph, consolidation).",
+    "Next.js: `export const POST = withEidentic(agent)` from `@eidentic/nextjs`. React: `useEidenticStream(endpoint)` from `@eidentic/react`. Server: `createServer({ agents })` + `serveNode(app, { port })` from `@eidentic/server`.",
+    "The umbrella package `eidentic` re-exports core+types+model+sqlite+memory; install adapters (`@eidentic/server`, `@eidentic/workflow`, etc.) separately as needed."
+  ]
+}
