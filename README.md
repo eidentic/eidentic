@@ -1,9 +1,9 @@
 # Eidentic
 
-**Agents that remember.** Eidentic is an open-source TypeScript SDK for building AI
-agents with self-improving memory — and the production fundamentals (durable execution,
-cost ceilings, multi-tenant isolation, GDPR erasure, sandboxed tools) built in, not
-bolted on. Apache-2.0, no enterprise gating. Runs on **Node, Bun, Deno, and the edge**.
+**Eidentic is the open-source TypeScript SDK for AI agents with self-improving memory and
+production fundamentals built in.** Durable execution, enforced cost ceilings, multi-tenant
+isolation, GDPR erasure, and sandboxed tools — not bolted on. Apache-2.0, no enterprise gating.
+Runs on **Node, Bun, Deno, and the edge**.
 
 [![CI](https://github.com/eidentic/eidentic/actions/workflows/ci.yml/badge.svg)](https://github.com/eidentic/eidentic/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/eidentic)](https://www.npmjs.com/package/eidentic)
