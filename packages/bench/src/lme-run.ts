@@ -289,6 +289,14 @@ function renderHaystackCapped(
 
 // ── Ingest helpers ─────────────────────────────────────────────────────────────
 
+// Cap any single embedding input below the typical hosted-embedder context
+// window (text-embedding-3-small = 8192 tokens). ~4 chars/token → 30000 chars
+// ≈ 7500 tokens, a safe margin. Over-long turns/sessions are truncated, not dropped.
+const EMBED_CHAR_CAP = 20_000;
+function capForEmbedding(text: string): string {
+  return text.length <= EMBED_CHAR_CAP ? text : text.slice(0, EMBED_CHAR_CAP);
+}
+
 async function ingestQuestionIntoMemory(
   question: LmeQuestion,
   memory: Memory,
@@ -308,7 +316,7 @@ async function ingestQuestionIntoMemory(
       events.push({
         id: `${question.id}:sess${i}:turn${t}`,
         scope,
-        text: `[${sessLabel}] [${roleLabel}]: ${turn.content}`,
+        text: capForEmbedding(`[${sessLabel}] [${roleLabel}]: ${turn.content}`),
         metadata: {
           sessionId: sess.id,
           sessionIndex: i,
@@ -327,7 +335,7 @@ async function ingestQuestionIntoMemory(
     events.push({
       id: `${question.id}:sess${i}:chunk`,
       scope,
-      text: sessionText,
+      text: capForEmbedding(sessionText),
       metadata: {
         sessionId: sess.id,
         sessionIndex: i,
