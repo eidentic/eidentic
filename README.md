@@ -193,6 +193,15 @@ The larger the history, the more memory wins: stuffing ~115k tokens into the con
 buries the evidence among distractors, while targeted retrieval surfaces it. Methodology,
 configuration, and reproduction commands: [**docs/BENCHMARKS.md**](docs/BENCHMARKS.md).
 
+## Example apps
+
+Clonable, runnable starter apps — a memory-backed chat agent in each framework. Add an API key
+and `npm run dev`:
+
+- [**example-nextjs**](https://github.com/eidentic/example-nextjs) — Next.js App Router + `withEidentic` handler + `useChat`
+- [**example-react**](https://github.com/eidentic/example-react) — Vite + React hooks (`useEidenticStream`) against an Eidentic server
+- [**example-express**](https://github.com/eidentic/example-express) — drop the `Agent` into a plain Express route and stream over SSE
+
 ## Quickstart (from this repo)
 
 ```bash
