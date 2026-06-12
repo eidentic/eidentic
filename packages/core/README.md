@@ -24,10 +24,10 @@ import { anthropic } from "@ai-sdk/anthropic";
 import { z } from "zod";
 
 const weatherTool = createTool({
-  name: "get_weather",
+  id: "get_weather",
   description: "Returns the current weather for a city.",
-  parameters: z.object({ city: z.string() }),
-  execute: async ({ city }) => ({ temp: 22, condition: "sunny", city }),
+  inputSchema: z.object({ city: z.string() }),
+  execute: async ({ input }) => ({ temp: 22, condition: "sunny", city: input.city }),
 });
 
 const agent = new Agent({
