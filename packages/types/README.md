@@ -26,11 +26,22 @@ import type {
   StoredEvent,
 } from "@eidentic/types";
 
-// Implement a custom store adapter
+// Implement a custom store adapter (bring-your-own-store)
 class MyStore implements StorePort {
-  async putBlock(scope: Scope, block: MemoryBlock): Promise<void> { /* ... */ }
-  // ... implement remaining methods
+  async upsertBlock(
+    scope: Scope,
+    block: { label: string; value: string },
+    expectVersion?: number, // optimistic-concurrency check; throw StoreConflictError on mismatch
+  ): Promise<MemoryBlock> {
+    /* ... */
+  }
+  // ...implement the remaining StorePort methods (sessions, events, memory index, eraseScope, ...)
 }
+
+// Validate any adapter against the canonical conformance suite:
+//   import { storeConformanceCases } from "@eidentic/types/testing";
+//   for (const c of storeConformanceCases(() => new MyStore())) it(c.name, c.run);
+// See @eidentic/convex for a complete worked example (StorePort + GraphPort + VectorPort over Convex).
 
 // Write a custom auth adapter
 class MyAuth implements AuthPort {

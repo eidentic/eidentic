@@ -174,7 +174,7 @@ cd my-agent && eidentic dev   # loads eidentic.config.ts and serves it
 | **Multi-agent** | `spawn_agent` delegation with context isolation + shared budget · MCP host & server · A2A protocol |
 | **Execution** | Durable checkpoint/resume (exactly-once) · human-in-the-loop suspension · cooperative cancellation · context compaction |
 | **Security & ops** | Deny-by-default permissions · sandboxed exec (E2B) · secret isolation · cost governor · rate-limit + quotas · OTel · GDPR erasure |
-| **Stores** | SQLite · libSQL/Turso · Postgres · vector: LanceDB / pgvector / Qdrant / Pinecone · local + hosted embedders |
+| **Stores** | SQLite · libSQL/Turso · Postgres · Convex · vector: LanceDB / pgvector / Qdrant / Pinecone · local + hosted embedders |
 | **DX** | `npx eidentic init` scaffold · Studio dev dashboard (`npx eidentic studio`) · eval harness · memory benchmark suite |
 
 Every feature ships a runnable `examples/hello-*.ts` (most use a mock model, so no API key
@@ -246,6 +246,8 @@ and avoids pulling in native addons you don't need.
 | `@eidentic/studio` | Dev dashboard — sessions, memory, skills, workflows |
 | `@eidentic/workflow` | Multi-step workflow orchestration |
 | `@eidentic/libsql` | libSQL/Turso store (pure-JS, works under Next.js/Bun/edge) |
+| `@eidentic/postgres` | Postgres store (pgvector-ready) |
+| `@eidentic/convex` | Convex store (`StorePort` + `GraphPort` + `VectorPort`) — reactive, TypeScript-native backend |
 | `@eidentic/mcp` | MCP host + server |
 | … | pgvector, lancedb, qdrant, pinecone, e2b, langfuse, eval, bench |
 
