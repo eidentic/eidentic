@@ -77,6 +77,47 @@ describe("withEidentic — ai-sdk-ui protocol (default)", () => {
     expect(res.status).toBe(200);
   });
 
+  it("accepts a useChat 'messages' array (v5+ parts) — extracts the newest user message", async () => {
+    const { agent, store } = makeAgent([textResponse("Hi!")]);
+    const handler = withEidentic(agent);
+    const req = makeRequest({
+      sessionId: "uc-1",
+      messages: [
+        { role: "user", parts: [{ type: "text", text: "first turn" }] },
+        { role: "assistant", parts: [{ type: "text", text: "ok" }] },
+        { role: "user", parts: [{ type: "text", text: "what did I say?" }] },
+      ],
+    });
+
+    const res = await handler(req);
+    expect(res.status).toBe(200);
+    await res.text();
+
+    // The newest user message ("what did I say?") — not the assistant turn or an older message —
+    // must be what reached the agent (persisted as the user event for this session).
+    const events = await store.readEvents("uc-1");
+    const userEvent = events.find((e) => e.kind === "user");
+    expect(JSON.stringify(userEvent?.payload)).toContain("what did I say?");
+  });
+
+  it("accepts a useChat 'messages' array with the legacy 'content' string shape", async () => {
+    const { agent } = makeAgent([textResponse("Hi!")]);
+    const handler = withEidentic(agent);
+    const req = makeRequest({ messages: [{ role: "user", content: "legacy content message" }] });
+
+    const res = await handler(req);
+    expect(res.status).toBe(200);
+  });
+
+  it("rejects a 'messages' array whose newest user message has no text (400)", async () => {
+    const { agent } = makeAgent([textResponse("Hi!")]);
+    const handler = withEidentic(agent);
+    const req = makeRequest({ messages: [{ role: "user", parts: [{ type: "file" }] }] });
+
+    const res = await handler(req);
+    expect(res.status).toBe(400);
+  });
+
   it("streams events containing AI SDK UI finish chunk", async () => {
     const { agent } = makeAgent([textResponse("Done!")]);
     const handler = withEidentic(agent);
