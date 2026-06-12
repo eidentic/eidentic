@@ -29,7 +29,7 @@ const agent = new Agent({
 });
 
 for await (const ev of agent.query("Hello", { sessionId: "s-1" })) {
-  if (ev.kind === "text_delta") process.stdout.write(ev.delta);
+  if (ev.type === "stream.delta") process.stdout.write(ev.delta.text);
 }
 ```
 

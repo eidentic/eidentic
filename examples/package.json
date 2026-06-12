@@ -72,6 +72,16 @@
     "zod": "^4.0.0"
   },
   "devDependencies": {
+    "@eidentic/browser": "workspace:*",
+    "@eidentic/convex": "workspace:*",
+    "@eidentic/e2b": "workspace:*",
+    "@eidentic/langfuse": "workspace:*",
+    "@eidentic/nextjs": "workspace:*",
+    "@eidentic/pinecone": "workspace:*",
+    "@eidentic/prompts": "workspace:*",
+    "@eidentic/qdrant": "workspace:*",
+    "@eidentic/rag": "workspace:*",
+    "@eidentic/react": "workspace:*",
     "tsx": "^4.19.0"
   }
 }

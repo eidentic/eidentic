@@ -25,13 +25,13 @@ import { Memory } from "@eidentic/memory";
 // Ingest a URL directly into agent memory (source first, options second)
 await ingestDocument(
   { url: "https://docs.example.com/guide" },
-  { memory, scope: { userId: "u-1" } },
+  { memory, scope: { kind: "user", agentId: "my-agent", userId: "u-1" } },
 );
 
 // Or ingest pre-loaded typed content — type is "markdown" | "html" | "pdf"
 await ingestDocument(
   { type: "markdown", data: "# My Doc\n\nHello.", source: "my-doc" },
-  { memory, scope: { userId: "u-1" } },
+  { memory, scope: { kind: "user", agentId: "my-agent", userId: "u-1" } },
 );
 
 // Or load and chunk manually (loadMarkdown takes the content string)

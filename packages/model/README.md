@@ -30,7 +30,7 @@ console.log(defaultPrices["claude-sonnet-4-5"]); // { inputUsd: ..., outputUsd: 
 
 // Ollama for local inference
 import { createOllamaModel } from "@eidentic/model";
-const local = createOllamaModel("llama3.2", { baseUrl: "http://localhost:11434" });
+const local = createOllamaModel("llama3.2", { baseURL: "http://localhost:11434" });
 ```
 
 ## Links

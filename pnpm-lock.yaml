@@ -108,6 +108,36 @@ importers:
         specifier: ^4.0.0
         version: 4.4.3
     devDependencies:
+      '@eidentic/browser':
+        specifier: workspace:*
+        version: link:../packages/browser
+      '@eidentic/convex':
+        specifier: workspace:*
+        version: link:../packages/convex
+      '@eidentic/e2b':
+        specifier: workspace:*
+        version: link:../packages/e2b
+      '@eidentic/langfuse':
+        specifier: workspace:*
+        version: link:../packages/langfuse
+      '@eidentic/nextjs':
+        specifier: workspace:*
+        version: link:../packages/nextjs
+      '@eidentic/pinecone':
+        specifier: workspace:*
+        version: link:../packages/pinecone
+      '@eidentic/prompts':
+        specifier: workspace:*
+        version: link:../packages/prompts
+      '@eidentic/qdrant':
+        specifier: workspace:*
+        version: link:../packages/qdrant
+      '@eidentic/rag':
+        specifier: workspace:*
+        version: link:../packages/rag
+      '@eidentic/react':
+        specifier: workspace:*
+        version: link:../packages/react
       tsx:
         specifier: ^4.19.0
         version: 4.22.4

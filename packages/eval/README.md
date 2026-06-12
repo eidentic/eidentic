@@ -19,20 +19,19 @@ import { trajectory } from "@eidentic/eval";
 // Create a runner that drives the agent and captures events
 const runner = createRunner(agent, store);
 
-const report = await evaluate({
+const report = await evaluate(
   runner,
-  dataset: myDataset,
-  scorers: [trajectory({ requiredTools: ["get_weather"] })],
-  samples: 1,
-});
+  myDataset,
+  { scorers: [trajectory.toolCorrectness], samples: 1 },
+);
 
 // CI gate — throws EvalThresholdError if pass rate < threshold
-assertPassRate(report, { "trajectory": 0.8 });
+assertPassRate(report, 0.8);
 
 // Promote a production session's stored events to an eval case
 import type { StoredEvent } from "@eidentic/types";
-const events: StoredEvent[] = await store.getEvents({ sessionId: "prod-session-42" });
-const evalCase = promoteTraceToEvalCase(events, { tags: ["bug-repro"] });
+const events: StoredEvent[] = await store.readEvents("prod-session-42");
+const evalCase = promoteTraceToEvalCase(events, { tags: { type: "bug-repro" } });
 ```
 
 ## Links

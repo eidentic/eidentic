@@ -20,15 +20,15 @@ import { LanceDBVectorStore } from "@eidentic/lancedb";
 import { AIEmbedder } from "@eidentic/model";
 import { openai } from "@ai-sdk/openai";
 
-const store = await SqliteStore.create("./eidentic.sqlite");
-const embedder = new AIEmbedder(openai.embedding("text-embedding-3-small"), { dim: 1536 });
+const store = new SqliteStore("./eidentic.sqlite");
+const embedder = await AIEmbedder.create(openai.embedding("text-embedding-3-small"));
 const vector = await LanceDBVectorStore.open("./lancedb", "memory_vectors", 1536);
 
 const memory = new Memory({ store, vector, embedder });
 
 // Retrieve relevant snippets for a session
-const scope = { userId: "u-1", sessionId: "s-1" };
-const result = await memory.retrieve({ query: "budget decisions", scope, topK: 5 });
+const scope = { kind: "user" as const, agentId: "my-agent", userId: "u-1" };
+const result = await memory.retrieve({ text: "budget decisions", scope, topK: 5 });
 console.log(result.snippets);
 ```
 

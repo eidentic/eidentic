@@ -29,3 +29,6 @@ data/
 
 # local benchmark outputs (contain non-redistributable dataset content)
 bench-results/
+
+# README example type-check scratch dir (scripts/check-readme-examples.mjs)
+examples/.readme-typecheck/
