@@ -84,13 +84,18 @@ export interface QdrantLike {
     opts: {
       filter?: { must: Array<QdrantFieldCondition> };
       limit?: number;
-      offset?: string | number | null;
+      offset?: string | number | Record<string, unknown> | null;
       with_payload?: boolean;
       with_vector?: boolean;
     },
   ): Promise<{
-    points: Array<{ id: string | number; vector?: number[] | Record<string, number[]> | null; payload?: Record<string, unknown> | null }>;
-    next_page_offset?: string | number | null;
+    // `vector` and `next_page_offset` are intentionally SUPERTYPES of what the real
+    // `@qdrant/js-client-rest` returns (plain vector, multi-vector `number[][]`, or a named-vector
+    // record; and an offset that can be a point-id record) so a concrete `QdrantClient` is
+    // structurally assignable to `QdrantLike`. `list` only reads the plain single-vector form (the
+    // only shape this adapter ever writes) and treats the cursor opaquely.
+    points: Array<{ id: string | number; vector?: number[] | number[][] | Record<string, unknown> | null; payload?: Record<string, unknown> | null }>;
+    next_page_offset?: string | number | Record<string, unknown> | null;
   }>;
 }
 
@@ -205,7 +210,7 @@ export class QdrantVectorStore implements VectorPort {
     }
     const filter: { must: QdrantFieldCondition[] } = { must: [{ key: "scope_key", match: { value: scopeKey } }] };
     const entries: VectorEntry[] = [];
-    let offset: string | number | null | undefined = undefined;
+    let offset: string | number | Record<string, unknown> | null | undefined = undefined;
     do {
       const page = await this.client.scroll(this.collection, {
         filter,
@@ -216,9 +221,10 @@ export class QdrantVectorStore implements VectorPort {
       });
       for (const p of page.points) {
         const payload = p.payload ?? {};
-        // with_vector returns a plain array for single-vector collections; named-vector configs return
-        // a record. This adapter only ever creates single-vector collections, so expect the array form.
-        const vector = Array.isArray(p.vector) ? (p.vector as number[]) : [];
+        // with_vector returns a plain `number[]` for single-vector collections (the only kind this
+        // adapter creates); multi-vector (`number[][]`) and named-vector (record) shapes are ignored.
+        const vector =
+          Array.isArray(p.vector) && typeof p.vector[0] === "number" ? (p.vector as number[]) : [];
         entries.push({
           id: String(payload["orig_id"] ?? p.id),
           scopeKey: String(payload["scope_key"] ?? scopeKey),
