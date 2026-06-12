@@ -21,8 +21,8 @@ import { openai } from "@ai-sdk/openai";
 // Wrap a provider model
 const model = new AIModel(anthropic("claude-sonnet-4-5"));
 
-// Wrap an embedding model
-const embedder = new AIEmbedder(openai.embedding("text-embedding-3-small"), { dim: 1536 });
+// Wrap an embedding model (async factory — the dimension is probed automatically)
+const embedder = await AIEmbedder.create(openai.embedding("text-embedding-3-small"));
 
 // Check current prices
 import { defaultPrices, pricesUpdatedAt } from "@eidentic/model";

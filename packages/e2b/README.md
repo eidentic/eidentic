@@ -18,7 +18,7 @@ import { E2BSandbox } from "@eidentic/e2b";
 import { Sandbox } from "@e2b/code-interpreter";
 import { Agent } from "eidentic";
 
-const sandbox = E2BSandbox.create({
+const sandbox = await E2BSandbox.create({
   client: Sandbox,
   apiKey: process.env.E2B_API_KEY,
   defaultTimeoutMs: 10_000,
