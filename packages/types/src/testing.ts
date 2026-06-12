@@ -976,6 +976,23 @@ export function vectorConformanceCases(makeStore: () => Promise<VectorPort> | Ve
       assert(hits[0]?.id === "exact", "exact match is top hit");
       assert((hits[0]?.score ?? 0) > 0.99, `score should be > 0.99 (cosine similarity of identical vectors ≈ 1.0), got ${hits[0]?.score}`);
     }) },
+    { name: "vector: list returns all entries for scope with full payload, scope-isolated (optional capability)", run: withStore(async (s) => {
+      // `list` is optional on VectorPort (§6.5 archival dedup / reindex). Adapters without an
+      // efficient scan omit it; skip the case for those so the suite stays universal.
+      if (typeof s.list !== "function") return;
+      await s.upsert(e("l1", k, "L1", [1, 0, 0, 0]));
+      await s.upsert(e("l2", k, "L2", [0, 1, 0, 0]));
+      await s.upsert(e("l3", other, "L3", [0, 0, 1, 0]));
+      const entries = await s.list(k);
+      const ids = entries.map((x) => x.id).sort();
+      assertEqual(ids, ["l1", "l2"], "list returns exactly the entries in scope k (other scope excluded)");
+      const l1 = entries.find((x) => x.id === "l1");
+      assert(l1 !== undefined, "l1 present in list result");
+      assertEqual(l1!.text, "L1", "list preserves text");
+      assertEqual(l1!.scopeKey, k, "list preserves scopeKey");
+      assert(Array.isArray(l1!.vector) && l1!.vector.length === 4, `list preserves the 4-dim vector, got ${JSON.stringify(l1!.vector)}`);
+      assert(Math.abs((l1!.vector[0] ?? 0) - 1) < 1e-6, `l1 vector[0] should round-trip to ~1, got ${l1!.vector[0]}`);
+    }) },
     { name: "vector: eraseScope removes all entries for scope, other scope untouched (§15)", run: withStore(async (s) => {
       await s.upsert(e("da1", k, "A1", [1, 0, 0, 0]));
       await s.upsert(e("da2", k, "A2", [0, 1, 0, 0]));

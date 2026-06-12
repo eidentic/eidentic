@@ -5,6 +5,7 @@ export interface PineconeMatch {
   id: string;
   score?: number;
   metadata?: Record<string, unknown>;
+  values?: number[];
 }
 
 /** Structural subset of `@pinecone-database/pinecone`'s Index that the adapter uses (verified against 7.2). */
@@ -15,6 +16,7 @@ export interface PineconeIndexLike {
     topK: number;
     filter?: Record<string, unknown>;
     includeMetadata?: boolean;
+    includeValues?: boolean;
   }): Promise<{ matches: PineconeMatch[] }>;
   fetch(opts: { ids: string[] }): Promise<{ records: Record<string, { metadata?: Record<string, unknown> }> }>;
   deleteOne(opts: { id: string }): Promise<void>;
@@ -128,5 +130,31 @@ export class PineconeVectorStore implements VectorPort {
       deleted += 1;
     }
     return { deleted };
+  }
+
+  /**
+   * Enumerate every entry in `scopeKey` (used by `Memory.deduplicateArchival` / `reindexEmbeddings`).
+   *
+   * Pinecone has no "scan all" primitive on the serverless path, so we use a high-topK zero-vector
+   * query with the `scope_key` filter and `includeValues` to recover the stored embeddings — the same
+   * enumeration strategy `eraseScope` uses. Bounded to 10 000 records (Pinecone's query topK ceiling),
+   * which matches `Memory.deduplicateArchival`'s own O(n²) safety cap; larger scopes should be
+   * partitioned (e.g. one namespace per tenant) before dedup/reindex.
+   */
+  async list(scopeKey: string): Promise<VectorEntry[]> {
+    const dummyVector = new Array(this.dim).fill(0) as number[];
+    const { matches } = await this.index.query({
+      vector: dummyVector,
+      topK: 10_000,
+      filter: { scope_key: { $eq: scopeKey } },
+      includeMetadata: true,
+      includeValues: true,
+    });
+    return matches.map((m) => ({
+      id: m.id,
+      scopeKey: String((m.metadata ?? {})["scope_key"] ?? scopeKey),
+      text: String((m.metadata ?? {})["text"] ?? ""),
+      vector: m.values ?? [],
+    }));
   }
 }
