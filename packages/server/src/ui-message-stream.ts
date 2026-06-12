@@ -92,6 +92,10 @@ export function toUIMessageStream(
       // see a non-delta assistant event (or `result`).
       let textBlockOpen = false;
       let textBlockId = "text-0";
+      // Whether the CURRENT assistant turn already emitted its text via `stream.delta` tokens.
+      // When it did, the turn-final `assistant` event's text blocks are the SAME text accumulated —
+      // re-emitting them would duplicate the message in the UI — so we skip them. Reset per turn.
+      let streamedText = false;
 
       function openTextBlock(id: string) {
         if (!textBlockOpen) {
@@ -114,6 +118,7 @@ export function toUIMessageStream(
           // Streaming token delta — primary hot path for live text streaming
           // ------------------------------------------------------------------
           case "stream.delta": {
+            streamedText = true;
             openTextBlock("streaming-text");
             writer.write({ type: "text-delta", delta: ev.delta.text, id: textBlockId });
             break;
@@ -129,12 +134,15 @@ export function toUIMessageStream(
 
             for (const block of ev.content) {
               if (block.type === "text") {
-                // For non-streaming text (e.g. when the model adapter
-                // provides the full turn at once), emit start+delta+end.
-                const id = `text-${crypto.randomUUID()}`;
-                writer.write({ type: "text-start", id });
-                writer.write({ type: "text-delta", delta: block.text, id });
-                writer.write({ type: "text-end", id });
+                // Only emit the text here when the turn was NOT streamed token-by-token. When
+                // `streamedText` is set, this text was already delivered via `stream.delta` above,
+                // so re-emitting it as a second block would duplicate the assistant message.
+                if (!streamedText) {
+                  const id = `text-${crypto.randomUUID()}`;
+                  writer.write({ type: "text-start", id });
+                  writer.write({ type: "text-delta", delta: block.text, id });
+                  writer.write({ type: "text-end", id });
+                }
               } else if (block.type === "tool_use") {
                 // Tool call available — let the UI show the tool invocation.
                 writer.write({
@@ -147,6 +155,8 @@ export function toUIMessageStream(
               // "thinking" blocks are intentionally ignored — they are
               // internal reasoning and not meaningful to a chat UI.
             }
+            // Turn complete — the next assistant turn streams (or not) independently.
+            streamedText = false;
             break;
           }
 
