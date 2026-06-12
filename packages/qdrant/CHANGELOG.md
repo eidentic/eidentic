@@ -1,5 +1,31 @@
 # @eidentic/qdrant
 
+## 0.2.0
+
+### Minor Changes
+
+- de07ecc: Implement `VectorPort.list` on the Qdrant, pgvector, LanceDB, and Pinecone adapters.
+
+  Previously these production vector backends did not expose `list`, so
+  `Memory.deduplicateArchival` and `Memory.reindexEmbeddings` silently no-op'd on them
+  (both treat a missing `list` as "no efficient scan available"). Each adapter now
+  enumerates a scope's entries — reconstructing the full `VectorEntry` including the stored
+  embedding — so archival dedup and embedding reindex work on real deployments:
+
+  - **pgvector** / **LanceDB**: scoped sequential scan (`SELECT … WHERE scope_key` / filtered query).
+  - **Qdrant**: paginated `scroll` with `with_vector` (requires the standard `@qdrant/js-client-rest` client).
+  - **Pinecone**: high-topK filtered query with `includeValues` (bounded to 10 000, matching the dedup safety cap).
+
+  `vectorConformanceCases` (`@eidentic/types/testing`) gains an optional `list` case that
+  verifies scope isolation and full payload/vector round-trip for any adapter implementing it.
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies [7c454e5]
+- Updated dependencies [de07ecc]
+  - @eidentic/types@0.2.0
+
 ## 0.1.1
 
 ### Patch Changes

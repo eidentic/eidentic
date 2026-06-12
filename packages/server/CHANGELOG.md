@@ -1,5 +1,30 @@
 # @eidentic/server
 
+## 0.2.0
+
+### Minor Changes
+
+- Wire the audit bus into the HTTP server: a new optional `onAuditEvent` sink on `createServer`
+  options emits the server-owned `AuditEvent` variants for security-relevant rejections at the edge:
+
+  - `auth.failure` — every `401 Unauthorized` (carries the `route`).
+  - `ratelimit.exceeded` — every `429`, from both the pre-auth limiter and the post-auth limiter
+    (carries `principalId` + `route`).
+  - `quota.exceeded` — every `402` on `/query` and `/runs` (carries `scopeKey` + `reason`).
+
+  This is the same `AuditEvent` stream `Agent` emits (`tool.call` / `permission.denied` / `erasure`),
+  so wiring one sink to both the Agent and the server yields a single unified audit log. The sink is
+  best-effort: a throwing sink is swallowed and never affects request handling.
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies [7c454e5]
+- Updated dependencies [de07ecc]
+  - @eidentic/core@0.2.0
+  - @eidentic/types@0.2.0
+  - @eidentic/workflow@0.1.2
+
 ## 0.1.1
 
 ### Patch Changes
@@ -29,7 +54,7 @@
   export async function POST(req: Request) {
     const { messages, sessionId } = await req.json();
     return toUIMessageStreamResponse(
-      myAgent.query(messages.at(-1)?.content ?? "", { sessionId })
+      myAgent.query(messages.at(-1)?.content ?? "", { sessionId }),
     );
   }
   ```

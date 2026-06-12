@@ -1,5 +1,15 @@
 # @eidentic/a2a
 
+## 0.1.2
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies [7c454e5]
+- Updated dependencies [de07ecc]
+  - @eidentic/core@0.2.0
+  - @eidentic/types@0.2.0
+
 ## 0.1.1
 
 ### Patch Changes

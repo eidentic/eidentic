@@ -1,5 +1,21 @@
 # @eidentic/bench
 
+## 0.1.2
+
+### Patch Changes
+
+- bb46351: `AIEmbedder.create` accepts a `maxRetries` option, forwarded to the AI SDK's `embed`/`embedMany`.
+  The AI SDK retries transient failures (including provider rate limits / 429s) with exponential
+  backoff and honours `retry-after`, so high-volume ingest against a rate-limited embedding provider
+  no longer fails after the default 2 attempts. The LongMemEval harness caps over-long embedding
+  inputs below the typical 8192-token embedder window.
+- Updated dependencies
+- Updated dependencies [7c454e5]
+- Updated dependencies [de07ecc]
+  - @eidentic/types@0.2.0
+  - @eidentic/eval@0.1.2
+  - @eidentic/memory@0.1.2
+
 ## 0.1.1
 
 ### Patch Changes
