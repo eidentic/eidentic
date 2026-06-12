@@ -3,7 +3,6 @@
   "version": "0.2.0",
   "type": "module",
   "license": "Apache-2.0",
-  "private": true,
   "publishConfig": {
     "access": "public"
   },
@@ -50,9 +49,9 @@
     "convex": ">=1.17"
   },
   "devDependencies": {
+    "@edge-runtime/vm": "^5.0.0",
     "convex": "^1.41.0",
-    "convex-test": "^0.0.53",
-    "@edge-runtime/vm": "^5.0.0"
+    "convex-test": "^0.0.53"
   },
   "description": "Convex store adapter for Eidentic — durable agent memory, session state, and a temporal knowledge graph backed by Convex (StorePort + GraphPort + VectorPort).",
   "keywords": [
