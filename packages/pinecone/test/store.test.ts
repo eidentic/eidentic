@@ -14,13 +14,13 @@ class FakeIndex implements PineconeIndexLike {
   async upsert(opts: { records: Array<{ id: string; values: number[]; metadata?: Record<string, unknown> }> }) {
     for (const r of opts.records) this.rows.set(r.id, { values: r.values, metadata: r.metadata ?? {} });
   }
-  async query(opts: { vector: number[]; topK: number; filter?: Record<string, unknown> }): Promise<{ matches: PineconeMatch[] }> {
+  async query(opts: { vector: number[]; topK: number; filter?: Record<string, unknown>; includeValues?: boolean }): Promise<{ matches: PineconeMatch[] }> {
     // Pinecone metadata filter for equality: { scope_key: { $eq: "..." } } OR { scope_key: "..." }.
     const f = opts.filter?.["scope_key"] as { $eq?: string } | string | undefined;
     const want = typeof f === "string" ? f : f?.$eq;
     const matches = [...this.rows.entries()]
       .filter(([, v]) => want === undefined || v.metadata["scope_key"] === want)
-      .map(([id, v]) => ({ id, score: cosine(opts.vector, v.values), metadata: v.metadata }))
+      .map(([id, v]) => ({ id, score: cosine(opts.vector, v.values), metadata: v.metadata, ...(opts.includeValues ? { values: v.values } : {}) }))
       .sort((a, b) => b.score - a.score)
       .slice(0, opts.topK);
     return { matches };

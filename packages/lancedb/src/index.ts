@@ -100,4 +100,23 @@ export class LanceDBVectorStore implements VectorPort {
     await this.tbl.delete(`scope_key = ${sqlLiteral(scopeKey)}`);
     return { deleted: before };
   }
+
+  /**
+   * Enumerate every entry in `scopeKey` (used by `Memory.deduplicateArchival` / `reindexEmbeddings`).
+   * Plain filtered scan via the query builder (no vector search) — exact and scope-isolated.
+   */
+  async list(scopeKey: string): Promise<VectorEntry[]> {
+    const rows = (await this.tbl
+      .query()
+      .where(`scope_key = ${sqlLiteral(scopeKey)}`)
+      .select(["id", "scope_key", "text", "vector"])
+      .toArray()) as Array<{ id: string; scope_key: string; text: string; vector: ArrayLike<number> }>;
+    // The `vector` column comes back as an Arrow-backed list (Float32Array-like); normalise to number[].
+    return rows.map((r) => ({
+      id: r.id,
+      scopeKey: r.scope_key,
+      text: r.text,
+      vector: Array.from(r.vector, Number),
+    }));
+  }
 }

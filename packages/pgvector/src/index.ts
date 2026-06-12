@@ -10,6 +10,19 @@ function vectorLiteral(v: number[]): string {
   return `[${v.join(",")}]`;
 }
 
+/**
+ * Parse a stored `embedding` column back into a `number[]`. pgvector returns the value as a
+ * `"[1,2,3]"` string under most drivers (node-postgres, pglite); some return a real array. Handle both.
+ */
+function parseVectorLiteral(v: unknown): number[] {
+  if (Array.isArray(v)) return v.map(Number);
+  if (typeof v === "string") {
+    const inner = v.replace(/^\[|\]$/g, "").trim();
+    return inner.length === 0 ? [] : inner.split(",").map((s) => Number(s));
+  }
+  return [];
+}
+
 /** Validate a table identifier (we interpolate it into DDL/DML; pgvector has no bind for identifiers). */
 function safeIdent(name: string): string {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
@@ -106,5 +119,25 @@ export class PgVectorStore implements VectorPort {
       [scopeKey],
     );
     return { deleted: rows.length };
+  }
+
+  /**
+   * Enumerate every entry in `scopeKey` (used by `Memory.deduplicateArchival` / `reindexEmbeddings`).
+   * A scoped sequential scan — exact and correct; the `scope_key` btree index keeps it efficient.
+   */
+  async list(scopeKey: string): Promise<VectorEntry[]> {
+    const { rows } = await this.client.query(
+      `SELECT id, scope_key, text, embedding FROM ${this.table} WHERE scope_key = $1`,
+      [scopeKey],
+    );
+    return rows.map((r) => {
+      const row = r as Record<string, unknown>;
+      return {
+        id: String(row["id"]),
+        scopeKey: String(row["scope_key"]),
+        text: String(row["text"]),
+        vector: parseVectorLiteral(row["embedding"]),
+      };
+    });
   }
 }

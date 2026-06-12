@@ -74,6 +74,24 @@ export interface QdrantLike {
     collection: string,
     opts: { filter: { must: Array<QdrantFieldCondition> }; exact: boolean },
   ): Promise<{ count: number }>;
+  /**
+   * Page through points matching a filter. Required by `list` (archival dedup / reindex). Maps to
+   * `QdrantClient.scroll(collection, { filter, limit, offset, with_payload, with_vector })`; the
+   * response carries the next page cursor in `next_page_offset` (null/undefined when exhausted).
+   */
+  scroll?(
+    collection: string,
+    opts: {
+      filter?: { must: Array<QdrantFieldCondition> };
+      limit?: number;
+      offset?: string | number | null;
+      with_payload?: boolean;
+      with_vector?: boolean;
+    },
+  ): Promise<{
+    points: Array<{ id: string | number; vector?: number[] | Record<string, number[]> | null; payload?: Record<string, unknown> | null }>;
+    next_page_offset?: string | number | null;
+  }>;
 }
 
 export class QdrantVectorStore implements VectorPort {
@@ -171,5 +189,45 @@ export class QdrantVectorStore implements VectorPort {
       await this.client.delete(this.collection, { filter, wait: true });
     }
     return { deleted: count };
+  }
+
+  /**
+   * Enumerate every entry in `scopeKey` (used by `Memory.deduplicateArchival` / `reindexEmbeddings`).
+   * Pages through `scroll` with `with_vector` so the full `VectorEntry` (including the embedding) is
+   * reconstructed. The original string id is read back from the `orig_id` payload, mirroring `search`.
+   *
+   * Requires the client to support `scroll` (every real `@qdrant/js-client-rest` client does). If the
+   * injected client omits it, we throw a descriptive error rather than silently returning nothing.
+   */
+  async list(scopeKey: string): Promise<VectorEntry[]> {
+    if (typeof this.client.scroll !== "function") {
+      throw new Error("QdrantVectorStore.list requires the client to support scroll() (present on @qdrant/js-client-rest)");
+    }
+    const filter: { must: QdrantFieldCondition[] } = { must: [{ key: "scope_key", match: { value: scopeKey } }] };
+    const entries: VectorEntry[] = [];
+    let offset: string | number | null | undefined = undefined;
+    do {
+      const page = await this.client.scroll(this.collection, {
+        filter,
+        limit: 256,
+        offset: offset ?? null,
+        with_payload: true,
+        with_vector: true,
+      });
+      for (const p of page.points) {
+        const payload = p.payload ?? {};
+        // with_vector returns a plain array for single-vector collections; named-vector configs return
+        // a record. This adapter only ever creates single-vector collections, so expect the array form.
+        const vector = Array.isArray(p.vector) ? (p.vector as number[]) : [];
+        entries.push({
+          id: String(payload["orig_id"] ?? p.id),
+          scopeKey: String(payload["scope_key"] ?? scopeKey),
+          text: String(payload["text"] ?? ""),
+          vector,
+        });
+      }
+      offset = page.next_page_offset ?? null;
+    } while (offset !== null && offset !== undefined);
+    return entries;
   }
 }

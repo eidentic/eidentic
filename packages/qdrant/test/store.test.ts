@@ -73,6 +73,36 @@ class FakeQdrant implements QdrantLike {
       .sort((a, b) => b.score - a.score)
       .slice(0, opts.limit);
   }
+  async scroll(
+    collection: string,
+    opts: {
+      filter?: { must: Array<QdrantFieldCondition> };
+      limit?: number;
+      offset?: string | number | null;
+      with_payload?: boolean;
+      with_vector?: boolean;
+    },
+  ): Promise<{
+    points: Array<{ id: string | number; vector?: number[] | null; payload?: Record<string, unknown> | null }>;
+    next_page_offset?: string | number | null;
+  }> {
+    const col = this.collections.get(collection)!;
+    const want = opts.filter?.must.find((m) => m.key === "scope_key")?.match.value;
+    const all = [...col.entries()].filter(([, v]) => want === undefined || v.payload["scope_key"] === want);
+    // Faithful pagination: order by id, start after `offset`, return up to `limit` and a cursor.
+    all.sort(([a], [b]) => String(a).localeCompare(String(b)));
+    const start = opts.offset != null ? all.findIndex(([id]) => String(id) === String(opts.offset)) + 1 : 0;
+    const limit = opts.limit ?? all.length;
+    const slice = all.slice(start, start + limit);
+    const points = slice.map(([id, v]) => ({
+      id,
+      vector: opts.with_vector ? v.vector : null,
+      payload: opts.with_payload ? v.payload : null,
+    }));
+    const last = slice[slice.length - 1];
+    const next = start + limit < all.length && last ? last[0] : null;
+    return { points, next_page_offset: next };
+  }
   async delete(
     collection: string,
     opts:
