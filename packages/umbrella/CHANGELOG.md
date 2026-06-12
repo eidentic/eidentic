@@ -1,5 +1,11 @@
 # eidentic
 
+## 0.1.7
+
+### Patch Changes
+
+- @eidentic/cli@0.1.6
+
 ## 0.1.6
 
 ### Patch Changes

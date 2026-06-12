@@ -1,6 +1,6 @@
 {
   "name": "@eidentic/cli",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "type": "module",
   "license": "Apache-2.0",
   "description": "The eidentic command-line tool — dev server, project init, component scaffolding, and health diagnostics.",
