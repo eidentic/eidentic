@@ -4,6 +4,8 @@ import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import type { Agent } from "@eidentic/core";
 import type {
+  AuditEvent,
+  AuditSink,
   AuthPort,
   AuthPrincipal,
   AuthRequest,
@@ -318,6 +320,14 @@ export interface ServerOptions {
    * `principal.apiKey ?? principal.userId ?? principal.orgId ?? "anonymous"`.
    */
   quotaKey?: (principal: AuthPrincipal, agentId: string) => string;
+  /**
+   * Best-effort audit sink (§10.4/§15). When set, the server emits structured `AuditEvent`s for
+   * security-relevant rejections at the HTTP edge: `auth.failure` (401), `quota.exceeded` (402),
+   * and `ratelimit.exceeded` (429, both pre-auth and post-auth). This is the same `AuditEvent`
+   * stream `Agent` emits (`tool.call` / `permission.denied` / `erasure`) — wire the same sink to
+   * both for one unified audit log. A throwing sink is swallowed, never affecting a request.
+   */
+  onAuditEvent?: AuditSink;
   /**
    * Maximum number of characters allowed in the `input` field of /query and /runs
    * requests, and in a string `decision` on /resume requests.
@@ -943,6 +953,23 @@ export function createServer(opts: ServerOptions): EidenticServer {
     ? opts.getClientKey
     : (c: import("hono").Context) => defaultGetClientKey(c, trustProxy);
 
+  // Best-effort audit sink (§10.4/§15). Emits security-relevant rejections at the HTTP edge.
+  // A throwing sink is swallowed so it can never break a request — same contract as the Agent.
+  const onAuditEvent = opts.onAuditEvent;
+  const emitAudit = (event: AuditEvent): void => {
+    if (!onAuditEvent) return;
+    try {
+      onAuditEvent(event);
+    } catch {
+      /* best-effort audit: a throwing sink must never affect request handling */
+    }
+  };
+  /** Emit an `auth.failure` audit event and return the standard 401 response. */
+  const unauthorized = (c: import("hono").Context): Response => {
+    emitAudit({ type: "auth.failure", at: Date.now(), route: c.req.path });
+    return c.json({ error: "Unauthorized" }, 401);
+  };
+
   // Graceful drain: when `_draining` is true, new /v1 requests get 503.
   let _draining = false;
 
@@ -989,6 +1016,7 @@ export function createServer(opts: ServerOptions): EidenticServer {
         if (retryAfterSec !== undefined) {
           c.header("Retry-After", String(retryAfterSec));
         }
+        emitAudit({ type: "ratelimit.exceeded", at: Date.now(), principalId: clientKey, route: c.req.path });
         return c.json({ error: "rate_limited", retryAfterMs: rl.retryAfterMs }, 429);
       }
       await next();
@@ -1102,6 +1130,7 @@ export function createServer(opts: ServerOptions): EidenticServer {
       streamQuotaKey = getQuotaKey(principal, agentId);
       const qc = await quota.check(streamQuotaKey);
       if (!qc.ok) {
+        emitAudit({ type: "quota.exceeded", at: Date.now(), scopeKey: streamQuotaKey, ...(qc.reason !== undefined ? { reason: qc.reason } : {}) });
         return c.json({ error: "quota_exceeded", reason: qc.reason, usage: qc.usage }, 402);
       }
       if (qc.warn) c.header("X-Eidentic-Quota-Warning", "soft-limit");
@@ -1258,6 +1287,7 @@ export function createServer(opts: ServerOptions): EidenticServer {
     if (!rl.ok) {
       const retryAfterSec = rl.retryAfterMs !== undefined ? Math.ceil(rl.retryAfterMs / 1000) : undefined;
       if (retryAfterSec !== undefined) c.header("Retry-After", String(retryAfterSec));
+      emitAudit({ type: "ratelimit.exceeded", at: Date.now(), principalId: rlKey, route: c.req.path });
       return c.json({ error: "rate_limited", retryAfterMs: rl.retryAfterMs }, 429);
     }
     return null;
@@ -1270,7 +1300,7 @@ export function createServer(opts: ServerOptions): EidenticServer {
     async (c) => {
       // Auth
       const principal = await runAuth(auth, c.req.raw);
-      if (principal === null) return c.json({ error: "Unauthorized" }, 401);
+      if (principal === null) return unauthorized(c);
 
       const agentId = c.req.param("agentId");
 
@@ -1346,7 +1376,7 @@ export function createServer(opts: ServerOptions): EidenticServer {
     bodyLimit({ maxSize: BODY_LIMIT }),
     async (c) => {
       const principal = await runAuth(auth, c.req.raw);
-      if (principal === null) return c.json({ error: "Unauthorized" }, 401);
+      if (principal === null) return unauthorized(c);
 
       const agentId = c.req.param("agentId");
 
@@ -1433,7 +1463,7 @@ export function createServer(opts: ServerOptions): EidenticServer {
     async (c) => {
       // Auth
       const principal = await runAuth(auth, c.req.raw);
-      if (principal === null) return c.json({ error: "Unauthorized" }, 401);
+      if (principal === null) return unauthorized(c);
 
       const agentId = c.req.param("agentId");
 
@@ -1511,6 +1541,7 @@ export function createServer(opts: ServerOptions): EidenticServer {
         asyncQuotaKey = getQuotaKey(principal, agentId);
         const qc = await quota.check(asyncQuotaKey);
         if (!qc.ok) {
+          emitAudit({ type: "quota.exceeded", at: Date.now(), scopeKey: asyncQuotaKey, ...(qc.reason !== undefined ? { reason: qc.reason } : {}) });
           return c.json({ error: "quota_exceeded", reason: qc.reason, usage: qc.usage }, 402);
         }
         asyncQuotaReservation = (qc as { reservation?: QuotaReservation }).reservation;
@@ -1623,7 +1654,7 @@ export function createServer(opts: ServerOptions): EidenticServer {
     // Auth
     const principal = await runAuth(auth, c.req.raw);
     if (principal === null) {
-      return c.json({ error: "Unauthorized" }, 401);
+      return unauthorized(c);
     }
 
     const agentId = c.req.param("agentId");
@@ -1673,7 +1704,7 @@ export function createServer(opts: ServerOptions): EidenticServer {
     r.get("/v1/agents/:agentId/sessions/:sessionId/events", async (c) => {
       const principal = await runAuth(auth, c.req.raw);
       if (principal === null) {
-        return c.json({ error: "Unauthorized" }, 401);
+        return unauthorized(c);
       }
 
       const agentId = c.req.param("agentId");
@@ -1734,7 +1765,7 @@ export function createServer(opts: ServerOptions): EidenticServer {
   r.get("/v1/workflows", async (c) => {
     const principal = await runAuth(auth, c.req.raw);
     if (principal === null) {
-      return c.json({ error: "Unauthorized" }, 401);
+      return unauthorized(c);
     }
 
     const summaries: WorkflowRunSummary[] = workflowRuns
@@ -1755,7 +1786,7 @@ export function createServer(opts: ServerOptions): EidenticServer {
   r.get("/v1/workflows/:id", async (c) => {
     const principal = await runAuth(auth, c.req.raw);
     if (principal === null) {
-      return c.json({ error: "Unauthorized" }, 401);
+      return unauthorized(c);
     }
 
     const id = c.req.param("id");
