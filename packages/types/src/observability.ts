@@ -72,3 +72,67 @@ export interface Span {
 export interface TracerPort {
   startSpan(name: string, attributes?: Record<string, string | number | boolean>): Span;
 }
+
+// --- Audit bus (§10.4 / §15) — structured security & compliance event stream ---
+
+/** Fields common to every audit event. `at` is wall-clock epoch milliseconds. */
+interface AuditEventBase {
+  at: number;
+}
+
+/**
+ * A structured security/compliance event emitted through the optional `onAuditEvent` sink.
+ *
+ * The audit stream is distinct from `onPostToolUse`/tracing: it captures the events a compliance
+ * log needs but that no existing hook surfaces — permission **denials** (which never reach
+ * `onPostToolUse`) and right-to-erasure fan-out — alongside executed tool calls. The Agent emits
+ * the `tool.call`, `permission.denied`, and `erasure` variants; the HTTP server emits the
+ * `auth.failure`, `quota.exceeded`, and `ratelimit.exceeded` variants. The sink is best-effort:
+ * a throwing sink is swallowed and logged at "warn", never affecting control flow.
+ */
+export type AuditEvent =
+  | (AuditEventBase & {
+      type: "tool.call";
+      toolId: string;
+      sessionId: string;
+      scopeKey?: string;
+      isError: boolean;
+      durationMs: number;
+    })
+  | (AuditEventBase & {
+      type: "permission.denied";
+      toolId: string;
+      sessionId: string;
+      scopeKey?: string;
+      /** Coarse cause: "denied" (policy/pre-hook/ask-no-resolver) or "gate-error" (the gate itself threw). */
+      reason: "denied" | "gate-error";
+    })
+  | (AuditEventBase & {
+      type: "erasure";
+      scopeKey: string;
+      deleted: { store: number; vector: number; graph: number; total: number };
+      memorySkipped: boolean;
+    })
+  | (AuditEventBase & {
+      type: "auth.failure";
+      /** The route/operation that rejected the principal (server-owned). */
+      route?: string;
+      reason?: string;
+    })
+  | (AuditEventBase & {
+      type: "quota.exceeded";
+      scopeKey?: string;
+      reason?: string;
+    })
+  | (AuditEventBase & {
+      type: "ratelimit.exceeded";
+      /** Stable principal/identity key the limiter bucketed on (server-owned). */
+      principalId?: string;
+      route?: string;
+    });
+
+/**
+ * Best-effort sink for {@link AuditEvent}s. Synchronous by contract (emit-and-forget) — do heavy
+ * work (DB writes, network) asynchronously inside the sink so the hot path is never blocked.
+ */
+export type AuditSink = (event: AuditEvent) => void;

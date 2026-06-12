@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { sha256Hex } from "./sha256.js";
-import type { DurablePort, LoggerPort, PermissionDecision, PermissionPolicy, Scope, SecretsPort, SuspendDecision, SuspendRequest, ToolSchema } from "@eidentic/types";
-import { canonicalJson } from "@eidentic/types";
+import type { AuditSink, DurablePort, LoggerPort, PermissionDecision, PermissionPolicy, Scope, SecretsPort, SuspendDecision, SuspendRequest, ToolSchema } from "@eidentic/types";
+import { canonicalJson, scopeKey } from "@eidentic/types";
 import { evaluatePermission, argScopedDenies, filterToolsForSchema } from "./permission.js";
 import { NoopLogger, envLogger } from "./logger.js";
 
@@ -155,6 +155,11 @@ export interface RegistryOpts {
     sessionId: string;
   }) => void | Promise<void>;
   scope?: Scope;
+  /**
+   * Best-effort audit sink (§10.4/§15). Emits `permission.denied` for every denied dispatch and
+   * `tool.call` for every executed dispatch. A throwing sink is swallowed + logged, like the post-hook.
+   */
+  onAuditEvent?: AuditSink;
   /** AbortSignal passed into every tool's ToolContext.signal for this registry's lifetime. */
   signal?: AbortSignal;
   /** The session id for this run — threaded into `ctx.suspend` so suspension keys are (sessionId, callId)-stable. */
@@ -171,6 +176,7 @@ export class ToolRegistry {
   private readonly onPreToolUse?: RegistryOpts["onPreToolUse"];
   private readonly onPermissionRequest?: RegistryOpts["onPermissionRequest"];
   private readonly onPostToolUse?: RegistryOpts["onPostToolUse"];
+  private readonly onAuditEvent?: AuditSink;
   private readonly scope?: Scope;
   private readonly signal?: AbortSignal;
   private readonly sessionId?: string;
@@ -184,6 +190,7 @@ export class ToolRegistry {
     this.onPreToolUse = opts?.onPreToolUse;
     this.onPermissionRequest = opts?.onPermissionRequest;
     this.onPostToolUse = opts?.onPostToolUse;
+    this.onAuditEvent = opts?.onAuditEvent;
     this.scope = opts?.scope;
     this.signal = opts?.signal;
     this.sessionId = opts?.sessionId;
@@ -290,6 +297,7 @@ export class ToolRegistry {
       } catch (gateErr) {
         const raw = gateErr instanceof Error ? gateErr.message : String(gateErr);
         this.logger.log("debug", "eidentic:tool", "result", { tool: call.name, ok: false, reason: "permission-gate-error" });
+        this.emitDenied(tool.id, "gate-error");
         return {
           callId: call.callId,
           toolName: call.name,
@@ -300,6 +308,7 @@ export class ToolRegistry {
       }
       if (decision === "deny") {
         this.logger.log("debug", "eidentic:tool", "result", { tool: call.name, ok: false, reason: "permission-denied" });
+        this.emitDenied(tool.id, "denied");
         return {
           callId: call.callId,
           toolName: call.name,
@@ -404,19 +413,53 @@ export class ToolRegistry {
    * kills the run (observability hooks must not affect control flow).
    */
   private async firePostHook(toolId: string, input: unknown, result: ToolResult, startMs: number): Promise<void> {
-    if (!this.onPostToolUse) return;
     const durationMs = Date.now() - startMs;
+    if (this.onPostToolUse) {
+      try {
+        await this.onPostToolUse({
+          toolId,
+          input,
+          output: result.output,
+          isError: result.isError,
+          durationMs,
+          sessionId: this.sessionId ?? "",
+        });
+      } catch (err) {
+        this.logger.log("warn", "eidentic:tool", `onPostToolUse hook threw (swallowed): ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    // Audit: one `tool.call` per executed dispatch (success, error, or durable-skip). Denials are
+    // emitted separately at the gate, since they never reach execution.
+    this.emitAudit({
+      type: "tool.call",
+      at: Date.now(),
+      toolId,
+      sessionId: this.sessionId ?? "",
+      ...(this.scope !== undefined ? { scopeKey: scopeKey(this.scope) } : {}),
+      isError: result.isError,
+      durationMs,
+    });
+  }
+
+  /** Emit a `permission.denied` audit event for a tool that the gate refused. */
+  private emitDenied(toolId: string, reason: "denied" | "gate-error"): void {
+    this.emitAudit({
+      type: "permission.denied",
+      at: Date.now(),
+      toolId,
+      sessionId: this.sessionId ?? "",
+      ...(this.scope !== undefined ? { scopeKey: scopeKey(this.scope) } : {}),
+      reason,
+    });
+  }
+
+  /** Emit an audit event through the configured sink. Best-effort: a throwing sink is swallowed + logged. */
+  private emitAudit(event: import("@eidentic/types").AuditEvent): void {
+    if (!this.onAuditEvent) return;
     try {
-      await this.onPostToolUse({
-        toolId,
-        input,
-        output: result.output,
-        isError: result.isError,
-        durationMs,
-        sessionId: this.sessionId ?? "",
-      });
+      this.onAuditEvent(event);
     } catch (err) {
-      this.logger.log("warn", "eidentic:tool", `onPostToolUse hook threw (swallowed): ${err instanceof Error ? err.message : String(err)}`);
+      this.logger.log("warn", "eidentic:tool", `onAuditEvent sink threw (swallowed): ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
