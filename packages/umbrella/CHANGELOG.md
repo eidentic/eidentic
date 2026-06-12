@@ -1,5 +1,11 @@
 # eidentic
 
+## 0.1.3
+
+### Patch Changes
+
+- Docs: note that `@eidentic/convex` now supports durable execution (`DurablePort`).
+
 ## 0.1.2
 
 ### Patch Changes

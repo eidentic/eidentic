@@ -757,3 +757,139 @@ export const vectorList = queryGeneric({
     return rows.map((e) => ({ id: e.extId, scopeKey: e.scopeKey, text: e.text, vector: e.vector }));
   },
 });
+
+// ---------------------------------------------------------------------------
+// Durable (DurablePort) — checkpoints + idempotency ledger + suspension decisions
+//
+// Each operation is a single Convex mutation/query, so the read-then-write below is one
+// serializable transaction (OCC) — exactly the exactly-once guarantee §9.3 needs. No JS mutex.
+// ---------------------------------------------------------------------------
+
+export const writeCheckpoint = mutationGeneric({
+  args: { sessionId: v.string(), seq: v.number(), hash: v.string(), now: v.string() },
+  returns: v.null(),
+  handler: async (ctx: MCtx, { sessionId, seq, hash, now }) => {
+    // Idempotent per (sessionId, seq): update the hash in place, never duplicate the row.
+    const existing = await ctx.db
+      .query("checkpoints")
+      .withIndex("by_session_seq", (q) => q.eq("sessionId", sessionId).eq("seq", seq))
+      .first();
+    if (existing) {
+      await ctx.db.patch(existing._id, { hash, createdAt: now });
+    } else {
+      await ctx.db.insert("checkpoints", { sessionId, seq, hash, createdAt: now });
+    }
+    return null;
+  },
+});
+
+export const lastCheckpoint = queryGeneric({
+  args: { sessionId: v.string() },
+  handler: async (ctx: QCtx, { sessionId }) => {
+    // by_session_seq orders ascending by seq within the session — take the last (highest seq).
+    const row = await ctx.db
+      .query("checkpoints")
+      .withIndex("by_session_seq", (q) => q.eq("sessionId", sessionId))
+      .order("desc")
+      .first();
+    if (!row) return null;
+    return { sessionId: row.sessionId, seq: row.seq, hash: row.hash, createdAt: row.createdAt };
+  },
+});
+
+export const recordIntent = mutationGeneric({
+  args: { key: v.string(), argsHash: v.string(), now: v.string() },
+  returns: v.null(),
+  handler: async (ctx: MCtx, { key, argsHash, now }) => {
+    // Write-once: an existing row is left untouched so a re-run cannot downgrade applied → intent.
+    const existing = await ctx.db
+      .query("idempotency")
+      .withIndex("by_key", (q) => q.eq("key", key))
+      .first();
+    if (existing) return null;
+    await ctx.db.insert("idempotency", {
+      key,
+      status: "intent",
+      argsHash,
+      createdAt: now,
+    });
+    return null;
+  },
+});
+
+export const recordCompletion = mutationGeneric({
+  args: { key: v.string(), result: v.string(), now: v.string() },
+  returns: v.null(),
+  handler: async (ctx: MCtx, { key, result, now }) => {
+    // Flip to applied + persist the (already JSON-serialized) result. Cover completion without a
+    // prior intent by inserting. `result` is always set so a stored "null" is distinguishable from
+    // an intent row (which has no `result` field) — i.e. "no result yet".
+    const existing = await ctx.db
+      .query("idempotency")
+      .withIndex("by_key", (q) => q.eq("key", key))
+      .first();
+    if (existing) {
+      await ctx.db.patch(existing._id, { status: "applied", result });
+    } else {
+      await ctx.db.insert("idempotency", {
+        key,
+        status: "applied",
+        argsHash: "",
+        result,
+        createdAt: now,
+      });
+    }
+    return null;
+  },
+});
+
+export const getIdempotency = queryGeneric({
+  args: { key: v.string() },
+  handler: async (ctx: QCtx, { key }) => {
+    const row = await ctx.db
+      .query("idempotency")
+      .withIndex("by_key", (q) => q.eq("key", key))
+      .first();
+    if (!row) return null;
+    // `result` stays a JSON string across the wire — the client parses it. Returning a parsed
+    // object here would re-sort its keys (Convex normalizes value key order on the return boundary).
+    return {
+      key: row.key,
+      argsHash: row.argsHash,
+      status: row.status,
+      ...(row.result !== undefined ? { result: row.result } : {}),
+      createdAt: row.createdAt,
+    };
+  },
+});
+
+export const recordDecision = mutationGeneric({
+  args: { sessionId: v.string(), callId: v.string(), decision: v.string(), now: v.string() },
+  returns: v.null(),
+  handler: async (ctx: MCtx, { sessionId, callId, decision, now }) => {
+    // Upsert per (sessionId, callId) — write-once in practice; last write wins on a re-record.
+    // `decision` arrives JSON-serialized so its object-key order round-trips faithfully.
+    const existing = await ctx.db
+      .query("decisions")
+      .withIndex("by_session_call", (q) => q.eq("sessionId", sessionId).eq("callId", callId))
+      .first();
+    if (existing) {
+      await ctx.db.patch(existing._id, { decision, createdAt: now });
+    } else {
+      await ctx.db.insert("decisions", { sessionId, callId, decision, createdAt: now });
+    }
+    return null;
+  },
+});
+
+export const getDecision = queryGeneric({
+  args: { sessionId: v.string(), callId: v.string() },
+  handler: async (ctx: QCtx, { sessionId, callId }) => {
+    const row = await ctx.db
+      .query("decisions")
+      .withIndex("by_session_call", (q) => q.eq("sessionId", sessionId).eq("callId", callId))
+      .first();
+    // Return the JSON string; the client parses it (parsing here would re-sort object keys).
+    return row ? row.decision : null;
+  },
+});

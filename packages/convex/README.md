@@ -2,10 +2,15 @@
 
 A [Convex](https://www.convex.dev)-backed store adapter for [Eidentic](https://github.com/eidentic/eidentic).
 
-`ConvexStore` implements **`StorePort` + `GraphPort`** (sessions, the append-only event log,
-always-in-context memory blocks with CAS, the lexical memory index, and the temporal knowledge
-graph). `ConvexVectorStore` implements **`VectorPort`** (cosine-ranked vector search). Both come
-from `@eidentic/types`.
+`ConvexStore` implements **`StorePort` + `GraphPort` + `DurablePort`** (sessions, the append-only
+event log, always-in-context memory blocks with CAS, the lexical memory index, the temporal
+knowledge graph, **and durable execution** — checkpoints, an exactly-once idempotency ledger, and
+human-in-the-loop suspension decisions). `ConvexVectorStore` implements **`VectorPort`**
+(cosine-ranked vector search). All come from `@eidentic/types`.
+
+Convex's serializable mutations make the durable ledger atomic by construction: every
+checkpoint/intent/completion/decision write is a single transaction, so checkpoint-resume and
+exactly-once tool dispatch hold under concurrency without extra locking.
 
 The agent runtime runs **outside** Convex and talks to a deployment through an injectable runner.
 This is the *app-functions* model — you re-export a handful of Convex functions from your own
@@ -59,7 +64,7 @@ import { ConvexStore, ConvexVectorStore, convexHttpRunner } from "@eidentic/conv
 const client = new ConvexHttpClient(process.env.CONVEX_URL!);
 const runner = convexHttpRunner(client);
 
-const store = new ConvexStore(runner);          // StorePort & GraphPort
+const store = new ConvexStore(runner);          // StorePort, GraphPort & DurablePort
 const vectors = new ConvexVectorStore(runner);  // VectorPort
 ```
 
