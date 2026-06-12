@@ -1,5 +1,32 @@
 # @eidentic/core
 
+## 0.2.0
+
+### Minor Changes
+
+- Add a generic audit bus: an optional `onAuditEvent` sink on `AgentConfig` that emits a single typed
+  stream of security/compliance events.
+
+  It complements `onPostToolUse`/tracing by surfacing the events a compliance log needs but that no
+  existing hook emits:
+
+  - `permission.denied` — every gate refusal (reason `"denied"` or `"gate-error"`), which `onPostToolUse`
+    explicitly never sees because denied dispatches don't execute.
+  - `erasure` — right-to-erasure fan-out from `Agent.eraseScope`, with per-subsystem (`store`/`vector`/`graph`)
+    and `total` counts plus a `memorySkipped` flag.
+  - `tool.call` — one per executed dispatch (success or error), with `scopeKey`, `sessionId`, and `durationMs`.
+
+  The new `AuditEvent` union (in `@eidentic/types`) also defines the server-owned `auth.failure`,
+  `quota.exceeded`, and `ratelimit.exceeded` variants so the HTTP server can adopt the same stream.
+  The sink is best-effort: a throwing sink is swallowed and logged at `"warn"`, never affecting a run.
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies [7c454e5]
+- Updated dependencies [de07ecc]
+  - @eidentic/types@0.2.0
+
 ## 0.1.1
 
 ### Patch Changes
@@ -193,7 +220,7 @@
   const model = new AIModel(createOllamaModel("llama3.2"));
   // or with a custom server URL:
   const model2 = new AIModel(
-    createOllamaModel("mistral", { baseURL: "http://192.168.1.10:11434/api" })
+    createOllamaModel("mistral", { baseURL: "http://192.168.1.10:11434/api" }),
   );
   ```
 

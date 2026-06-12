@@ -1,5 +1,24 @@
 # eidentic
 
+## 0.1.2
+
+### Patch Changes
+
+- f6ead91: Docs: document the audit bus (`onAuditEvent`) in the README production-fundamentals summary.
+- 2412254: Update the package description and README hero to the new positioning sentence, and fix the
+  quickstart stream-event check (`ev.type === "stream.delta"` → `ev.delta.text`, terminal
+  `ev.type === "result"`).
+- Updated dependencies
+- Updated dependencies [7c454e5]
+- Updated dependencies [bb46351]
+- Updated dependencies [de07ecc]
+  - @eidentic/core@0.2.0
+  - @eidentic/types@0.2.0
+  - @eidentic/model@0.2.0
+  - @eidentic/cli@0.1.2
+  - @eidentic/memory@0.1.2
+  - @eidentic/sqlite@0.1.2
+
 ## 0.1.1
 
 ### Patch Changes

@@ -1,5 +1,22 @@
 # @eidentic/model
 
+## 0.2.0
+
+### Minor Changes
+
+- bb46351: `AIEmbedder.create` accepts a `maxRetries` option, forwarded to the AI SDK's `embed`/`embedMany`.
+  The AI SDK retries transient failures (including provider rate limits / 429s) with exponential
+  backoff and honours `retry-after`, so high-volume ingest against a rate-limited embedding provider
+  no longer fails after the default 2 attempts. The LongMemEval harness caps over-long embedding
+  inputs below the typical 8192-token embedder window.
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies [7c454e5]
+- Updated dependencies [de07ecc]
+  - @eidentic/types@0.2.0
+
 ## 0.1.1
 
 ### Patch Changes
@@ -51,7 +68,7 @@ presencePenalty, frequencyPenalty, maxRetries, providerOptions, headers })`. The
   const model = new AIModel(createOllamaModel("llama3.2"));
   // or with a custom server URL:
   const model2 = new AIModel(
-    createOllamaModel("mistral", { baseURL: "http://192.168.1.10:11434/api" })
+    createOllamaModel("mistral", { baseURL: "http://192.168.1.10:11434/api" }),
   );
   ```
 

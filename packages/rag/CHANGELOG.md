@@ -1,5 +1,15 @@
 # @eidentic/rag
 
+## 0.1.2
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies [7c454e5]
+- Updated dependencies [de07ecc]
+  - @eidentic/types@0.2.0
+  - @eidentic/tools@0.1.2
+
 ## 0.1.1
 
 ### Patch Changes
@@ -29,17 +39,17 @@
   // Markdown
   await ingestDocument(
     { type: "markdown", data: markdownString, source: "README.md" },
-    opts
+    opts,
   );
   // HTML
   await ingestDocument(
     { type: "html", data: htmlString, source: "https://example.com" },
-    opts
+    opts,
   );
   // PDF (requires pdf-parse peer dep)
   await ingestDocument(
     { type: "pdf", data: pdfBuffer, source: "report.pdf" },
-    opts
+    opts,
   );
   ```
 

@@ -1,5 +1,51 @@
 # @eidentic/types
 
+## 0.2.0
+
+### Minor Changes
+
+- Add a generic audit bus: an optional `onAuditEvent` sink on `AgentConfig` that emits a single typed
+  stream of security/compliance events.
+
+  It complements `onPostToolUse`/tracing by surfacing the events a compliance log needs but that no
+  existing hook emits:
+
+  - `permission.denied` — every gate refusal (reason `"denied"` or `"gate-error"`), which `onPostToolUse`
+    explicitly never sees because denied dispatches don't execute.
+  - `erasure` — right-to-erasure fan-out from `Agent.eraseScope`, with per-subsystem (`store`/`vector`/`graph`)
+    and `total` counts plus a `memorySkipped` flag.
+  - `tool.call` — one per executed dispatch (success or error), with `scopeKey`, `sessionId`, and `durationMs`.
+
+  The new `AuditEvent` union (in `@eidentic/types`) also defines the server-owned `auth.failure`,
+  `quota.exceeded`, and `ratelimit.exceeded` variants so the HTTP server can adopt the same stream.
+  The sink is best-effort: a throwing sink is swallowed and logged at `"warn"`, never affecting a run.
+
+### Patch Changes
+
+- 7c454e5: Add `@eidentic/convex` — a Convex-backed store adapter. `ConvexStore` implements `StorePort` +
+  `GraphPort` (sessions, the append-only event log, CAS memory blocks + history, the lexical memory
+  index, and the temporal knowledge graph) and `ConvexVectorStore` implements `VectorPort`. The
+  agent runtime talks to Convex through an injectable runner (`ConvexHttpClient` in production,
+  `convex-test` in tests); the adapter ships its tables (`eidenticTables`) and re-exportable function
+  handlers so a Convex app's reactive UI can subscribe directly to agent data. Passes the full
+  `storeConformanceCases` + `vectorConformanceCases` suites (39 cases). Also fixes the stale
+  `StorePort` example in the `@eidentic/types` README (`putBlock` → `upsertBlock`) and documents
+  validating a bring-your-own-store against the conformance suite.
+- de07ecc: Implement `VectorPort.list` on the Qdrant, pgvector, LanceDB, and Pinecone adapters.
+
+  Previously these production vector backends did not expose `list`, so
+  `Memory.deduplicateArchival` and `Memory.reindexEmbeddings` silently no-op'd on them
+  (both treat a missing `list` as "no efficient scan available"). Each adapter now
+  enumerates a scope's entries — reconstructing the full `VectorEntry` including the stored
+  embedding — so archival dedup and embedding reindex work on real deployments:
+
+  - **pgvector** / **LanceDB**: scoped sequential scan (`SELECT … WHERE scope_key` / filtered query).
+  - **Qdrant**: paginated `scroll` with `with_vector` (requires the standard `@qdrant/js-client-rest` client).
+  - **Pinecone**: high-topK filtered query with `includeValues` (bounded to 10 000, matching the dedup safety cap).
+
+  `vectorConformanceCases` (`@eidentic/types/testing`) gains an optional `list` case that
+  verifies scope isolation and full payload/vector round-trip for any adapter implementing it.
+
 ## 0.1.1
 
 ### Patch Changes
@@ -148,7 +194,7 @@
   const model = new AIModel(createOllamaModel("llama3.2"));
   // or with a custom server URL:
   const model2 = new AIModel(
-    createOllamaModel("mistral", { baseURL: "http://192.168.1.10:11434/api" })
+    createOllamaModel("mistral", { baseURL: "http://192.168.1.10:11434/api" }),
   );
   ```
 
