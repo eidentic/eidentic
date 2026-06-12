@@ -37,12 +37,10 @@ eidentic doctor
 ### `eidentic.config.ts` example
 
 ```ts
-import { defineConfig } from "eidentic";
-
-export default defineConfig({
-  agents: { support: myAgent },
-  port: 3000,
-});
+// eidentic.config.ts — export `agents` (and optionally `port`, `auth`, etc.)
+// The CLI picks this up with jiti (no compile step needed).
+export const agents = { support: myAgent };
+export const port = 3000;
 ```
 
 ## Links

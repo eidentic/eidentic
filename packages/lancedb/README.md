@@ -17,7 +17,7 @@ import { LanceDBVectorStore } from "@eidentic/lancedb";
 import { AIEmbedder } from "@eidentic/model";
 import { openai } from "@ai-sdk/openai";
 
-const embedder = new AIEmbedder(openai.embedding("text-embedding-3-small"), { dim: 1536 });
+const embedder = await AIEmbedder.create(openai.embedding("text-embedding-3-small"));
 
 const vector = await LanceDBVectorStore.open(
   "./lancedb",       // local directory for LanceDB tables

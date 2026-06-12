@@ -22,7 +22,8 @@ import { anthropic } from "@ai-sdk/anthropic";
 const store = new LibsqlStore("file:eidentic.db");
 
 // Turso remote (production)
-const store = new LibsqlStore(process.env.LIBSQL_URL!, {
+const store = new LibsqlStore({
+  url: process.env.LIBSQL_URL!,
   authToken: process.env.LIBSQL_AUTH_TOKEN,
 });
 
@@ -33,7 +34,7 @@ const agent = new Agent({
 });
 
 for await (const ev of agent.query("Hello", { sessionId: "s-1" })) {
-  if (ev.kind === "text_delta") process.stdout.write(ev.delta);
+  if (ev.type === "stream.delta") process.stdout.write(ev.delta.text);
 }
 ```
 

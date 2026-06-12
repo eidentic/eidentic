@@ -14,7 +14,7 @@ pnpm add @eidentic/tools
 
 ```ts
 import { fileTools, bashTool, webTools, webSearchFromEnv } from "@eidentic/tools";
-import { Agent } from "eidentic";
+import { Agent, NoopSandbox } from "eidentic";
 
 const agent = new Agent({
   id: "coder",
@@ -22,8 +22,8 @@ const agent = new Agent({
   store,
   tools: [
     ...fileTools({ root: process.cwd() }),      // read_file, write_file, list_files
-    bashTool({ allowedCommands: ["node", "ls"] }), // run_bash
-    ...webTools({ searchProvider: webSearchFromEnv() }), // web_fetch, web_search
+    bashTool(new NoopSandbox()),                 // run_bash (swap NoopSandbox for a real sandbox)
+    ...webTools({ searchProvider: webSearchFromEnv() ?? undefined }), // web_fetch, web_search
   ],
   // Deny-by-default: only the tools above are available
 });

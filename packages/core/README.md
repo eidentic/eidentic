@@ -35,11 +35,11 @@ const agent = new Agent({
   model: new AIModel(anthropic("claude-sonnet-4-5")),
   store: new SqliteStore("./eidentic.sqlite"),
   tools: [weatherTool],
-  costCeiling: { usd: 0.10 }, // hard stop per turn
+  policy: { maxCostUsd: 0.10 }, // hard stop per turn
 });
 
 for await (const ev of agent.query("What's the weather in Berlin?", { sessionId: "u-1" })) {
-  if (ev.kind === "text_delta") process.stdout.write(ev.delta);
+  if (ev.type === "stream.delta") process.stdout.write(ev.delta.text);
 }
 ```
 

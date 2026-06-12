@@ -36,8 +36,8 @@ const agent = new Agent({
   tracer,
 });
 
-for await (const event of agent.query("Hello!")) {
-  if (event.kind === "result") console.log(event.output);
+for await (const event of agent.query("Hello!", { sessionId: "s-1" })) {
+  if (event.type === "result") console.log(event.usage);
 }
 
 // Flush remaining spans and cancel the auto-flush timer on process exit.

@@ -32,7 +32,7 @@ const agent = new Agent({
 });
 
 for await (const ev of agent.query("What is on the homepage of example.com?", { sessionId: "s-1" })) {
-  if (ev.kind === "text_delta") process.stdout.write(ev.delta);
+  if (ev.type === "stream.delta") process.stdout.write(ev.delta.text);
 }
 
 await browser.close();

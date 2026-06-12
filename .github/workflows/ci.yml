@@ -43,3 +43,9 @@ jobs:
 
       - name: Typecheck
         run: pnpm -r typecheck
+
+      # Type-check the ```ts examples in every package README against the built types so docs
+      # can't drift from the real API. Runs once (node 22 leg); needs the build above for dist types.
+      - name: Check README examples
+        if: matrix.node == '22'
+        run: pnpm check:readme

@@ -21,7 +21,7 @@ import { anthropic } from "@ai-sdk/anthropic";
 const agent = new Agent({
   id: "support",
   model: new AIModel(anthropic("claude-sonnet-4-5")),
-  store: await SqliteStore.create("./eidentic.sqlite"),
+  store: new SqliteStore("./eidentic.sqlite"),
 });
 
 const app = createServer({

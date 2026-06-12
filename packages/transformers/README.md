@@ -29,8 +29,8 @@ const vecs = await embedder.embedBatch(["hello", "world"]);
 
 // Rerank candidates
 const reranked = await reranker.rerank("What is Paris?", [
-  { id: "a", text: "Paris is the capital of France." },
-  { id: "b", text: "London is the capital of England." },
+  { id: "a", text: "Paris is the capital of France.", score: 0 },
+  { id: "b", text: "London is the capital of England.", score: 0 },
 ]);
 // reranked sorted by relevance score descending
 ```
