@@ -46,9 +46,11 @@ fact extraction. ([design spec](docs/design/master-design.md))
 
 **2. Production fundamentals, built in — not bolted on.** Durable checkpoint/resume with
 exactly-once tool dispatch, **enforced cost ceilings** ($/token/turn) with **per-turn cost
-visibility**, **built-in rate-limiting + quotas**, OpenTelemetry GenAI spans, deny-by-default
-permissions, sandboxed code/command execution, secrets the model never sees, and **one-call
-right-to-erasure (GDPR)** that fans out across every store. For offline workloads there's a
+visibility**, **built-in rate-limiting + quotas**, OpenTelemetry GenAI spans, a **structured
+audit-event stream** (permission denials, quota/rate-limit rejections, auth failures, and
+right-to-erasure — the events a compliance log needs), deny-by-default permissions, sandboxed
+code/command execution, secrets the model never sees, and **one-call right-to-erasure (GDPR)**
+that fans out across every store. For offline workloads there's a
 **batch runner** and **scheduled/background runs**. And because shipping an agent without
 tests is shipping blind, there's a built-in **eval harness with a CI pass-rate gate** plus
 one-call **promotion of a production trace into a regression test** — every incident becomes
@@ -173,7 +175,7 @@ cd my-agent && eidentic dev   # loads eidentic.config.ts and serves it
 | **Skills** | `SKILL.md` prompt skills · test-gated executable skills (ed25519-signed) · optional self-evolution |
 | **Multi-agent** | `spawn_agent` delegation with context isolation + shared budget · MCP host & server · A2A protocol |
 | **Execution** | Durable checkpoint/resume (exactly-once) · human-in-the-loop suspension · cooperative cancellation · context compaction |
-| **Security & ops** | Deny-by-default permissions · sandboxed exec (E2B) · secret isolation · cost governor · rate-limit + quotas · OTel · GDPR erasure |
+| **Security & ops** | Deny-by-default permissions · sandboxed exec (E2B) · secret isolation · cost governor · rate-limit + quotas · OTel · audit-event stream · GDPR erasure |
 | **Stores** | SQLite · libSQL/Turso · Postgres · Convex · vector: LanceDB / pgvector / Qdrant / Pinecone · local + hosted embedders |
 | **DX** | `npx eidentic init` scaffold · Studio dev dashboard (`npx eidentic studio`) · eval harness · memory benchmark suite |
 
