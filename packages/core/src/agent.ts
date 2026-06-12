@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { sha256Hex } from "./sha256.js";
 import type {
+  AuditSink,
   ContentBlock,
   CostPolicy,
   CostThresholdInfo,
@@ -27,7 +28,7 @@ import type {
   Usage,
   SandboxPort,
 } from "@eidentic/types";
-import { addUsage, encodeMultimodalInput, extractTextFromBlocks, canonicalJson } from "@eidentic/types";
+import { addUsage, encodeMultimodalInput, extractTextFromBlocks, canonicalJson, scopeKey } from "@eidentic/types";
 import { envLogger } from "./logger.js";
 import { NoopSandbox } from "./sandbox.js";
 import { ToolRegistry, createTool, type Tool } from "./tool.js";
@@ -153,6 +154,16 @@ export interface AgentConfig {
     durationMs: number;
     sessionId: string;
   }) => void | Promise<void>;
+  /**
+   * Best-effort audit sink (§10.4/§15): a single typed stream of security/compliance events.
+   *
+   * Complements `onPostToolUse` by surfacing the events a compliance log needs but that no other
+   * hook emits — permission **denials** (`permission.denied`) and right-to-erasure
+   * (`erasure`, from {@link Agent.eraseScope}) — plus a `tool.call` per executed dispatch. A
+   * throwing sink is swallowed and logged at "warn", so it can never affect a run. Do heavy work
+   * (DB/network writes) asynchronously inside the sink.
+   */
+  onAuditEvent?: AuditSink;
   // --- Plan 12a/13a ---
   /**
    * Sandbox adapter for executing untrusted/agent-generated code (§10.5, §10.7).
@@ -713,7 +724,7 @@ export class Agent {
   private buildRegistry(tools: Tool[], durable: DurablePort | undefined, scope: Scope, signal?: AbortSignal, sessionId?: string, logger?: import("@eidentic/types").LoggerPort): ToolRegistry {
     // Use the MUTABLE effective policy so that setPermissionMode() takes effect on the next query.
     const permissions = this._effectivePermissions;
-    const { secrets, onPreToolUse, onPermissionRequest, onPostToolUse } = this.config;
+    const { secrets, onPreToolUse, onPermissionRequest, onPostToolUse, onAuditEvent } = this.config;
     const hasSecurityConfig = permissions !== undefined || secrets !== undefined ||
       onPreToolUse !== undefined || onPermissionRequest !== undefined;
 
@@ -724,7 +735,7 @@ export class Agent {
     // sessionId only matters when durable is set, and a durable run is never the baseline
     // (durable truthy ⇒ isBaseline false). So baseline reuse stays correct.
     // A logger also invalidates the baseline (logger overrides NoopLogger in the base registry).
-    const isBaseline = filteredTools.length === this.baseTools.length && !durable && !hasSecurityConfig && !signal && !logger && !onPostToolUse;
+    const isBaseline = filteredTools.length === this.baseTools.length && !durable && !hasSecurityConfig && !signal && !logger && !onPostToolUse && !onAuditEvent;
     if (isBaseline) return this.registry;
 
     return new ToolRegistry(filteredTools, {
@@ -734,6 +745,7 @@ export class Agent {
       ...(onPreToolUse ? { onPreToolUse } : {}),
       ...(onPermissionRequest ? { onPermissionRequest } : {}),
       ...(onPostToolUse ? { onPostToolUse } : {}),
+      ...(onAuditEvent ? { onAuditEvent } : {}),
       ...(signal ? { signal } : {}),
       ...(sessionId !== undefined ? { sessionId } : {}),
       ...(logger ? { logger } : {}),
@@ -1091,12 +1103,31 @@ export class Agent {
     if (erasableMemory) {
       // Memory.eraseScope fans out to store + vector + graph internally.
       const { store, vector, graph } = await erasableMemory.eraseScope(scope);
+      this.emitErasureAudit(scope, { store, vector, graph }, false);
       return { store, vector, graph, memorySkipped: false };
     }
 
     // No erasable memory — erase the store directly; vector/graph unavailable without memory.
     const { deleted: store } = await this.config.store.eraseScope(scope);
+    this.emitErasureAudit(scope, { store, vector: 0, graph: 0 }, true);
     return { store, vector: 0, graph: 0, memorySkipped: true };
+  }
+
+  /** Emit an `erasure` audit event (best-effort; a throwing sink is swallowed + logged). */
+  private emitErasureAudit(scope: Scope, deleted: { store: number; vector: number; graph: number }, memorySkipped: boolean): void {
+    const sink = this.config.onAuditEvent;
+    if (!sink) return;
+    try {
+      sink({
+        type: "erasure",
+        at: Date.now(),
+        scopeKey: scopeKey(scope),
+        deleted: { ...deleted, total: deleted.store + deleted.vector + deleted.graph },
+        memorySkipped,
+      });
+    } catch (err) {
+      this.config.logger?.log("warn", "eidentic:audit", `onAuditEvent sink threw (swallowed): ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 }
 
