@@ -1,5 +1,14 @@
 # @eidentic/convex
 
+## 0.2.1
+
+### Patch Changes
+
+- Republish fix: `0.2.0` was bootstrapped to npm with `npm publish`, which does not resolve pnpm's
+  `workspace:*` protocol — so its published manifest listed `"@eidentic/types": "workspace:*"`,
+  making the package uninstallable. `0.2.1` is published with `pnpm publish`, which correctly pins
+  `@eidentic/types` to a real version. No code changes. (`0.2.0` is deprecated on npm.)
+
 ## 0.2.0
 
 ### Minor Changes
