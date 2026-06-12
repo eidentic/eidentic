@@ -80,6 +80,65 @@ const store = new ConvexStore(runner, { fns: defaultStoreFns("memory") }); // co
 You can also pass codegen `api.eidentic.appendEvents` references or `anyApi` refs directly via the
 `fns` option — any value `ConvexHttpClient` accepts as a function reference works.
 
+## Securing the functions (recommended)
+
+> ⚠️ The bare `export * from "@eidentic/convex/server"` path registers all 31 functions as
+> **public** Convex functions. Anyone who knows your deployment URL can call them with **any**
+> `scopeKey` and read or write agent memory. That path is only suitable for trusted, single-tenant
+> deployments. For anything multi-tenant, gate every call with an `authorize` hook.
+
+The functions **must** stay public — the runtime calls them over HTTP via `ConvexHttpClient`, and
+Convex `internal*` functions are not HTTP-callable. So the fix is an in-function authorization hook,
+not making them internal. Build the functions with `eidenticFunctions({ authorize })` instead of the
+bare `export *`:
+
+```ts
+// convex/eidentic.ts
+import { eidenticFunctions, type EidenticAuthorize } from "@eidentic/convex";
+
+// Runs BEFORE every handler. Throw to DENY; return/resolve to ALLOW.
+const authorize: EidenticAuthorize = async (ctx, { op, args }) => {
+  const identity = await ctx.auth.getUserIdentity();
+  if (!identity) throw new Error("unauthenticated");
+
+  // Optional: enforce scopeKey ownership. Most ops carry a `scopeKey`; assert the caller owns it.
+  const scopeKey = args["scopeKey"];
+  if (typeof scopeKey === "string" && !scopeKey.includes(identity.subject)) {
+    throw new Error(`forbidden: ${op} on ${scopeKey}`);
+  }
+};
+
+export const {
+  createSession, getSession, listSessions, appendEvents, readEvents,
+  getBlocks, getBlock, upsertBlock, appendBlock, getBlockHistory, listBlocks,
+  indexMemory, searchMemory, assertFact, queryFacts, corroborate, expireFacts,
+  sweepExpired, eraseScope, writeCheckpoint, lastCheckpoint, recordIntent,
+  recordCompletion, getIdempotency, recordDecision, getDecision,
+  vectorUpsert, vectorSearch, vectorDelete, vectorEraseScope, vectorList,
+} = eidenticFunctions({ authorize });
+```
+
+`eidenticFunctions` returns the same 31 functions as the bare `export *`, but wraps each handler so
+`authorize(ctx, { op, args })` is **awaited before the handler body runs** — a thrown error rejects
+the op. `op` is the function name (e.g. `"upsertBlock"`); `args` is the validated argument object.
+Omitting `authorize` (`eidenticFunctions()`) yields functions functionally identical to the bare
+exports.
+
+On the runner side, authenticate the `ConvexHttpClient` so `ctx.auth.getUserIdentity()` is populated
+inside the hook:
+
+```ts
+import { ConvexHttpClient } from "convex/browser";
+import { ConvexStore, convexHttpRunner } from "@eidentic/convex";
+
+const client = new ConvexHttpClient(process.env.CONVEX_URL!);
+client.setAuth(process.env.CONVEX_AUTH_TOKEN!); // a JWT, or a () => Promise<string> token fetcher
+const store = new ConvexStore(convexHttpRunner(client));
+```
+
+No runner option is needed for auth — the hook reads identity straight off `ctx.auth`. The adapter
+classes (`ConvexStore` / `ConvexVectorStore`) are unchanged; only your `convex/eidentic.ts` differs.
+
 ## Quickstart
 
 ```ts

@@ -31,6 +31,8 @@ import {
   type GenericQueryCtx,
   type GenericMutationCtx,
   type DataModelFromSchemaDefinition,
+  type RegisteredQuery,
+  type RegisteredMutation,
 } from "convex/server";
 import { v } from "convex/values";
 import { tokenize } from "@eidentic/types";
@@ -47,6 +49,31 @@ const eidenticSchema = defineSchema(eidenticTables);
 type EidenticDataModel = DataModelFromSchemaDefinition<typeof eidenticSchema>;
 type QCtx = GenericQueryCtx<EidenticDataModel>;
 type MCtx = GenericMutationCtx<EidenticDataModel>;
+
+// ---------------------------------------------------------------------------
+// Authorization hook
+// ---------------------------------------------------------------------------
+
+/**
+ * An authorization hook run BEFORE every eidentic function handler.
+ *
+ * It receives the Convex function `ctx` (so it can read `ctx.auth.getUserIdentity()`,
+ * `ctx.db`, etc.) and `info` describing the operation: its name (`op`, e.g. `"getBlocks"`)
+ * and the validated `args` (e.g. `{ scopeKey }`). It DENIES by throwing — a thrown error
+ * rejects the op before the handler body runs. Returning (or resolving) ALLOWS the op.
+ *
+ * Use it to enforce authentication and `scopeKey` ownership, e.g.:
+ *
+ *   const authorize: EidenticAuthorize = async (ctx, { args }) => {
+ *     const identity = await ctx.auth.getUserIdentity();
+ *     if (!identity) throw new Error("unauthenticated");
+ *     // optionally: assert the caller owns `args.scopeKey`
+ *   };
+ */
+export type EidenticAuthorize = (
+  ctx: QCtx | MCtx,
+  info: { op: string; args: Record<string, unknown> },
+) => void | Promise<void>;
 
 const sessionValidator = v.object({
   id: v.string(),
@@ -77,10 +104,69 @@ function stripBlock(doc: { label: string; value: string; version: number; update
 }
 
 // ---------------------------------------------------------------------------
+// Single source of truth: handler registry
+//
+// Each handler's `{ kind, args, returns?, handler }` spec is recorded ONCE in `HANDLERS` via
+// `defineQuery` / `defineMutation`, which ALSO build and return the live Convex function. The 31
+// top-level `export const X = …` below therefore stay byte-for-byte equivalent to the old direct
+// `mutationGeneric(...)` / `queryGeneric(...)` calls (back-compat: `export * from
+// "@eidentic/convex/server"` keeps working, unauthenticated). The `eidenticFunctions({ authorize })`
+// factory (bottom of file) replays the same registry, wrapping each handler so `authorize` runs
+// first — so both paths build from one definition and can never drift.
+// ---------------------------------------------------------------------------
+
+/** A handler's raw arg type is whatever Convex infers from its `args` validator; we keep it loose. */
+type AnyHandler = (ctx: never, args: never) => unknown;
+
+interface QuerySpec {
+  kind: "query";
+  args: Record<string, unknown>;
+  returns?: unknown;
+  handler: AnyHandler;
+}
+interface MutationSpec {
+  kind: "mutation";
+  args: Record<string, unknown>;
+  returns?: unknown;
+  handler: AnyHandler;
+}
+type HandlerSpec = QuerySpec | MutationSpec;
+
+/** Insertion-ordered registry of every handler, keyed by its exported function name. */
+const HANDLERS: Record<string, HandlerSpec> = {};
+
+// The return types are the PUBLIC, nameable `RegisteredQuery` / `RegisteredMutation` aliases from
+// `convex/server` (args/returns loosened to `any`). Annotating explicitly avoids declaration emit
+// inferring the un-nameable internal `registration.js` type through the helper indirection (TS2742),
+// while keeping the exports valid Convex function registrations at runtime. The loose arg/return
+// types are immaterial: the client calls these by string-path ref, not via these `.d.ts` types.
+
+/**
+ * Record a query spec under `name`, build it with `queryGeneric`, and return the live function so
+ * the matching `export const <name> = defineQuery("<name>", …)` keeps its original runtime shape.
+ */
+function defineQuery(
+  name: string,
+  spec: { args: object; returns?: unknown; handler: (ctx: QCtx, args: any) => unknown },
+): RegisteredQuery<"public", any, any> {
+  HANDLERS[name] = { kind: "query", ...spec } as QuerySpec;
+  return queryGeneric(spec as Parameters<typeof queryGeneric>[0]);
+}
+
+/** Record a mutation spec under `name`, build it with `mutationGeneric`, and return the live fn. */
+function defineMutation(
+  name: string,
+  spec: { args: object; returns?: unknown; handler: (ctx: MCtx, args: any) => unknown },
+): RegisteredMutation<"public", any, any> {
+  HANDLERS[name] = { kind: "mutation", ...spec } as MutationSpec;
+  return mutationGeneric(spec as Parameters<typeof mutationGeneric>[0]);
+}
+
+// ---------------------------------------------------------------------------
 // Sessions
 // ---------------------------------------------------------------------------
 
-export const createSession = mutationGeneric({
+export const createSession = defineMutation("createSession", {
   args: { session: sessionValidator },
   returns: v.null(),
   handler: async (ctx: MCtx, { session }) => {
@@ -96,7 +182,7 @@ export const createSession = mutationGeneric({
   },
 });
 
-export const getSession = queryGeneric({
+export const getSession = defineQuery("getSession", {
   args: { id: v.string() },
   handler: async (ctx: QCtx, { id }) => {
     const row = await ctx.db
@@ -115,7 +201,7 @@ export const getSession = queryGeneric({
   },
 });
 
-export const listSessions = queryGeneric({
+export const listSessions = defineQuery("listSessions", {
   args: {
     agentId: v.optional(v.string()),
     limit: v.optional(v.number()),
@@ -153,7 +239,7 @@ export const listSessions = queryGeneric({
 // Events
 // ---------------------------------------------------------------------------
 
-export const appendEvents = mutationGeneric({
+export const appendEvents = defineMutation("appendEvents", {
   args: { events: v.array(eventValidator) },
   returns: v.null(),
   handler: async (ctx: MCtx, { events }) => {
@@ -200,7 +286,7 @@ export const appendEvents = mutationGeneric({
   },
 });
 
-export const readEvents = queryGeneric({
+export const readEvents = defineQuery("readEvents", {
   args: { sessionId: v.string() },
   handler: async (ctx: QCtx, { sessionId }) => {
     const rows = await ctx.db
@@ -225,7 +311,7 @@ export const readEvents = queryGeneric({
 // Blocks
 // ---------------------------------------------------------------------------
 
-export const getBlocks = queryGeneric({
+export const getBlocks = defineQuery("getBlocks", {
   args: { scopeKey: v.string() },
   handler: async (ctx: QCtx, { scopeKey }) => {
     const rows = await ctx.db
@@ -236,7 +322,7 @@ export const getBlocks = queryGeneric({
   },
 });
 
-export const getBlock = queryGeneric({
+export const getBlock = defineQuery("getBlock", {
   args: { scopeKey: v.string(), label: v.string() },
   handler: async (ctx: QCtx, { scopeKey, label }) => {
     const row = await ctx.db
@@ -247,7 +333,7 @@ export const getBlock = queryGeneric({
   },
 });
 
-export const upsertBlock = mutationGeneric({
+export const upsertBlock = defineMutation("upsertBlock", {
   args: {
     scopeKey: v.string(),
     label: v.string(),
@@ -281,7 +367,7 @@ export const upsertBlock = mutationGeneric({
   },
 });
 
-export const appendBlock = mutationGeneric({
+export const appendBlock = defineMutation("appendBlock", {
   args: { scopeKey: v.string(), label: v.string(), text: v.string(), now: v.string() },
   handler: async (ctx: MCtx, { scopeKey, label, text, now }) => {
     const existing = await ctx.db
@@ -300,7 +386,7 @@ export const appendBlock = mutationGeneric({
   },
 });
 
-export const getBlockHistory = queryGeneric({
+export const getBlockHistory = defineQuery("getBlockHistory", {
   args: { scopeKey: v.string(), label: v.string() },
   handler: async (ctx: QCtx, { scopeKey, label }) => {
     const rows = await ctx.db
@@ -312,7 +398,7 @@ export const getBlockHistory = queryGeneric({
   },
 });
 
-export const listBlocks = queryGeneric({
+export const listBlocks = defineQuery("listBlocks", {
   args: { scopeKey: v.string() },
   handler: async (ctx: QCtx, { scopeKey }) => {
     const rows = await ctx.db
@@ -327,7 +413,7 @@ export const listBlocks = queryGeneric({
 // Memory (lexical) — manual TF scoring in the handler
 // ---------------------------------------------------------------------------
 
-export const indexMemory = mutationGeneric({
+export const indexMemory = defineMutation("indexMemory", {
   args: {
     entries: v.array(
       v.object({
@@ -362,7 +448,7 @@ export const indexMemory = mutationGeneric({
   },
 });
 
-export const searchMemory = queryGeneric({
+export const searchMemory = defineQuery("searchMemory", {
   args: { scopeKey: v.string(), query: v.string(), topK: v.number() },
   handler: async (ctx: QCtx, { scopeKey, query, topK }) => {
     // tokenize → [] on empty/punctuation-only queries (no throw).
@@ -434,7 +520,7 @@ function rowToFact(r: {
   };
 }
 
-export const assertFact = mutationGeneric({
+export const assertFact = defineMutation("assertFact", {
   args: {
     scopeKey: v.string(),
     factId: v.string(),
@@ -527,7 +613,7 @@ export const assertFact = mutationGeneric({
   },
 });
 
-export const queryFacts = queryGeneric({
+export const queryFacts = defineQuery("queryFacts", {
   args: {
     scopeKey: v.string(),
     subject: v.optional(v.string()),
@@ -570,7 +656,7 @@ export const queryFacts = queryGeneric({
   },
 });
 
-export const corroborate = mutationGeneric({
+export const corroborate = defineMutation("corroborate", {
   args: { scopeKey: v.string(), factId: v.string(), at: v.number() },
   returns: v.number(),
   handler: async (ctx: MCtx, { scopeKey, factId, at }) => {
@@ -584,7 +670,7 @@ export const corroborate = mutationGeneric({
   },
 });
 
-export const expireFacts = mutationGeneric({
+export const expireFacts = defineMutation("expireFacts", {
   args: { scopeKey: v.string(), ids: v.array(v.string()), at: v.string() },
   returns: v.number(),
   handler: async (ctx: MCtx, { scopeKey, ids, at }) => {
@@ -604,7 +690,7 @@ export const expireFacts = mutationGeneric({
   },
 });
 
-export const sweepExpired = mutationGeneric({
+export const sweepExpired = defineMutation("sweepExpired", {
   args: { scopeKey: v.string(), now: v.string() },
   returns: v.number(),
   handler: async (ctx: MCtx, { scopeKey, now }) => {
@@ -627,7 +713,7 @@ export const sweepExpired = mutationGeneric({
 // eraseScope (StorePort §15) — facts + memories + blocks + history + events + sessions
 // ---------------------------------------------------------------------------
 
-export const eraseScope = mutationGeneric({
+export const eraseScope = defineMutation("eraseScope", {
   args: { scopeKey: v.string(), agentId: v.optional(v.string()) },
   returns: v.object({ deleted: v.number() }),
   handler: async (ctx: MCtx, { scopeKey, agentId }) => {
@@ -671,7 +757,7 @@ export const eraseScope = mutationGeneric({
 // Vectors (VectorPort) — manual cosine scoring in the handler
 // ---------------------------------------------------------------------------
 
-export const vectorUpsert = mutationGeneric({
+export const vectorUpsert = defineMutation("vectorUpsert", {
   args: {
     id: v.string(),
     scopeKey: v.string(),
@@ -691,7 +777,7 @@ export const vectorUpsert = mutationGeneric({
   },
 });
 
-export const vectorSearch = queryGeneric({
+export const vectorSearch = defineQuery("vectorSearch", {
   args: { queryVector: v.array(v.number()), scopeKey: v.string(), topK: v.number() },
   handler: async (ctx: QCtx, { queryVector, scopeKey, topK }) => {
     const rows = await ctx.db
@@ -717,7 +803,7 @@ export const vectorSearch = queryGeneric({
   },
 });
 
-export const vectorDelete = mutationGeneric({
+export const vectorDelete = defineMutation("vectorDelete", {
   args: { id: v.string(), scopeKey: v.string() },
   returns: v.null(),
   handler: async (ctx: MCtx, { id, scopeKey }) => {
@@ -730,7 +816,7 @@ export const vectorDelete = mutationGeneric({
   },
 });
 
-export const vectorEraseScope = mutationGeneric({
+export const vectorEraseScope = defineMutation("vectorEraseScope", {
   args: { scopeKey: v.string() },
   returns: v.object({ deleted: v.number() }),
   handler: async (ctx: MCtx, { scopeKey }) => {
@@ -747,7 +833,7 @@ export const vectorEraseScope = mutationGeneric({
   },
 });
 
-export const vectorList = queryGeneric({
+export const vectorList = defineQuery("vectorList", {
   args: { scopeKey: v.string() },
   handler: async (ctx: QCtx, { scopeKey }) => {
     const rows = await ctx.db
@@ -765,7 +851,7 @@ export const vectorList = queryGeneric({
 // serializable transaction (OCC) — exactly the exactly-once guarantee §9.3 needs. No JS mutex.
 // ---------------------------------------------------------------------------
 
-export const writeCheckpoint = mutationGeneric({
+export const writeCheckpoint = defineMutation("writeCheckpoint", {
   args: { sessionId: v.string(), seq: v.number(), hash: v.string(), now: v.string() },
   returns: v.null(),
   handler: async (ctx: MCtx, { sessionId, seq, hash, now }) => {
@@ -783,7 +869,7 @@ export const writeCheckpoint = mutationGeneric({
   },
 });
 
-export const lastCheckpoint = queryGeneric({
+export const lastCheckpoint = defineQuery("lastCheckpoint", {
   args: { sessionId: v.string() },
   handler: async (ctx: QCtx, { sessionId }) => {
     // by_session_seq orders ascending by seq within the session — take the last (highest seq).
@@ -797,7 +883,7 @@ export const lastCheckpoint = queryGeneric({
   },
 });
 
-export const recordIntent = mutationGeneric({
+export const recordIntent = defineMutation("recordIntent", {
   args: { key: v.string(), argsHash: v.string(), now: v.string() },
   returns: v.null(),
   handler: async (ctx: MCtx, { key, argsHash, now }) => {
@@ -817,7 +903,7 @@ export const recordIntent = mutationGeneric({
   },
 });
 
-export const recordCompletion = mutationGeneric({
+export const recordCompletion = defineMutation("recordCompletion", {
   args: { key: v.string(), result: v.string(), now: v.string() },
   returns: v.null(),
   handler: async (ctx: MCtx, { key, result, now }) => {
@@ -843,7 +929,7 @@ export const recordCompletion = mutationGeneric({
   },
 });
 
-export const getIdempotency = queryGeneric({
+export const getIdempotency = defineQuery("getIdempotency", {
   args: { key: v.string() },
   handler: async (ctx: QCtx, { key }) => {
     const row = await ctx.db
@@ -863,7 +949,7 @@ export const getIdempotency = queryGeneric({
   },
 });
 
-export const recordDecision = mutationGeneric({
+export const recordDecision = defineMutation("recordDecision", {
   args: { sessionId: v.string(), callId: v.string(), decision: v.string(), now: v.string() },
   returns: v.null(),
   handler: async (ctx: MCtx, { sessionId, callId, decision, now }) => {
@@ -882,7 +968,7 @@ export const recordDecision = mutationGeneric({
   },
 });
 
-export const getDecision = queryGeneric({
+export const getDecision = defineQuery("getDecision", {
   args: { sessionId: v.string(), callId: v.string() },
   handler: async (ctx: QCtx, { sessionId, callId }) => {
     const row = await ctx.db
@@ -893,3 +979,67 @@ export const getDecision = queryGeneric({
     return row ? row.decision : null;
   },
 });
+
+// ---------------------------------------------------------------------------
+// Authorized factory
+// ---------------------------------------------------------------------------
+
+/**
+ * Build all 31 eidentic functions with an optional authorization hook.
+ *
+ * This is the SECURE, opt-in counterpart to the bare top-level exports (`export *`). Use it in your
+ * host app's functions module to gate every call:
+ *
+ *   // convex/eidentic.ts
+ *   import { eidenticFunctions, type EidenticAuthorize } from "@eidentic/convex";
+ *
+ *   const authorize: EidenticAuthorize = async (ctx) => {
+ *     const identity = await ctx.auth.getUserIdentity();
+ *     if (!identity) throw new Error("unauthenticated");
+ *   };
+ *
+ *   export const {
+ *     createSession, getSession, listSessions, appendEvents, readEvents,
+ *     getBlocks, getBlock, upsertBlock, appendBlock, getBlockHistory, listBlocks,
+ *     indexMemory, searchMemory, assertFact, queryFacts, corroborate, expireFacts,
+ *     sweepExpired, eraseScope, writeCheckpoint, lastCheckpoint, recordIntent,
+ *     recordCompletion, getIdempotency, recordDecision, getDecision,
+ *     vectorUpsert, vectorSearch, vectorDelete, vectorEraseScope, vectorList,
+ *   } = eidenticFunctions({ authorize });
+ *
+ * When `opts.authorize` is set it is `await`ed BEFORE each handler body runs (a throw rejects the
+ * op). When it is absent, the returned functions are functionally identical to the bare exports.
+ *
+ * The functions are re-registered by Convex under the names they are re-exported as, so the loose
+ * `Record<string, …>` return type is fine — the destructure above pins the names.
+ */
+export function eidenticFunctions(opts: { authorize?: EidenticAuthorize } = {}): Record<
+  string,
+  RegisteredMutation<"public", any, any> | RegisteredQuery<"public", any, any>
+> {
+  const { authorize } = opts;
+  const out: Record<
+    string,
+    RegisteredMutation<"public", any, any> | RegisteredQuery<"public", any, any>
+  > = {};
+
+  for (const [op, spec] of Object.entries(HANDLERS)) {
+    const base = spec.handler as (ctx: unknown, args: Record<string, unknown>) => unknown;
+    // Wrap so `authorize` runs first; the bound `op` name and validated `args` flow into the hook.
+    const handler = async (ctx: unknown, args: Record<string, unknown>): Promise<unknown> => {
+      if (authorize) await authorize(ctx as QCtx | MCtx, { op, args });
+      return base(ctx, args);
+    };
+    const def = {
+      args: spec.args,
+      ...(spec.returns !== undefined ? { returns: spec.returns } : {}),
+      handler,
+    };
+    out[op] =
+      spec.kind === "mutation"
+        ? mutationGeneric(def as Parameters<typeof mutationGeneric>[0])
+        : queryGeneric(def as Parameters<typeof queryGeneric>[0]);
+  }
+
+  return out;
+}
