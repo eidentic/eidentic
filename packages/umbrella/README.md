@@ -83,7 +83,8 @@ contradictions invalidate rather than accumulate), and sleep-time consolidation.
 
 **2. Production fundamentals built in.** Durable checkpoint/resume with exactly-once tool
 dispatch, enforced cost ceilings per turn, built-in rate-limiting and quotas,
-OpenTelemetry GenAI spans, deny-by-default permissions, sandboxed code execution, secret
+OpenTelemetry GenAI spans, a structured audit-event stream (permission denials, quota/rate-limit
+rejections, auth failures, erasure), deny-by-default permissions, sandboxed code execution, secret
 isolation, and one-call GDPR erasure that fans out across every store.
 
 **3. Runs everywhere.** Ports-and-adapters: swap the store, vector backend, embedder, or

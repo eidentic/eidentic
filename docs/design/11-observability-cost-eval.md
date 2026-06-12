@@ -45,6 +45,28 @@ evolve.* We shield users from that churn: our emitted attributes track the conve
 gain fields, but the user-facing event types do not break. Opt into newer conventions via
 `OTEL_SEMCONV_STABILITY_OPT_IN`.
 
+### Audit bus — the compliance event stream
+
+Tracing answers *"what did the agent do, and how long did it take?"* — it does **not** answer
+*"what was refused, and why?"*, which is exactly what a security/compliance log needs. The audit
+bus fills that gap: an optional `onAuditEvent(event: AuditEvent)` sink, wired identically on the
+`Agent` and on `createServer`, emits one typed stream of security-relevant events:
+
+| `type` | Emitted by | When |
+|---|---|---|
+| `tool.call` | Agent | every executed tool dispatch (success or error) |
+| `permission.denied` | Agent | a tool was refused at the gate (`reason: "denied" \| "gate-error"`) — these **never** reach `onPostToolUse` |
+| `erasure` | Agent | `Agent.eraseScope` fan-out, with per-subsystem + total deleted counts |
+| `auth.failure` | server | a request was rejected with `401` |
+| `quota.exceeded` | server | a request was rejected with `402` |
+| `ratelimit.exceeded` | server | a request was throttled with `429` (pre-auth or post-auth) |
+
+The sink is **best-effort and out-of-band**: it complements (does not replace) `onPostToolUse` and
+tracing, and a throwing sink is swallowed and logged at `"warn"` so it can never affect a run or a
+request. Wiring the same sink to both the Agent and the server yields a single unified audit log
+keyed by `scopeKey` / `principalId`. The `AuditEvent` union lives in `@eidentic/types`, so a custom
+store or transport can consume it without depending on `@eidentic/core`.
+
 ---
 
 ## 11.2 Cost Governor
@@ -138,6 +160,7 @@ new Agent({
     onCostThreshold: forceModel('haiku'),
   },
   observability: otel({ exporter: 'otlp', endpoint: process.env.OTLP_URL }), // default in-memory
+  onAuditEvent: (e) => auditLog.write(e), // §11.1 audit bus — same sink on createServer for one log
 })
 
 // eval
