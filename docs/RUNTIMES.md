@@ -58,6 +58,7 @@ Packages that use `node:fs` or other Node-only builtins work on **Node and Bun**
 | `@eidentic/memory` | none | Yes |
 | `@eidentic/libsql` | none (HTTP) | Yes |
 | `@eidentic/postgres` | none (HTTP) | Yes |
+| `@eidentic/convex` | none (HTTP) | Yes |
 | `@eidentic/server` | `node:http` / `node:fs` | Node / Bun only |
 | `@eidentic/sqlite` | native addon | Node / Bun only |
 | `@eidentic/skills` | `node:fs`, `node:child_process` | Node / Bun only |

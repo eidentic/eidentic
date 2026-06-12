@@ -46,6 +46,7 @@ The `eidentic` package re-exports the core stack so you get everything in one in
 | `@eidentic/types` | Canonical protocol types and port interfaces |
 | `@eidentic/model` | `AIModel`, `AIEmbedder`, price tables, Ollama adapter |
 | `@eidentic/sqlite` | `SqliteStore` — durable store over `better-sqlite3` (Node/Bun) |
+| `@eidentic/convex` | `ConvexStore` — Convex-backed store + temporal KG + vector (reactive, TS-native) |
 | `@eidentic/memory` | `Memory` — four-tier recall, self-editing blocks, knowledge graph |
 | `@eidentic/cli` | `eidentic dev` / `eidentic studio` / `eidentic init` commands |
 
