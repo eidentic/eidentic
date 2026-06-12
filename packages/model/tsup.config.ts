@@ -5,6 +5,12 @@ import { fixNodeProtocol } from "../../scripts/tsup-node-protocol.mjs";
 // re-add the `node:` prefix esbuild stripped from built-in imports so the dist
 // loads on Deno and other runtimes that require it.
 export default defineConfig({
+  esbuildOptions(options) {
+    // The dual ESM/CJS build guards `createRequire(import.meta.url)` behind a `typeof require`
+    // check, so the CJS bundle never evaluates `import.meta` at runtime. Silence esbuild's known
+    // false-positive "empty-import-meta" warning for this intentional pattern.
+    options.logOverride = { ...options.logOverride, "empty-import-meta": "silent" };
+  },
   onSuccess: async () => {
     await fixNodeProtocol("dist");
   },
