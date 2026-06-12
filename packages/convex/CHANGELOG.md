@@ -1,5 +1,16 @@
 # @eidentic/convex
 
+## 0.3.0
+
+### Minor Changes
+
+- `ConvexStore` now implements **`DurablePort`** in addition to `StorePort` + `GraphPort`, so durable
+  execution works on Convex: checkpoint/resume, an exactly-once idempotency ledger (intent →
+  completion), and human-in-the-loop suspension decisions. Three tables are added to `eidenticTables`
+  (`checkpoints`, `idempotency`, `decisions`). Each operation is a single serializable Convex
+  mutation, so exactly-once holds under concurrency without extra locking. Passes the full
+  `durableConformanceCases` suite (11 cases) alongside the existing store + vector conformance.
+
 ## 0.2.1
 
 ### Patch Changes

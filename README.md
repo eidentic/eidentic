@@ -249,7 +249,7 @@ and avoids pulling in native addons you don't need.
 | `@eidentic/workflow` | Multi-step workflow orchestration |
 | `@eidentic/libsql` | libSQL/Turso store (pure-JS, works under Next.js/Bun/edge) |
 | `@eidentic/postgres` | Postgres store (pgvector-ready) |
-| `@eidentic/convex` | Convex store (`StorePort` + `GraphPort` + `VectorPort`) — reactive, TypeScript-native backend |
+| `@eidentic/convex` | Convex store (`StorePort` + `GraphPort` + `VectorPort` + `DurablePort`) — reactive, TypeScript-native backend with durable execution |
 | `@eidentic/mcp` | MCP host + server |
 | … | pgvector, lancedb, qdrant, pinecone, e2b, langfuse, eval, bench |
 

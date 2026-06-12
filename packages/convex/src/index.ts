@@ -28,6 +28,10 @@ import {
   type VectorPort,
   type VectorEntry,
   type VectorSearchResult,
+  type DurablePort,
+  type Checkpoint,
+  type IdempotencyRecord,
+  type SuspendDecision,
 } from "@eidentic/types";
 
 // ---------------------------------------------------------------------------
@@ -74,6 +78,13 @@ export interface ConvexStoreFns {
   expireFacts: FnRef;
   sweepExpired: FnRef;
   eraseScope: FnRef;
+  writeCheckpoint: FnRef;
+  lastCheckpoint: FnRef;
+  recordIntent: FnRef;
+  recordCompletion: FnRef;
+  getIdempotency: FnRef;
+  recordDecision: FnRef;
+  getDecision: FnRef;
 }
 
 /** The set of vector function references the runtime calls. */
@@ -90,6 +101,8 @@ const STORE_FN_NAMES: (keyof ConvexStoreFns)[] = [
   "getBlocks", "getBlock", "upsertBlock", "appendBlock", "getBlockHistory", "listBlocks",
   "indexMemory", "searchMemory", "assertFact", "queryFacts", "corroborate", "expireFacts",
   "sweepExpired", "eraseScope",
+  "writeCheckpoint", "lastCheckpoint", "recordIntent", "recordCompletion", "getIdempotency",
+  "recordDecision", "getDecision",
 ];
 
 const VECTOR_FN_NAMES: (keyof ConvexVectorFns)[] = [
@@ -163,7 +176,7 @@ export interface ConvexStoreOptions {
   now?: () => string;
 }
 
-export class ConvexStore implements StorePort, GraphPort {
+export class ConvexStore implements StorePort, GraphPort, DurablePort {
   private readonly fns: ConvexStoreFns;
   private factIdCounter = 0;
   private readonly newFactId: () => string;
@@ -330,6 +343,58 @@ export class ConvexStore implements StorePort, GraphPort {
 
   async sweepExpired(scope: Scope, now: string): Promise<number> {
     return (await this.runner.mutation(this.fns.sweepExpired, { scopeKey: scopeKey(scope), now })) as number;
+  }
+
+  // --- Durable (checkpoints + idempotency ledger + suspension decisions) ---
+
+  async writeCheckpoint(sessionId: string, seq: number, hash: string): Promise<void> {
+    await this.runner.mutation(this.fns.writeCheckpoint, { sessionId, seq, hash, now: this.now() });
+  }
+
+  async lastCheckpoint(sessionId: string): Promise<Checkpoint | null> {
+    return (await this.runner.query(this.fns.lastCheckpoint, { sessionId })) as Checkpoint | null;
+  }
+
+  async recordIntent(key: string, argsHash: string): Promise<void> {
+    await this.runner.mutation(this.fns.recordIntent, { key, argsHash, now: this.now() });
+  }
+
+  async recordCompletion(key: string, result: unknown): Promise<void> {
+    // Serialize so the result's object-key order survives the Convex `v.any()` round-trip.
+    await this.runner.mutation(this.fns.recordCompletion, {
+      key,
+      result: JSON.stringify(result ?? null),
+      now: this.now(),
+    });
+  }
+
+  async getIdempotency(key: string): Promise<IdempotencyRecord | null> {
+    const row = (await this.runner.query(this.fns.getIdempotency, { key })) as
+      | { key: string; argsHash: string; status: "intent" | "applied"; result?: string; createdAt: string }
+      | null;
+    if (!row) return null;
+    // `result` is a JSON string on the wire (preserves object-key order) — parse it here.
+    return {
+      key: row.key,
+      argsHash: row.argsHash,
+      status: row.status,
+      ...(row.result !== undefined ? { result: JSON.parse(row.result) } : {}),
+      createdAt: row.createdAt,
+    };
+  }
+
+  async recordDecision(sessionId: string, callId: string, decision: SuspendDecision): Promise<void> {
+    await this.runner.mutation(this.fns.recordDecision, {
+      sessionId,
+      callId,
+      decision: JSON.stringify(decision),
+      now: this.now(),
+    });
+  }
+
+  async getDecision(sessionId: string, callId: string): Promise<SuspendDecision | null> {
+    const raw = (await this.runner.query(this.fns.getDecision, { sessionId, callId })) as string | null;
+    return raw === null ? null : (JSON.parse(raw) as SuspendDecision);
   }
 }
 

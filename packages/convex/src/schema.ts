@@ -111,4 +111,35 @@ export const eidenticTables = {
   })
     .index("by_scope", ["scopeKey"])
     .index("by_scope_ext", ["scopeKey", "extId"]),
+
+  // Durable-execution checkpoint markers (§9.1). One row per (sessionId, seq); writeCheckpoint
+  // upserts the hash. `by_session_seq` orders ascending by seq within a session so lastCheckpoint
+  // reads the highest-seq row.
+  checkpoints: defineTable({
+    sessionId: v.string(),
+    seq: v.number(),
+    hash: v.string(),
+    createdAt: v.string(),
+  }).index("by_session_seq", ["sessionId", "seq"]),
+
+  // Idempotency ledger (§9.3). One row per `key` (uniqueness enforced in the mutations). `status`
+  // starts "intent" and flips to "applied" once the side effect succeeds. `result` is a JSON string
+  // (present only when applied) so a stored `null` is distinguishable from "no result yet" AND the
+  // result's object-key order round-trips faithfully (Convex `v.any()` normalizes key order).
+  idempotency: defineTable({
+    key: v.string(),
+    status: v.union(v.literal("intent"), v.literal("applied")),
+    argsHash: v.string(),
+    result: v.optional(v.string()),
+    createdAt: v.string(),
+  }).index("by_key", ["key"]),
+
+  // Human-in-the-loop suspension decisions (§9.4). One row per (sessionId, callId); recordDecision
+  // upserts the SuspendDecision. Stored as a JSON string so object-key order round-trips faithfully.
+  decisions: defineTable({
+    sessionId: v.string(),
+    callId: v.string(),
+    decision: v.string(),
+    createdAt: v.string(),
+  }).index("by_session_call", ["sessionId", "callId"]),
 } as const;
