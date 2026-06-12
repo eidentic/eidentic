@@ -1,5 +1,12 @@
 # @eidentic/cli
 
+## 0.1.3
+
+### Patch Changes
+
+- @eidentic/core@0.2.0
+- @eidentic/studio@0.1.3
+
 ## 0.1.2
 
 ### Patch Changes

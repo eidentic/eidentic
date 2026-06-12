@@ -1,5 +1,13 @@
 # @eidentic/studio
 
+## 0.1.3
+
+### Patch Changes
+
+- Updated dependencies [cba3409]
+  - @eidentic/model@0.2.1
+  - @eidentic/core@0.2.0
+
 ## 0.1.2
 
 ### Patch Changes

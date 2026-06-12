@@ -1,5 +1,14 @@
 # eidentic
 
+## 0.1.4
+
+### Patch Changes
+
+- Updated dependencies [cba3409]
+  - @eidentic/model@0.2.1
+  - @eidentic/core@0.2.0
+  - @eidentic/cli@0.1.3
+
 ## 0.1.3
 
 ### Patch Changes
