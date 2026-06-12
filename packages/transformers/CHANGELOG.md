@@ -1,5 +1,18 @@
 # @eidentic/transformers
 
+## 0.1.3
+
+### Patch Changes
+
+- 9d3b98d: Docs: correct README code examples that drifted from the real API — surfaced by the new
+  `check:readme` CI gate that type-checks every README snippet against the built types. Fixes include
+  the stale streaming loop (`ev.kind`/`ev.delta` → `ev.type`/`ev.delta.text`) across several stores,
+  `new AIEmbedder(...)` → `await AIEmbedder.create(...)`, `SqliteStore.create(...)` → `new SqliteStore(...)`,
+  invalid `Scope` literals (now `{ kind, agentId, … }`), `costCeiling` → `policy.maxCostUsd`,
+  Ollama `baseUrl` → `baseURL`, and adapter-specific signature corrections.
+- Updated dependencies [9d3b98d]
+  - @eidentic/types@0.2.1
+
 ## 0.1.2
 
 ### Patch Changes

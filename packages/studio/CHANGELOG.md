@@ -1,5 +1,16 @@
 # @eidentic/studio
 
+## 0.1.5
+
+### Patch Changes
+
+- Updated dependencies [9d3b98d]
+  - @eidentic/core@0.2.2
+  - @eidentic/model@0.2.2
+  - @eidentic/server@0.2.2
+  - @eidentic/types@0.2.1
+  - @eidentic/workflow@0.1.4
+
 ## 0.1.4
 
 ### Patch Changes

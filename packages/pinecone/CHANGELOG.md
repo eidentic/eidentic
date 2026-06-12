@@ -1,5 +1,12 @@
 # @eidentic/pinecone
 
+## 0.2.1
+
+### Patch Changes
+
+- Updated dependencies [9d3b98d]
+  - @eidentic/types@0.2.1
+
 ## 0.2.0
 
 ### Minor Changes
