@@ -9,8 +9,14 @@ import type { Scope } from "@eidentic/types";
 //   const embedder = await AIEmbedder.create(openai.embedding("text-embedding-3-small"));
 // Here we use AI SDK's test mock so the example runs with no key and no native deps.
 const model = new MockEmbeddingModelV3({
-  doEmbed: async ({ values }) => ({ embeddings: values.map((v) => [v.length, 1, 0, 0]) }),
-});
+  // AI SDK's test mock types `doEmbed` against its internal `EmbeddingModelV3['doEmbed']` method
+  // signature, which a plain arrow doesn't structurally satisfy; the runtime shape below is exactly
+  // what the SDK expects (`{ embeddings, usage }`), so we assert the constructor option type.
+  doEmbed: async ({ values }: { values: readonly string[] }) => ({
+    embeddings: values.map((v) => [v.length, 1, 0, 0]),
+    usage: { tokens: 0 },
+  }),
+} as unknown as ConstructorParameters<typeof MockEmbeddingModelV3>[0]);
 const embedder = await AIEmbedder.create(model);
 console.log("hosted embedder dim:", embedder.dim);
 

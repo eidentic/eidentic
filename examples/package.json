@@ -42,7 +42,8 @@
     "hello:web-search": "tsx hello-web-search.ts",
     "hello:pricing": "tsx hello-pricing.ts",
     "hello:structured": "tsx hello-structured.ts",
-    "hello:chat-ui": "tsx hello-chat-ui.ts"
+    "hello:chat-ui": "tsx hello-chat-ui.ts",
+    "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.0",

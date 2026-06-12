@@ -94,11 +94,9 @@ console.log();
 // Answer model: claude-haiku-4-5 for cost-effective piloting
 // Replace with claude-sonnet-4-5 or another model for production runs
 const answerModel = new AIModel(openai(process.env["EIDENTIC_BENCH_ANSWER_MODEL"] ?? "gpt-4o-mini"));
-answerModel.modelId = process.env["EIDENTIC_BENCH_ANSWER_MODEL"] ?? "gpt-4o-mini";
 
 // Judge model: claude-sonnet-4-5 for strict, capable judging
 const judgeModel = new AIModel(openai(process.env["EIDENTIC_BENCH_JUDGE_MODEL"] ?? "gpt-4o-mini"));
-judgeModel.modelId = process.env["EIDENTIC_BENCH_JUDGE_MODEL"] ?? "gpt-4o-mini";
 
 // ── Memory factory (used only when mode="memory") ──────────────────────────────
 
