@@ -1,35 +1,26 @@
 /**
  * eidentic.config.example.ts — copy this file to eidentic.config.ts in your project root.
  *
- * Loaded by `eidentic dev` via jiti — no build step required.
- * Set ANTHROPIC_API_KEY (or another provider key) in your environment before running.
+ * Loaded by `eidentic dev` via jiti — no build step required. The CLI reads `agents`
+ * (and the optional `port` / `auth`) from the default export and serves them.
  *
  * Usage:
  *   cp examples/eidentic.config.example.ts eidentic.config.ts
  *   ANTHROPIC_API_KEY=sk-... eidentic dev
  */
 
-import { Agent } from "@eidentic/core";
-import type { EidenticConfig } from "@eidentic/cli";
-
-// Replace with a real model adapter, e.g.:
-//   import { anthropic } from "@ai-sdk/anthropic";
-//   import { AIModel } from "@eidentic/model";
-//   const model = new AIModel(anthropic("claude-opus-4-5"));
-//
-// For this example we just type the config — import a model at runtime.
-declare const model: Parameters<typeof Agent>[0]["model"];
+import { Agent, AIModel, SqliteStore } from "eidentic";
+import { anthropic } from "@ai-sdk/anthropic";
 
 const assistant = new Agent({
   id: "assistant",
   instructions: "You are a helpful assistant powered by Eidentic.",
-  model,
+  model: new AIModel(anthropic("claude-sonnet-4-5")),
+  store: new SqliteStore("./eidentic.sqlite"),
 });
 
-const config: EidenticConfig = {
+export default {
   agents: { assistant },
   port: 3000,
-  // auth: ApiKeyAuth({ "my-key": { userId: "me" } }),
+  // auth: ApiKeyAuth({ "my-key": { userId: "me" } }), // from @eidentic/server, for multi-tenant
 };
-
-export default config;

@@ -113,14 +113,10 @@ console.log();
 const answerModel = new AIModel(
   openai(process.env["EIDENTIC_BENCH_ANSWER_MODEL"] ?? "gpt-4o-mini"),
 );
-answerModel.modelId =
-  process.env["EIDENTIC_BENCH_ANSWER_MODEL"] ?? "gpt-4o-mini";
 
 const judgeModel = new AIModel(
   openai(process.env["EIDENTIC_BENCH_JUDGE_MODEL"] ?? "gpt-4o-mini"),
 );
-judgeModel.modelId =
-  process.env["EIDENTIC_BENCH_JUDGE_MODEL"] ?? "gpt-4o-mini";
 
 // ── Memory factory (used only when mode="memory") ─────────────────────────────
 
