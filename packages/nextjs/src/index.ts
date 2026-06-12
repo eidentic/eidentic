@@ -117,10 +117,17 @@ export interface WithEidenticOptions {
 // ---------------------------------------------------------------------------
 
 interface EidenticRequestBody {
-  /** The user message. Also accepted as `message` (alias). */
+  /** The user message as a plain string. */
   input?: string;
-  /** Alias for `input` — matches the `useChat` default field name. */
+  /** Alias for `input`. */
   message?: string;
+  /**
+   * A Vercel AI SDK `useChat` message history (`{ messages: [...] }` is what `useChat` POSTs by
+   * default). The newest user message's text is used as the input; the agent reloads prior turns
+   * from the store via `sessionId`, so the full history isn't replayed. Both the v5+ `parts` shape
+   * and the legacy `content` string are accepted.
+   */
+  messages?: Array<{ role?: string; content?: string; parts?: Array<{ type?: string; text?: string }> }>;
   /** Optional session identifier.  A new UUID is minted when absent. */
   sessionId?: string;
   /**
@@ -140,6 +147,31 @@ interface EidenticRequestBody {
 function toHeaders(h: Headers | Record<string, string>): Headers {
   if (h instanceof Headers) return h;
   return new Headers(h);
+}
+
+/**
+ * Extract the newest user message's text from a `useChat`-style `{ messages: [...] }` body.
+ *
+ * `useChat` POSTs the full UIMessage history with the just-typed user message last; the agent
+ * reloads prior turns from the store via `sessionId`, so only that newest user message is the input.
+ * Reads both the AI SDK v5+ `parts` array (`{ type: "text", text }`) and the legacy `content` string.
+ */
+function lastUserMessageText(messages: EidenticRequestBody["messages"]): string | undefined {
+  if (!Array.isArray(messages)) return undefined;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (!m || (m.role !== undefined && m.role !== "user")) continue;
+    if (typeof m.content === "string" && m.content.trim() !== "") return m.content;
+    if (Array.isArray(m.parts)) {
+      const text = m.parts
+        .filter((p) => p?.type === "text" && typeof p.text === "string")
+        .map((p) => p.text)
+        .join("");
+      if (text.trim() !== "") return text;
+    }
+    return undefined; // newest user message had no extractable text — don't fall back to older turns
+  }
+  return undefined;
 }
 
 /** Default body size cap: 1 MB. */
@@ -191,14 +223,18 @@ const DEFAULT_MAX_BODY_BYTES = 1_048_576;
  *
  * ### Request body (JSON)
  *
- * | Field       | Type     | Required | Description                              |
- * |-------------|----------|----------|------------------------------------------|
- * | `input`     | `string` | yes*     | The user message                         |
- * | `message`   | `string` | yes*     | Alias for `input` (useChat default name) |
- * | `sessionId` | `string` | no       | Resume an existing session               |
- * | `userId`    | `string` | no       | User ID for memory scoping (see WARNING) |
+ * | Field       | Type           | Required | Description                                          |
+ * |-------------|----------------|----------|------------------------------------------------------|
+ * | `input`     | `string`       | yes*     | The user message                                     |
+ * | `message`   | `string`       | yes*     | Alias for `input`                                    |
+ * | `messages`  | `UIMessage[]`  | yes*     | A `useChat` history — the newest user message is used |
+ * | `sessionId` | `string`       | no       | Resume an existing session                           |
+ * | `userId`    | `string`       | no       | User ID for memory scoping (see WARNING)             |
  *
- * *One of `input` or `message` must be present and non-empty.
+ * *One of `input`, `message`, or a non-empty `messages` array must be present. The `messages`
+ * form is what Vercel's `useChat` POSTs by default, so the route works with `useChat` out of the
+ * box — no client-side request transform (e.g. `prepareSendMessagesRequest`) is needed. The agent
+ * reloads prior turns from the store via `sessionId`, so only the newest user message is read.
  *
  * WARNING: `userId` and `sessionId` in the request body are caller-controlled.
  * Always derive identity server-side via the `identify` option in multi-tenant
@@ -304,11 +340,13 @@ export function withEidentic(
       );
     }
 
-    // Resolve input — accept `input` or `message` (useChat default)
-    const input = body.input ?? body.message;
+    // Resolve input — accept a plain `input`/`message` string, or a `useChat` `messages` array
+    // (newest user message). This makes the route work out of the box with Vercel's `useChat`,
+    // which POSTs `{ messages: [...] }` by default — no client-side request bridge needed.
+    const input = body.input ?? body.message ?? lastUserMessageText(body.messages);
     if (typeof input !== "string" || input.trim() === "") {
       return new Response(
-        JSON.stringify({ error: "Missing or invalid 'input' (or 'message') field" }),
+        JSON.stringify({ error: "Missing or invalid input — provide 'input', 'message', or a 'messages' array" }),
         { status: 400, headers: { "Content-Type": "application/json" } },
       );
     }

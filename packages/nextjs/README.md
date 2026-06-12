@@ -43,12 +43,15 @@ export const POST = withEidentic(agent);
 ```
 
 ```tsx
-// Any React component
-import { useChat } from "ai/react";
+// Client component — Vercel AI SDK v5+
+import { useChat } from "@ai-sdk/react";
 
 export function Chat() {
-  const { messages, input, handleInputChange, handleSubmit } = useChat({ api: "/api/chat" });
-  return (/* render messages and input */);
+  // `useChat` POSTs `{ messages: [...] }`; `withEidentic` reads the newest user message out of the
+  // box — no `prepareSendMessagesRequest` / request transform needed. Pass a stable `sessionId`
+  // (via the transport body) so the agent persists and recalls the conversation across reloads.
+  const { messages, sendMessage } = useChat();
+  return null; // render `messages`; send with `sendMessage({ text })`
 }
 ```
 
