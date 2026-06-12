@@ -177,6 +177,39 @@ describe("toUIMessageStream", () => {
     expect(textEnds.length).toBeGreaterThanOrEqual(1);
   });
 
+  it("does NOT re-emit streamed text as a second block (no duplicate assistant message)", async () => {
+    const events: StreamEvent[] = [
+      { type: "stream.delta", delta: { text: "Mer" } },
+      { type: "stream.delta", delta: { text: "haba" } },
+      // turn-final assistant event carries the SAME accumulated text
+      { type: "assistant", content: [{ type: "text", text: "Merhaba" }] },
+      { type: "result", subtype: "success", usage: { inputTokens: 5, outputTokens: 2 }, numTurns: 1, sessionId: "s1" },
+    ];
+
+    const chunks = await collectChunks(events);
+
+    // Exactly ONE text block (the streamed one) — the assistant event must not open a second.
+    expect(chunks.filter((c) => c.type === "text-start")).toHaveLength(1);
+    expect(chunks.filter((c) => c.type === "text-end")).toHaveLength(1);
+    // The whole-string re-emit is gone…
+    expect(chunks.filter((c) => c.type === "text-delta" && c.delta === "Merhaba")).toHaveLength(0);
+    // …and the streamed deltas reconstruct the message exactly once.
+    const streamed = chunks.filter((c) => c.type === "text-delta").map((c) => c.delta).join("");
+    expect(streamed).toBe("Merhaba");
+  });
+
+  it("still emits the assistant text block when the turn was NOT streamed (no deltas)", async () => {
+    const events: StreamEvent[] = [
+      { type: "assistant", content: [{ type: "text", text: "full answer" }] },
+      { type: "result", subtype: "success", usage: { inputTokens: 1, outputTokens: 1 }, numTurns: 1, sessionId: "s1" },
+    ];
+
+    const chunks = await collectChunks(events);
+
+    expect(chunks.filter((c) => c.type === "text-start")).toHaveLength(1);
+    expect(chunks.filter((c) => c.type === "text-delta").map((c) => c.delta).join("")).toBe("full answer");
+  });
+
   // ---------------------------------------------------------------------------
   // assistant event — tool_use blocks → tool-input-available
   // ---------------------------------------------------------------------------
