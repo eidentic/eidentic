@@ -34,6 +34,11 @@ import {
   type SuspendDecision,
 } from "@eidentic/types";
 
+// Re-export the authorization hook + secure factory so apps can import them from "@eidentic/convex".
+// (The handler functions themselves live at "@eidentic/convex/server" and are re-exported from the
+// host app's own `convex/` module, NOT from here.)
+export { eidenticFunctions, type EidenticAuthorize } from "./server.js";
+
 // ---------------------------------------------------------------------------
 // Runner + function references
 // ---------------------------------------------------------------------------
