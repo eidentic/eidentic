@@ -22,23 +22,21 @@ pnpm add pdf-parse
 import { ingestDocument, loadMarkdown, chunkText } from "@eidentic/rag";
 import { Memory } from "@eidentic/memory";
 
-// Ingest a URL directly into agent memory
-await ingestDocument({
-  source: { type: "url", url: "https://docs.example.com/guide" },
-  memory,
-  scope: { userId: "u-1" },
-});
+// Ingest a URL directly into agent memory (source first, options second)
+await ingestDocument(
+  { url: "https://docs.example.com/guide" },
+  { memory, scope: { userId: "u-1" } },
+);
 
-// Or load and chunk manually
-const doc = await loadMarkdown({ path: "./docs/guide.md" });
-const chunks = chunkText(doc.text, { chunkSize: 512, overlap: 64 });
+// Or ingest pre-loaded typed content — type is "markdown" | "html" | "pdf"
+await ingestDocument(
+  { type: "markdown", data: "# My Doc\n\nHello.", source: "my-doc" },
+  { memory, scope: { userId: "u-1" } },
+);
 
-// Or ingest typed content
-await ingestDocument({
-  source: { type: "text", text: "...", mimeType: "text/plain", title: "My Doc" },
-  memory,
-  scope: { userId: "u-1" },
-});
+// Or load and chunk manually (loadMarkdown takes the content string)
+const doc = loadMarkdown("# My Doc\n\nHello.");
+const chunks = chunkText(doc.text, { size: 512, overlap: 64 });
 ```
 
 ## Links

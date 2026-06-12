@@ -21,7 +21,8 @@ import { Hono } from "hono";
 
 const app = new Hono();
 
-app.route("/", a2aRoutes(myAgent, {
+app.route("/", a2aRoutes({
+  agent: myAgent,
   card: {
     name: "Support Agent",
     description: "Handles customer support queries.",
@@ -36,7 +37,7 @@ app.route("/", a2aRoutes(myAgent, {
 import { a2aTool, httpA2ATransport } from "@eidentic/a2a";
 
 const remoteTool = a2aTool(httpA2ATransport("https://agent.example.com"), {
-  name: "remote_support",
+  id: "remote_support",
   description: "Delegates to the remote support agent.",
 });
 
