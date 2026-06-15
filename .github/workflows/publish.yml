@@ -22,7 +22,7 @@ jobs:
           fetch-depth: 0
 
       # Uses the pnpm version pinned in packageManager.
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
 
       # Node 24 ships npm 11.x — OIDC trusted publishing requires npm >= 11.5.1
       - uses: actions/setup-node@v6
