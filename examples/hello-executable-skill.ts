@@ -22,31 +22,26 @@ import {
 import type { SandboxPort, SandboxResult } from "@eidentic/types";
 
 // ---------------------------------------------------------------------------
-// DEMO-ONLY inline sandbox — NOT real isolation.
+// DEMO-ONLY marker sandbox — NOT real isolation.
 //
 // A real sandbox (e.g. @eidentic/e2b's E2BSandbox) runs code in an isolated
-// microVM off-process. This Function-based executor is used here ONLY to make
-// the demo self-contained and infra-free. Never use this in production.
+// microVM off-process. This marker-only fake is used here ONLY to make the demo
+// self-contained and infra-free without evaluating arbitrary strings.
 // ---------------------------------------------------------------------------
-const inlineDemoSandbox: SandboxPort = {
+const RESULT_MARKER = "EIDENTIC_RESULT:";
+
+const markerOnlyDemoSandbox: SandboxPort = {
   async run(code: string): Promise<SandboxResult> {
-    const lines: string[] = [];
-    // Capture console.log output from the evaluated code.
-    const capturedLog = (...args: unknown[]) => lines.push(args.map(String).join(" "));
-    try {
-      // eslint-disable-next-line no-new-func
-      const fn = new Function("console", code);
-      fn({ log: capturedLog });
-    } catch (err) {
-      return { stdout: "", stderr: String(err), exitCode: 1, error: String(err) };
-    }
-    return { stdout: lines.join("\n"), stderr: "", exitCode: 0 };
+    const idx = code.lastIndexOf(RESULT_MARKER);
+    if (idx === -1) return { stdout: "", stderr: "", exitCode: 0 };
+    const payload = code.slice(idx + RESULT_MARKER.length).split(/\r?\n/, 1)[0]!.trim();
+    return { stdout: `${RESULT_MARKER}${payload}`, stderr: "", exitCode: 0 };
   },
 };
 
 async function main() {
   // ---- 1. Test-gate: passing skill registers, failing skill is rejected -------------------------
-  const bank = new SkillBank({ sandbox: inlineDemoSandbox });
+  const bank = new SkillBank({ sandbox: markerOnlyDemoSandbox });
 
   const doubler: ExecutableSkillDef = {
     name: "doubler",
@@ -130,26 +125,21 @@ async function main() {
 
   // ---- 5. Agent-authored quarantine: code-string path (correct) ---------------------------------
   //
-  // Agent-authored skills must supply `code` (a code string executed via the SandboxPort). The bank
+  // Agent-authored skills must supply `code` (a code string routed through the SandboxPort). The bank
   // does NOT forward `input` into the sandbox call — the code string is self-contained. Here we bake
-  // "world" into the code so the skill produces a fixed, verifiable result.
+  // "world" into the payload so the skill produces a fixed, verifiable result.
   //
-  // The code must print the result marker exactly: EIDENTIC_RESULT:<json>
-  // The bank uses lastIndexOf to find the marker and JSON.parses what follows.
+  // Real sandboxed code should print the result marker exactly: EIDENTIC_RESULT:<json>.
+  // This demo fake accepts the marker directly in the string; the bank then JSON.parses what follows.
   //
-  // The inline inlineDemoSandbox above executes the code via `new Function` with a captured console.log.
-  // In production, replace it with @eidentic/e2b's E2BSandbox for real off-process isolation.
+  // The markerOnlyDemoSandbox above does not evaluate code; it only echoes an explicit
+  // EIDENTIC_RESULT:<json> marker for this infra-free demo. In production, replace it with
+  // @eidentic/e2b's E2BSandbox for real off-process isolation.
   const agentCodeSkill: ExecutableSkillDef = {
     name: "agent-greeter",
     description: "an agent-authored skill using sandboxed code (correct path)",
-    // The code string is self-contained. It prints EIDENTIC_RESULT:<json> so the bank can extract the value.
-    code: `
-// Agent-authored skill body — runs inside the sandbox.
-// Input is baked into the code string (the bank does not forward it at runtime).
-const input = "world";
-const result = "hi " + input;
-console.log("EIDENTIC_RESULT:" + JSON.stringify(result));
-`.trim(),
+    // Marker-only fake payload for the demo sandbox. A real SandboxPort would execute JS off-process.
+    code: `${RESULT_MARKER}"hi world"`,
     // Test: the code always returns "hi world" regardless of the test input value, so the check
     // simply verifies the fixed output. This is the expected pattern for code-string skills.
     tests: [{ name: "greets world", input: "world", check: (o) => o === "hi world" }],
