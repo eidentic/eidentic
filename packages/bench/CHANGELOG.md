@@ -1,5 +1,14 @@
 # @eidentic/bench
 
+## 0.1.4
+
+### Patch Changes
+
+- Updated dependencies [2360146]
+  - @eidentic/types@0.3.0
+  - @eidentic/eval@0.1.4
+  - @eidentic/memory@0.1.4
+
 ## 0.1.3
 
 ### Patch Changes

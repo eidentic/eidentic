@@ -1,5 +1,16 @@
 # @eidentic/cli
 
+## 0.1.7
+
+### Patch Changes
+
+- Updated dependencies [2360146]
+  - @eidentic/core@0.3.0
+  - @eidentic/server@0.3.0
+  - @eidentic/types@0.3.0
+  - @eidentic/studio@0.1.7
+  - @eidentic/eval@0.1.4
+
 ## 0.1.6
 
 ### Patch Changes
