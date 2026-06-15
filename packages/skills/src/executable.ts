@@ -13,6 +13,8 @@ export interface SkillTest {
 export interface SkillRunContext {
   /** Invoke a tool — the bank wraps this so only `allowedTools`-matching ids succeed (deny-by-default). */
   callTool?: (toolId: string, input: unknown) => Promise<unknown>;
+  /** Optional cooperative cancellation signal for long-running skill execution. */
+  signal?: AbortSignal;
 }
 
 /**

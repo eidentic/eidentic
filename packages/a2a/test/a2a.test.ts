@@ -26,7 +26,7 @@ async function rpc(app: ReturnType<typeof a2aRoutes>, method: string, params: un
 
 function makeAgent(outputText: string): AgentLike {
   return {
-    async *query(_input: string, _opts?: { sessionId?: string }) {
+    async *query(_input: string, _opts?: { sessionId?: string; userId?: string; orgId?: string; apiKey?: string }) {
       yield { kind: "result", output: outputText };
     },
   };
@@ -296,6 +296,81 @@ describe("a2aRoutes — task ownership (tasks/get authz)", () => {
     const getResult = await rpc(app, "tasks/get", { id: taskId }, 2);
     expect(getResult.error).toBeUndefined();
     expect(getResult.result.id).toBe(taskId);
+  });
+
+  it("passes auth principal identity into the underlying agent session options", async () => {
+    let captured: { sessionId?: string; userId?: string; orgId?: string; apiKey?: string } | undefined;
+    const agent: AgentLike = {
+      async *query(_input, opts) {
+        captured = opts;
+        yield { kind: "result", output: "ok" };
+      },
+    };
+    const app = a2aRoutes({
+      card,
+      agent,
+      auth: { verify: () => ({ id: "owner-a", userId: "u1", orgId: "o1", apiKey: "key-a" }) },
+    });
+
+    const result = await rpc(app, "message/send", {
+      message: {
+        kind: "message",
+        messageId: "m",
+        role: "user",
+        contextId: "ctx-a",
+        parts: [{ kind: "text", text: "hi" }],
+      },
+    });
+    expect(result.error).toBeUndefined();
+    expect(captured).toEqual({ sessionId: "ctx-a", userId: "u1", orgId: "o1", apiKey: "key-a" });
+  });
+
+  it("rejects cross-owner reuse of an existing contextId", async () => {
+    const app = a2aRoutes({
+      card,
+      agent: makeAgent("ok"),
+      auth: { verify: (req) => req.headers.get("x-api-key") ?? false },
+    });
+    const first = await app.request("/", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": "owner-a" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "message/send",
+        params: {
+          message: {
+            kind: "message",
+            messageId: "m1",
+            role: "user",
+            contextId: "shared-context",
+            parts: [{ kind: "text", text: "hi" }],
+          },
+        },
+      }),
+    });
+    expect((await first.json()).error).toBeUndefined();
+
+    const second = await app.request("/", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": "owner-b" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "message/send",
+        params: {
+          message: {
+            kind: "message",
+            messageId: "m2",
+            role: "user",
+            contextId: "shared-context",
+            parts: [{ kind: "text", text: "intrude" }],
+          },
+        },
+      }),
+    });
+    const body = await second.json();
+    expect(body.error?.code).toBe(-32001);
   });
 });
 

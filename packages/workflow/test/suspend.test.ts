@@ -251,8 +251,7 @@ describe("suspend persistence across registry restart (file store)", () => {
           runId = rec.id;
         }
       }
-      // Wait for write-through to flush.
-      await new Promise((r) => setTimeout(r, 20));
+      await reg1.flush();
 
       // "Crash": brand-new registry + store from the same file.
       const store2 = fileWorkflowRunStore(path);

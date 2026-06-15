@@ -135,6 +135,29 @@ describe("Session", () => {
     expect(reloaded.events().length).toBe(1);
   });
 
+  it("H1 — throws StoreConflictError when a different apiKey opens an existing owned session", async () => {
+    const store = new InMemoryStore();
+    await store.migrate();
+
+    await Session.open(store, {
+      sessionId: "apikey-owned-sess",
+      agentId: "a1",
+      now: () => "t0",
+      newId: () => "id0",
+      apiKey: "key-a",
+    });
+
+    await expect(
+      Session.open(store, {
+        sessionId: "apikey-owned-sess",
+        agentId: "a1",
+        now: () => "t1",
+        newId: () => "id1",
+        apiKey: "key-b",
+      }),
+    ).rejects.toThrow(StoreConflictError);
+  });
+
   it("Finding #1 — session with no owner (legacy) is openable by any identity (back-compat)", async () => {
     const store = new InMemoryStore();
     await store.migrate();

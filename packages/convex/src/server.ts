@@ -207,8 +207,9 @@ export const listSessions = defineQuery("listSessions", {
     limit: v.optional(v.number()),
     userId: v.optional(v.string()),
     orgId: v.optional(v.string()),
+    apiKey: v.optional(v.string()),
   },
-  handler: async (ctx: QCtx, { agentId, limit, userId, orgId }) => {
+  handler: async (ctx: QCtx, { agentId, limit, userId, orgId, apiKey }) => {
     let rows;
     if (agentId !== undefined) {
       rows = await ctx.db
@@ -221,6 +222,7 @@ export const listSessions = defineQuery("listSessions", {
     // Fix 2: strict filtering — exact matches only when a principal filter is given.
     if (userId !== undefined) rows = rows.filter((r) => r.userId === userId);
     if (orgId !== undefined) rows = rows.filter((r) => r.orgId === orgId);
+    if (apiKey !== undefined) rows = rows.filter((r) => r.apiKey === apiKey);
     // Newest-first by createdAt (string ISO compare matches the libsql ORDER BY created_at DESC).
     rows.sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0));
     const sliced = limit !== undefined ? rows.slice(0, limit) : rows;

@@ -1,3 +1,16 @@
 packages:
   - "packages/*"
   - "examples"
+
+onlyBuiltDependencies:
+  - "@lancedb/lancedb"
+  - "better-sqlite3"
+  - "esbuild"
+  - "libsql"
+  - "sharp"
+
+autoInstallPeers: false
+
+overrides:
+  esbuild: "0.28.1"
+  postcss: "8.5.15"

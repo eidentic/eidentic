@@ -45,11 +45,12 @@ export class Session {
       // This covers core/nextjs/A2A/MCP entry points that bypass the HTTP server ownership check.
       //
       // Rules:
-      //  - If the session has no recorded userId/orgId (legacy/NoAuth), always allow (back-compat).
+      //  - If the session has no recorded userId/orgId/apiKey (legacy/NoAuth), always allow (back-compat).
       //  - If the caller supplies a userId and the session has a userId → they must match.
       //  - If the caller supplies an orgId and the session has an orgId → they must match.
+      //  - If the caller supplies an apiKey and the session has an apiKey → they must match.
       //  - A mismatch on any set pair is a conflict.
-      const sessionOwned = session.userId !== undefined || session.orgId !== undefined;
+      const sessionOwned = session.userId !== undefined || session.orgId !== undefined || session.apiKey !== undefined;
       if (sessionOwned) {
         const userIdMismatch =
           deps.userId !== undefined &&
@@ -59,14 +60,17 @@ export class Session {
           deps.orgId !== undefined &&
           session.orgId !== undefined &&
           deps.orgId !== session.orgId;
-        // Both ids supplied by caller but neither matches a stored id → also a conflict.
-        const noMatchAtAll =
-          deps.userId !== undefined &&
-          deps.orgId !== undefined &&
-          session.userId !== deps.userId &&
-          session.orgId !== deps.orgId &&
-          (session.userId !== undefined || session.orgId !== undefined);
-        if (userIdMismatch || orgIdMismatch || noMatchAtAll) {
+        const apiKeyMismatch =
+          deps.apiKey !== undefined &&
+          session.apiKey !== undefined &&
+          deps.apiKey !== session.apiKey;
+        const callerHasIdentity =
+          deps.userId !== undefined || deps.orgId !== undefined || deps.apiKey !== undefined;
+        const anyMatch =
+          (deps.userId !== undefined && session.userId === deps.userId) ||
+          (deps.orgId !== undefined && session.orgId === deps.orgId) ||
+          (deps.apiKey !== undefined && session.apiKey === deps.apiKey);
+        if (userIdMismatch || orgIdMismatch || apiKeyMismatch || (callerHasIdentity && !anyMatch)) {
           throw new StoreConflictError(
             `session ${deps.sessionId} is owned by a different principal`,
           );

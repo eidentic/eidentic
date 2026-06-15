@@ -1,6 +1,7 @@
 import type { Tool } from "@eidentic/core";
 import type { ToolContext } from "@eidentic/core";
 import type { TracerPort } from "@eidentic/types";
+import { randomUUID } from "node:crypto";
 
 // ---------------------------------------------------------------------------
 // Structural interface — the minimal MCP server surface `serveTools` drives.
@@ -505,7 +506,7 @@ export function serveTools(
 
 /** Minimal agent surface `serveAgent` needs (satisfied by `@eidentic/core` `Agent`). */
 export interface AgentLike {
-  query(input: string): AsyncIterable<unknown> | Promise<unknown>;
+  query(input: string, opts?: { sessionId?: string; userId?: string; orgId?: string; apiKey?: string }): AsyncIterable<unknown> | Promise<unknown>;
 }
 
 /**
@@ -543,7 +544,13 @@ export function serveAgent(
           description,
           inputSchema: {
             type: "object",
-            properties: { input: { type: "string", description: "The query to send to the agent." } },
+            properties: {
+              input: { type: "string", description: "The query to send to the agent." },
+              sessionId: { type: "string", description: "Optional session/context id. Defaults to a fresh UUID." },
+              userId: { type: "string", description: "Optional user identity for session ownership." },
+              orgId: { type: "string", description: "Optional organization identity for session ownership." },
+              apiKey: { type: "string", description: "Optional API key identity for session ownership." },
+            },
             required: ["input"],
           },
         },
@@ -557,8 +564,15 @@ export function serveAgent(
       return { content: [{ type: "text", text: `unknown tool '${name}'` }], isError: true };
     }
     const input: string = req?.params?.arguments?.input ?? req?.arguments?.input ?? "";
+    const args = (req?.params?.arguments ?? req?.arguments ?? {}) as Record<string, unknown>;
+    const sessionId = typeof args["sessionId"] === "string" && args["sessionId"].length > 0 ? args["sessionId"] : randomUUID();
     try {
-      const result = await agent.query(input);
+      const result = await agent.query(input, {
+        sessionId,
+        ...(typeof args["userId"] === "string" ? { userId: args["userId"] } : {}),
+        ...(typeof args["orgId"] === "string" ? { orgId: args["orgId"] } : {}),
+        ...(typeof args["apiKey"] === "string" ? { apiKey: args["apiKey"] } : {}),
+      });
       // If it's an async iterable, drain it and take the last value.
       let finalOutput: unknown = result;
       if (result != null && typeof result === "object" && Symbol.asyncIterator in (result as object)) {
@@ -727,7 +741,13 @@ export async function mcpServer(opts: McpServerToolsOpts): Promise<McpServerHand
       sideEffect: "destructive",
       jsonSchema: {
         type: "object",
-        properties: { input: { type: "string", description: "The query to send to the agent." } },
+        properties: {
+          input: { type: "string", description: "The query to send to the agent." },
+          sessionId: { type: "string", description: "Optional session/context id. Defaults to a fresh UUID." },
+          userId: { type: "string", description: "Optional user identity for session ownership." },
+          orgId: { type: "string", description: "Optional organization identity for session ownership." },
+          apiKey: { type: "string", description: "Optional API key identity for session ownership." },
+        },
         required: ["input"],
       },
       parse: (raw: unknown): { ok: true; value: unknown } | { ok: false; error: string } => {
@@ -739,7 +759,13 @@ export async function mcpServer(opts: McpServerToolsOpts): Promise<McpServerHand
       },
       execute: async (input: unknown): Promise<unknown> => {
         const queryInput = (input as { input: string }).input;
-        const result = await agent.query(queryInput);
+        const obj = input as { sessionId?: unknown; userId?: unknown; orgId?: unknown; apiKey?: unknown };
+        const result = await agent.query(queryInput, {
+          sessionId: typeof obj.sessionId === "string" && obj.sessionId.length > 0 ? obj.sessionId : randomUUID(),
+          ...(typeof obj.userId === "string" ? { userId: obj.userId } : {}),
+          ...(typeof obj.orgId === "string" ? { orgId: obj.orgId } : {}),
+          ...(typeof obj.apiKey === "string" ? { apiKey: obj.apiKey } : {}),
+        });
         let finalOutput: unknown = result;
         if (result != null && typeof result === "object" && Symbol.asyncIterator in (result as object)) {
           for await (const event of result as AsyncIterable<unknown>) {

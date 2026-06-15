@@ -29,6 +29,8 @@ const RESULT_MARKER = "EIDENTIC_RESULT:";
 export interface SkillBankOptions {
   /** Sandbox for code-string skills. Defaults to a refusing sandbox (secure-by-default, §10.7). */
   sandbox?: SandboxPort;
+  /** Wall-clock timeout for code-string sandbox runs. Defaults to the sandbox adapter's own policy. */
+  sandboxTimeoutMs?: number;
   /** When true, `use()` requires a valid signature (verified with `verifyKey`). Wired fully in Task 3. */
   requireSigned?: boolean;
   /** Public key (PEM) used to verify signatures when `requireSigned`. */
@@ -63,6 +65,7 @@ export class SkillBank {
   private readonly order: string[] = [];
   private readonly versions = new Map<string, number>();
   private readonly sandbox: SandboxPort;
+  private readonly sandboxTimeoutMs: number | undefined;
   private readonly requireSigned: boolean;
   private readonly verifyKey?: string;
   private readonly now: () => string;
@@ -70,6 +73,7 @@ export class SkillBank {
 
   constructor(opts?: SkillBankOptions) {
     this.sandbox = opts?.sandbox ?? REFUSING_SANDBOX;
+    this.sandboxTimeoutMs = opts?.sandboxTimeoutMs;
     this.requireSigned = opts?.requireSigned ?? false;
     if (opts?.verifyKey !== undefined) this.verifyKey = opts.verifyKey;
     this.now = opts?.now ?? (() => new Date().toISOString());
@@ -179,6 +183,7 @@ export class SkillBank {
   private async invoke(def: ExecutableSkillDef, input: unknown, ctx?: SkillRunContext): Promise<unknown> {
     const scopedCtx: SkillRunContext = {
       callTool: this.wrapCallTool(def.allowedTools, ctx?.callTool),
+      ...(ctx?.signal !== undefined ? { signal: ctx.signal } : {}),
     };
     if (typeof def.run === "function") {
       return def.run(input, scopedCtx);
@@ -190,7 +195,11 @@ export class SkillBank {
     // escapes all characters that could break out of the literal context (M3 fix).
     const inputPreamble = `const INPUT = ${JSON.stringify(input)};\n`;
     const codeWithInput = inputPreamble + def.code!;
-    const res = await this.sandbox.run(codeWithInput, { language: "javascript" });
+    const res = await this.sandbox.run(codeWithInput, {
+      language: "javascript",
+      ...(this.sandboxTimeoutMs !== undefined ? { timeoutMs: this.sandboxTimeoutMs } : {}),
+      ...(ctx?.signal !== undefined ? { signal: ctx.signal } : {}),
+    });
     if (res.exitCode !== 0) {
       throw new Error(`SkillBank: sandboxed skill "${def.name}" failed (exitCode ${res.exitCode}): ${res.error ?? res.stderr}`);
     }

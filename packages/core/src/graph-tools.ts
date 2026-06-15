@@ -1,6 +1,7 @@
 import { z } from "zod";
-import type { AssertFactInput, Fact, FactQuery, MemoryPort, Scope } from "@eidentic/types";
+import { scopeKey, type AssertFactInput, type Fact, type FactQuery, type MemoryPort, type Scope } from "@eidentic/types";
 import { createTool, type Tool } from "./tool.js";
+import { sha256Hex } from "./sha256.js";
 
 /** A MemoryPort that also exposes the temporal knowledge graph. */
 export interface GraphMemory extends MemoryPort {
@@ -81,6 +82,14 @@ export function graphTools(memory: GraphMemory, scope: Scope): Tool[] {
         confidence: z.number().optional(),
       }),
       sideEffect: "destructive",
+      idempotencyKey: async (input) =>
+        `graph_assert:${scopeKey(scope)}:${await sha256Hex(JSON.stringify({
+          subject: input.subject,
+          predicate: input.predicate,
+          object: input.object,
+          objectKind: input.objectKind ?? "literal",
+          confidence: clamp01(input.confidence),
+        }))}`,
       execute: async ({ input }) => {
         const r = await memory.assertFact(scope, {
           subject: input.subject,

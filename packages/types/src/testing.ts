@@ -291,17 +291,20 @@ export class InMemoryStore implements StorePort, GraphPort, DurablePort {
     return count;
   }
 
-  async listSessions(opts?: { agentId?: string; limit?: number; userId?: string; orgId?: string }): Promise<SessionRecord[]> {
+  async listSessions(opts?: { agentId?: string; limit?: number; userId?: string; orgId?: string; apiKey?: string }): Promise<SessionRecord[]> {
     let sessions = [...this.sessions.values()];
     if (opts?.agentId !== undefined) {
       sessions = sessions.filter((s) => s.agentId === opts.agentId);
     }
-    // Fix 2: strict filtering — when a userId/orgId filter is provided, only exact matches are returned.
+    // Fix 2: strict filtering — when an owner filter is provided, only exact matches are returned.
     if (opts?.userId !== undefined) {
       sessions = sessions.filter((s) => s.userId === opts.userId);
     }
     if (opts?.orgId !== undefined) {
       sessions = sessions.filter((s) => s.orgId === opts.orgId);
+    }
+    if (opts?.apiKey !== undefined) {
+      sessions = sessions.filter((s) => s.apiKey === opts.apiKey);
     }
     sessions.sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0));
     if (opts?.limit !== undefined) sessions = sessions.slice(0, opts.limit);
@@ -726,6 +729,24 @@ export function storeConformanceCases(makeStore: () => StorePort & GraphPort): C
       const noOwner = await s.listSessions({ agentId: "ls_org_agent", orgId: "org_unknown" });
       assertEqual(noOwner, [], "unknown orgId returns []");
     }) },
+    { name: "listSessions: apiKey filter persists and returns only sessions for that key (strict — no-owner excluded)", run: withStore(async (s) => {
+      const t1 = "2026-01-01T00:00:00.000Z";
+      await s.createSession({ id: "ls_key_s1", agentId: "ls_key_agent", createdAt: t1, apiKey: "sk_alice" });
+      await s.createSession({ id: "ls_key_s2", agentId: "ls_key_agent", createdAt: t1, apiKey: "sk_bob" });
+      await s.createSession({ id: "ls_key_s3", agentId: "ls_key_agent", createdAt: t1 }); // no owner
+
+      const original = await s.getSession("ls_key_s1");
+      assertEqual(original?.apiKey, "sk_alice", "apiKey round-trips through getSession");
+
+      const forAlice = await s.listSessions({ agentId: "ls_key_agent", apiKey: "sk_alice" });
+      assertEqual(forAlice.map((s) => s.id), ["ls_key_s1"], "only Alice key session returned");
+
+      const forBob = await s.listSessions({ agentId: "ls_key_agent", apiKey: "sk_bob" });
+      assertEqual(forBob.map((s) => s.id), ["ls_key_s2"], "only Bob key session returned");
+
+      const noOwner = await s.listSessions({ agentId: "ls_key_agent", apiKey: "sk_unknown" });
+      assertEqual(noOwner, [], "unknown apiKey returns []");
+    }) },
     { name: "listBlocks: returns all blocks for a scope; scope-isolated", run: withStore(async (s) => {
       const scopeA: Scope = { kind: "agent", agentId: "lb_agent_a" };
       const scopeB: Scope = { kind: "agent", agentId: "lb_agent_b" };
@@ -904,7 +925,7 @@ function cosine(a: number[], b: number[]): number {
 export class InMemoryVectorStore implements VectorPort {
   private entries: VectorEntry[] = [];
   async upsert(entry: VectorEntry): Promise<void> {
-    this.entries = this.entries.filter((e) => e.id !== entry.id);
+    this.entries = this.entries.filter((e) => !(e.id === entry.id && e.scopeKey === entry.scopeKey));
     this.entries.push(entry);
   }
   async search(queryVector: number[], scopeKey: string, topK = 10): Promise<VectorSearchResult[]> {
@@ -952,6 +973,14 @@ export function vectorConformanceCases(makeStore: () => Promise<VectorPort> | Ve
       const hits = await s.search([0, 0, 0, 1], k, 10);
       assertEqual(hits.filter((h) => h.id === "x").length, 1, "single row");
       assertEqual(hits[0]?.text, "new", "latest wins");
+    }) },
+    { name: "vector: same logical id may exist independently in different scopes", run: withStore(async (s) => {
+      await s.upsert(e("shared", k, "in A", [1, 0, 0, 0]));
+      await s.upsert(e("shared", other, "in B", [0, 1, 0, 0]));
+      const hitsA = await s.search([1, 0, 0, 0], k, 10);
+      const hitsB = await s.search([0, 1, 0, 0], other, 10);
+      assertEqual(hitsA.find((h) => h.id === "shared")?.text, "in A", "scope A keeps its entry");
+      assertEqual(hitsB.find((h) => h.id === "shared")?.text, "in B", "scope B keeps its entry");
     }) },
     { name: "vector: delete removes by id within scope", run: withStore(async (s) => {
       await s.upsert(e("d", k, "D", [1, 0, 0, 0]));

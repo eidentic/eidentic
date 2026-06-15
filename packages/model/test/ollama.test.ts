@@ -71,13 +71,4 @@ describe("createOllamaModel", () => {
     expect((m2 as any).modelId).toBe("mistral");
     expect(m1).not.toBe(m2);
   });
-
-  it("loads ollama-ai-provider via the real require path when the dep is present", () => {
-    // ollama-ai-provider is an (optional) peer dep that pnpm auto-installs in the workspace,
-    // so the real require() path resolves and returns a usable model object (no _factory, no
-    // network call to Ollama). The "not installed → clear error" branch is exercised by
-    // consumers who omit the peer dep; it is not deterministically testable here.
-    const m = createOllamaModel("llama3.2");
-    expect(m).toBeTruthy();
-  });
 });

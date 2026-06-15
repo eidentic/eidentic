@@ -117,26 +117,28 @@ export class LibsqlStore implements StorePort, GraphPort, DurablePort {
 
   async createSession(s: SessionRecord): Promise<void> {
     await this.client.execute({
-      sql: `INSERT INTO sessions (id, agent_id, created_at, user_id, org_id) VALUES (?, ?, ?, ?, ?)`,
-      args: [s.id, s.agentId, s.createdAt, s.userId ?? null, s.orgId ?? null],
+      sql: `INSERT INTO sessions (id, agent_id, created_at, user_id, org_id, api_key) VALUES (?, ?, ?, ?, ?, ?)`,
+      args: [s.id, s.agentId, s.createdAt, s.userId ?? null, s.orgId ?? null, s.apiKey ?? null],
     });
   }
 
   async getSession(id: string): Promise<SessionRecord | null> {
     const rs = await this.client.execute({
-      sql: `SELECT id, agent_id, created_at, user_id, org_id FROM sessions WHERE id = ?`,
+      sql: `SELECT id, agent_id, created_at, user_id, org_id, api_key FROM sessions WHERE id = ?`,
       args: [id],
     });
     const row = rs.rows[0];
     if (!row) return null;
     const userId = strOrNull(row["user_id"]);
     const orgId = strOrNull(row["org_id"]);
+    const apiKey = strOrNull(row["api_key"]);
     return {
       id: str(row["id"]),
       agentId: str(row["agent_id"]),
       createdAt: str(row["created_at"]),
       ...(userId !== null ? { userId } : {}),
       ...(orgId !== null ? { orgId } : {}),
+      ...(apiKey !== null ? { apiKey } : {}),
     };
   }
 
@@ -643,7 +645,7 @@ export class LibsqlStore implements StorePort, GraphPort, DurablePort {
     return rs.rowsAffected;
   }
 
-  async listSessions(opts?: { agentId?: string; limit?: number; userId?: string; orgId?: string }): Promise<SessionRecord[]> {
+  async listSessions(opts?: { agentId?: string; limit?: number; userId?: string; orgId?: string; apiKey?: string }): Promise<SessionRecord[]> {
     const args: import("@libsql/client").InValue[] = [];
     const conditions: string[] = [];
     if (opts?.agentId !== undefined) {
@@ -659,8 +661,12 @@ export class LibsqlStore implements StorePort, GraphPort, DurablePort {
       conditions.push("org_id = ?");
       args.push(opts.orgId);
     }
+    if (opts?.apiKey !== undefined) {
+      conditions.push("api_key = ?");
+      args.push(opts.apiKey);
+    }
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-    let sql = `SELECT id, agent_id, created_at, user_id, org_id FROM sessions ${where} ORDER BY created_at DESC`;
+    let sql = `SELECT id, agent_id, created_at, user_id, org_id, api_key FROM sessions ${where} ORDER BY created_at DESC`;
     if (opts?.limit !== undefined) {
       // Bind limit as a positional parameter to prevent SQL injection.
       const safeLimit = Number.isInteger(opts.limit) && opts.limit >= 0 ? opts.limit : 100;
@@ -671,12 +677,14 @@ export class LibsqlStore implements StorePort, GraphPort, DurablePort {
     return rs.rows.map((r) => {
       const userId = strOrNull(r["user_id"]);
       const orgId = strOrNull(r["org_id"]);
+      const apiKey = strOrNull(r["api_key"]);
       return {
         id: str(r["id"]),
         agentId: str(r["agent_id"]),
         createdAt: str(r["created_at"]),
         ...(userId !== null ? { userId } : {}),
         ...(orgId !== null ? { orgId } : {}),
+        ...(apiKey !== null ? { apiKey } : {}),
       };
     });
   }

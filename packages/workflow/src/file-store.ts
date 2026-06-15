@@ -69,9 +69,9 @@ export function fileWorkflowRunStore(path: string): WorkflowRunStore {
 
   /** Atomically snapshot the current record set to disk. */
   function flush(): Promise<void> {
-    const snapshot = order.map((id) => byId.get(id)!).filter((r) => r !== undefined);
-    const json = JSON.stringify(snapshot);
     writeChain = writeChain.then(async () => {
+      const snapshot = order.map((id) => byId.get(id)!).filter((r) => r !== undefined);
+      const json = JSON.stringify(snapshot);
       await mkdir(dirname(path), { recursive: true });
       await writeFile(tmpPath, json, "utf8");
       await rename(tmpPath, path);

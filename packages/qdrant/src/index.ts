@@ -18,6 +18,10 @@ function idToUuid(id: string): string {
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
 }
 
+function pointKey(scopeKey: string, id: string): string {
+  return `${scopeKey}\0${id}`;
+}
+
 /** A scored point as returned by Qdrant search (the subset we read). `score` is cosine similarity (higher = better). */
 export interface QdrantScoredPoint {
   id: string | number;
@@ -123,7 +127,7 @@ export class QdrantVectorStore implements VectorPort {
     // Real Qdrant only accepts UUID or unsigned-integer point IDs — derive a deterministic UUID
     // from the caller's string id. Store the original id in the payload (`orig_id`) so search
     // can return it unchanged. The UUID is a stable opaque handle the adapter manages internally.
-    const pointId = idToUuid(entry.id);
+    const pointId = idToUuid(pointKey(entry.scopeKey, entry.id));
     await this.client.upsert(this.collection, {
       wait: true,
       points: [{ id: pointId, vector: entry.vector, payload: { scope_key: entry.scopeKey, text: entry.text, orig_id: entry.id } }],
@@ -150,7 +154,7 @@ export class QdrantVectorStore implements VectorPort {
     // Use a filter-based delete scoped to both the derived UUID point id and scope_key so
     // cross-tenant deletes are impossible. `has_id` matches by Qdrant POINT ID (not a payload
     // field); `key/match` matches by payload field.
-    const pointId = idToUuid(id);
+    const pointId = idToUuid(pointKey(scopeKey, id));
     await this.client.delete(this.collection, {
       filter: {
         must: [

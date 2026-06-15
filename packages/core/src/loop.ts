@@ -281,6 +281,16 @@ async function runGuardrails(
   return { text: current };
 }
 
+function replaceTextBlocks(content: ContentBlock[], text: string): ContentBlock[] {
+  let replaced = false;
+  return content.map((block) => {
+    if (!isText(block)) return block;
+    if (replaced) return { ...block, text: "" };
+    replaced = true;
+    return { ...block, text };
+  });
+}
+
 /** USD for a usage at a model's price (per 1M tokens). Returns undefined when no price covers the model. */
 function usdFor(usage: Usage, prices: PriceTable | undefined, modelId: string | undefined): number | undefined {
   if (!prices || !modelId) return undefined;
@@ -518,7 +528,7 @@ async function* emitAborted(
   usage: Usage,
   turn: number,
   rollingHash: string,
-  endRoot: (u: Usage) => void,
+  endRoot: (u: Usage, status?: "ok" | "error", message?: string) => void,
 ): AsyncGenerator<StreamEvent, void> {
   if (args.durable) {
     await writeCheckpointWith(args, rollingHash);
@@ -532,7 +542,7 @@ async function* emitAborted(
     cost: breakdownFor(usage, args.prices, args.modelId, args.budget),
     details: buildDetails("aborted"),
   };
-  endRoot(usage);
+  endRoot(usage, "error", "aborted");
 }
 
 /**
@@ -646,7 +656,7 @@ async function* runLoop(
   });
 
   /** Close the root span with final accumulated usage + optional cost. */
-  const endRoot = (final: Usage): void => {
+  const endRoot = (final: Usage, status: "ok" | "error" = "ok", message?: string): void => {
     if (!rootSpan) return;
     rootSpan.setAttribute("gen_ai.usage.input_tokens", final.inputTokens);
     rootSpan.setAttribute("gen_ai.usage.output_tokens", final.outputTokens);
@@ -656,7 +666,7 @@ async function* runLoop(
     rootSpan.setAttribute("eidentic.kv_cache_hit_rate", hitRate);
     const usd = usdFor(final, args.prices, args.modelId);
     if (usd !== undefined) rootSpan.setAttribute("eidentic.cost_usd", usd);
-    rootSpan.setStatus("ok");
+    rootSpan.setStatus(status, message);
     rootSpan.end();
   };
 
@@ -819,7 +829,7 @@ async function* runLoop(
           turnLimit: policy.maxTurns,
         }),
       };
-      endRoot(usage);
+      endRoot(usage, "error", abort);
       return;
     }
 
@@ -1003,7 +1013,7 @@ async function* runLoop(
         cost: breakdownFor(usage, args.prices, args.modelId, args.budget),
         details: buildDetails("error", { errorName: modelError instanceof Error ? modelError.name : undefined }),
       };
-      endRoot(usage);
+      endRoot(usage, "error", modelError instanceof Error ? modelError.name : "model error");
       return;
     }
     // Suppress TS "used before assigned" — resolved === true guarantees response was assigned.
@@ -1042,9 +1052,38 @@ async function* runLoop(
       return;
     }
 
+    const toolUses = response.content.filter(isToolUse);
+    let assistantContent = response.content;
+    let terminalText: string | undefined;
+    if (toolUses.length === 0) {
+      let text = response.content.filter(isText).map((b) => b.text).join("");
+      if (args.guardrails && args.guardrails.length > 0) {
+        const guardrailCtx = { agentId: args.agentId, sessionId: args.session.id };
+        const gr = await runGuardrails(args.guardrails, text, "checkOutput", guardrailCtx);
+        if (gr.blocked !== undefined) {
+          logger.log("debug", "eidentic:loop", "output blocked by guardrail", { reason: gr.blocked, numTurns: turn });
+          yield {
+            type: "result",
+            subtype: "guardrail",
+            output: `Output blocked by guardrail: ${gr.blocked}`,
+            usage,
+            numTurns: turn,
+            sessionId: args.session.id,
+            cost: breakdownFor(usage, args.prices, args.modelId, args.budget),
+            details: buildDetails("guardrail"),
+          };
+          endRoot(usage, "error", "guardrail");
+          return;
+        }
+        text = gr.text;
+        assistantContent = replaceTextBlocks(response.content, text);
+      }
+      terminalText = text;
+    }
+
     let assistantEvent: StoredEvent | null = null;
     {
-      const gen = safeAppend(args.session, "assistant", { content: response.content }, { usage: response.usage }, usage, turn);
+      const gen = safeAppend(args.session, "assistant", { content: assistantContent }, { usage: response.usage }, usage, turn);
       let step = await gen.next();
       while (!step.done) { yield step.value as StreamEvent; step = await gen.next(); }
       assistantEvent = step.value as StoredEvent | null;
@@ -1057,7 +1096,7 @@ async function* runLoop(
 
     appendEventToMessages(messages, assistantEvent);
     // Feature 2: include per-turn usage so consumers can track spend incrementally.
-    yield { type: "assistant", content: response.content, usage: response.usage };
+    yield { type: "assistant", content: assistantContent, usage: response.usage };
     rollingHash = await chainHash(rollingHash, assistantEvent);
     await writeCheckpointWith(args, rollingHash); // checkpoint after the model call (§9.2 component 1)
 
@@ -1089,7 +1128,7 @@ async function* runLoop(
             turnLimit: policy.maxTurns,
           }),
         };
-        endRoot(usage);
+        endRoot(usage, "error", postAbort);
         return;
       }
       // Soft cap (post-call): fire if not yet fired and threshold newly crossed.
@@ -1100,7 +1139,7 @@ async function* runLoop(
     }
 
     if (args.memory) {
-      const assistantText = response.content.filter(isText).map((b) => b.text).join("");
+      const assistantText = assistantContent.filter(isText).map((b) => b.text).join("");
       if (assistantText) {
         // --- OTel memory.ingest span for assistant text (§11.1) ---
         const ingestSpan = tracer?.startSpan("memory.ingest", { "eidentic.scope": scopeKey(args.scope) });
@@ -1110,31 +1149,8 @@ async function* runLoop(
       }
     }
 
-    const toolUses = response.content.filter(isToolUse);
     if (toolUses.length === 0) {
-      let text = response.content.filter(isText).map((b) => b.text).join("");
-
-      // --- D7: output guardrails — run on the final assistant text before returning it ---
-      if (args.guardrails && args.guardrails.length > 0) {
-        const guardrailCtx = { agentId: args.agentId, sessionId: args.session.id };
-        const gr = await runGuardrails(args.guardrails, text, "checkOutput", guardrailCtx);
-        if (gr.blocked !== undefined) {
-          logger.log("debug", "eidentic:loop", "output blocked by guardrail", { reason: gr.blocked, numTurns: turn });
-          yield {
-            type: "result",
-            subtype: "guardrail",
-            output: `Output blocked by guardrail: ${gr.blocked}`,
-            usage,
-            numTurns: turn,
-            sessionId: args.session.id,
-            cost: breakdownFor(usage, args.prices, args.modelId, args.budget),
-            details: buildDetails("guardrail"),
-          };
-          endRoot(usage);
-          return;
-        }
-        text = gr.text; // may be redacted
-      }
+      const text = terminalText ?? assistantContent.filter(isText).map((b) => b.text).join("");
 
       // Structured output (D2): the terminal turn must satisfy the requested schema. The candidate
       // object comes from the model port (`response.object`) when available, else we parse the final
@@ -1178,7 +1194,7 @@ async function* runLoop(
             cost: breakdownFor(usage, args.prices, args.modelId, args.budget),
             details: buildDetails("error", { errorName: "SyntaxError" }),
           };
-          endRoot(usage);
+          endRoot(usage, "error", "structured output parse error");
           return;
         }
         const validated = args.outputSchema.validate(candidate);
@@ -1210,7 +1226,7 @@ async function* runLoop(
             cost: breakdownFor(usage, args.prices, args.modelId, args.budget),
             details: buildDetails("error", { errorName: "ValidationError" }),
           };
-          endRoot(usage);
+          endRoot(usage, "error", "structured output validation error");
           return;
         }
         logger.log("debug", "eidentic:loop", "run complete", { subtype: "success", numTurns: turn, structured: true });
