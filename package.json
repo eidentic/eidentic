@@ -14,7 +14,11 @@
     "check:readme": "node scripts/check-readme-examples.mjs",
     "changeset": "changeset",
     "version": "changeset version",
-    "release": "turbo run build && changeset publish"
+    "release:check": "node scripts/release.mjs check",
+    "release:dry-run": "node scripts/release.mjs dry-run",
+    "release:version": "node scripts/release.mjs version",
+    "release:publish": "node scripts/release.mjs publish",
+    "release": "pnpm run release:publish"
   },
   "devDependencies": {
     "@changesets/cli": "^2.27.0",
