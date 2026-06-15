@@ -137,6 +137,11 @@ export interface WorkflowRunRegistry {
    * No-op when the registry was created without a store. Call once on startup.
    */
   hydrate(): Promise<void>;
+  /**
+   * Wait until all write-through persistence work scheduled so far has settled.
+   * No-op when the registry was created without a store.
+   */
+  flush(): Promise<void>;
 }
 
 /** Optional per-record metadata at record time. */
@@ -225,10 +230,12 @@ export function createWorkflowRunRegistry(
   const order: string[] = [];
   const mem = new Map<string, WorkflowRunRecord>();
 
+  let writeChain: Promise<void> = Promise.resolve();
+
   /** Fire-and-forget write-through to the durable store (never blocks callers). */
   function writeThrough(rec: WorkflowRunRecord): void {
     if (store === undefined) return;
-    void Promise.resolve()
+    writeChain = writeChain
       .then(() => store.save(rec))
       .catch((err: unknown) => onStoreError(err, rec));
   }
@@ -380,6 +387,10 @@ export function createWorkflowRunRegistry(
           nextSeq = rec.seq + 1;
         }
       }
+    },
+
+    async flush(): Promise<void> {
+      await writeChain;
     },
   };
 }

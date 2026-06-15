@@ -123,6 +123,16 @@ export interface AgentConfig {
   // --- Plan 10: security foundations (§10.4 + §20) ---
   /** Deny-by-default permission policy. Statically-denied tools are removed from the schema sent to the model. */
   permissions?: PermissionPolicy;
+  /**
+   * Principal-aware permission resolver. When set, this overrides `permissions` for each
+   * query/resume call using the caller identity carried in `QueryOptions`.
+   */
+  permissionsFor?: (principal: {
+    sessionId: string;
+    userId?: string;
+    orgId?: string;
+    apiKey?: string;
+  }) => PermissionPolicy | undefined | Promise<PermissionPolicy | undefined>;
   /** Credential vault; tools receive it in their ctx at call time (model never sees the values, §10.3). */
   secrets?: SecretsPort;
   /** Pre-tool-use hook: return "deny"/"allow" to short-circuit policy, or void/undefined to continue. */
@@ -721,9 +731,17 @@ export class Agent {
     return { tools, execSkillRegRef, discoveryRegRef };
   }
 
-  private buildRegistry(tools: Tool[], durable: DurablePort | undefined, scope: Scope, signal?: AbortSignal, sessionId?: string, logger?: import("@eidentic/types").LoggerPort): ToolRegistry {
+  private buildRegistry(
+    tools: Tool[],
+    durable: DurablePort | undefined,
+    scope: Scope,
+    signal?: AbortSignal,
+    sessionId?: string,
+    logger?: import("@eidentic/types").LoggerPort,
+    permissionsOverride?: PermissionPolicy,
+  ): ToolRegistry {
     // Use the MUTABLE effective policy so that setPermissionMode() takes effect on the next query.
-    const permissions = this._effectivePermissions;
+    const permissions = permissionsOverride ?? this._effectivePermissions;
     const { secrets, onPreToolUse, onPermissionRequest, onPostToolUse, onAuditEvent } = this.config;
     const hasSecurityConfig = permissions !== undefined || secrets !== undefined ||
       onPreToolUse !== undefined || onPermissionRequest !== undefined;
@@ -753,6 +771,22 @@ export class Agent {
     });
   }
 
+  private async permissionsFor(opts: QueryOptions): Promise<PermissionPolicy | undefined> {
+    if (!this.config.permissionsFor) return undefined;
+    return this.config.permissionsFor({
+      sessionId: opts.sessionId,
+      ...(opts.userId !== undefined ? { userId: opts.userId } : {}),
+      ...(opts.orgId !== undefined ? { orgId: opts.orgId } : {}),
+      ...(opts.apiKey !== undefined ? { apiKey: opts.apiKey } : {}),
+    });
+  }
+
+  private scopeFor(opts?: { userId?: string; orgId?: string; sessionId?: string }): Scope {
+    if (opts?.userId) return { kind: "user", agentId: this.config.id, userId: opts.userId };
+    if (opts?.orgId) return { kind: "org", agentId: this.config.id, orgId: opts.orgId };
+    return { kind: "agent", agentId: this.config.id };
+  }
+
   /**
    * The core ReAct loop, extracted as a private generator so strategy wrappers can re-enter it.
    * When `runtime.model` is provided, it overrides `this.config.model` for this sub-run only
@@ -774,9 +808,7 @@ export class Agent {
     const now = this.config.now ?? defaultNow;
     const newId = this.config.newId ?? this.defaultNewId;
     const durable = this.resolveDurable();
-    const scope: Scope = opts.userId
-      ? { kind: "user", agentId: this.config.id, userId: opts.userId }
-      : { kind: "agent", agentId: this.config.id };
+    const scope = this.scopeFor(opts);
 
     // §8.3: spawn_agent is added ONLY when subAgents exist AND depth < maxDepth — so a child at
     // the depth limit structurally cannot see (and thus cannot call) spawn_agent.
@@ -787,7 +819,8 @@ export class Agent {
 
     // Resolve logger once per run: injected logger wins; else envLogger() (silent when DEBUG unset).
     const logger = this.config.logger ?? envLogger();
-    const registry = this.buildRegistry(tools, durable, scope, opts.signal, opts.sessionId, logger);
+    const permissions = await this.permissionsFor(opts);
+    const registry = this.buildRegistry(tools, durable, scope, opts.signal, opts.sessionId, logger, permissions);
     execSkillRegRef.registry = registry;
     discoveryRegRef.registry = registry; // search/load now see the final permission-filtered catalog
 
@@ -849,17 +882,17 @@ export class Agent {
    * `store.migrate()`), and warn (once) when memory is configured but no `userId` was passed —
    * cross-session memory is scoped per userId, so omitting it silently disables persistence.
    */
-  private async ensureReady(userId: string | undefined): Promise<void> {
+  private async ensureReady(identity: { userId?: string; orgId?: string } | undefined): Promise<void> {
     this._migrated ??= Promise.resolve(this.config.store.migrate());
     await this._migrated;
-    if (this.config.memory && userId === undefined && !this._warnedNoUserId) {
+    if (this.config.memory && identity?.userId === undefined && identity?.orgId === undefined && !this._warnedNoUserId) {
       this._warnedNoUserId = true;
       (this.config.logger ?? envLogger()).log(
         "warn",
         "eidentic:memory",
-        "memory is configured but query()/resume() was called without `userId`. Cross-session " +
-          "memory (blocks, recall, facts) is scoped per userId; without it, durable memory is not " +
-          "shared across sessions. Pass { userId } to enable it.",
+        "memory is configured but query()/resume() was called without `userId` or `orgId`. Cross-session " +
+          "memory (blocks, recall, facts) is scoped per user/org; without it, durable memory is not " +
+          "shared across sessions. Pass { userId } or { orgId } to enable it.",
       );
     }
   }
@@ -886,7 +919,7 @@ export class Agent {
    * ```
    */
   async *query(input: string | ContentBlock[], opts: QueryOptions): AsyncIterable<StreamEvent> {
-    await this.ensureReady(opts.userId);
+    await this.ensureReady(opts);
 
     // Normalize ContentBlock[] → string for the loop. When the input contains image blocks,
     // encode the full block array as a sentinel-prefixed JSON string so the event log stores
@@ -948,7 +981,7 @@ export class Agent {
    * when omitted, `resume()` behaves byte-identically to before.
    */
   async *resume(sessionId: string, opts?: { userId?: string; orgId?: string; apiKey?: string; decision?: SuspendDecision; signal?: AbortSignal; outputSchema?: z.ZodType }): AsyncIterable<StreamEvent> {
-    await this.ensureReady(opts?.userId);
+    await this.ensureReady(opts);
     const durable = this.resolveDurable();
     if (!durable) throw new Error("Agent.resume requires `durable: true` and a DurablePort store.");
 
@@ -992,9 +1025,7 @@ export class Agent {
 
     const now = this.config.now ?? defaultNow;
     const newId = this.config.newId ?? this.defaultNewId;
-    const scope: Scope = opts?.userId
-      ? { kind: "user", agentId: this.config.id, userId: opts.userId }
-      : { kind: "agent", agentId: this.config.id };
+    const scope = this.scopeFor(opts);
 
     const resumeLazyTools = this.resolveLazyTools();
     // resume() does not add a spawnTool (resume is always the plain react path).
@@ -1002,7 +1033,13 @@ export class Agent {
       this.buildToolsForRun(scope, undefined, resumeLazyTools ?? undefined);
 
     const resumeLogger2 = this.config.logger ?? envLogger();
-    const registry = this.buildRegistry(tools, durable, scope, undefined, sessionId, resumeLogger2);
+    const permissions = await this.permissionsFor({
+      sessionId,
+      ...(opts?.userId !== undefined ? { userId: opts.userId } : {}),
+      ...(opts?.orgId !== undefined ? { orgId: opts.orgId } : {}),
+      ...(opts?.apiKey !== undefined ? { apiKey: opts.apiKey } : {}),
+    });
+    const registry = this.buildRegistry(tools, durable, scope, undefined, sessionId, resumeLogger2, permissions);
     resumeExecSkillRegRef.registry = registry;
     resumeDiscoveryRegRef.registry = registry;
 
@@ -1015,6 +1052,7 @@ export class Agent {
       // Fix 1: record owner identity on resume (only affects new sessions; existing sessions already have their owner).
       ...(opts?.userId !== undefined ? { userId: opts.userId } : {}),
       ...(opts?.orgId !== undefined ? { orgId: opts.orgId } : {}),
+      ...(opts?.apiKey !== undefined ? { apiKey: opts.apiKey } : {}),
     });
 
     yield* resumeTurn({

@@ -296,13 +296,13 @@ export class ToolRegistry {
         decision = await this.resolvePermission(tool, parsed.value);
       } catch (gateErr) {
         const raw = gateErr instanceof Error ? gateErr.message : String(gateErr);
-        this.logger.log("debug", "eidentic:tool", "result", { tool: call.name, ok: false, reason: "permission-gate-error" });
+        this.logger.log("debug", "eidentic:tool", "result", { tool: call.name, ok: false, reason: "permission-gate-error", error: raw });
         this.emitDenied(tool.id, "gate-error");
         return {
           callId: call.callId,
           toolName: call.name,
           isError: true,
-          output: { error: `permission gate error (denied): ${raw}` },
+          output: { error: "permission gate error (denied)" },
           meta: { permissionDenied: true },
         };
       }

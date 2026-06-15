@@ -286,10 +286,10 @@ export interface StorePort {
   eraseScope(scope: Scope): Promise<{ deleted: number }>;
   /**
    * List sessions newest-first, optionally filtered. For studio/admin UIs.
-   * Fix 2: when `userId` or `orgId` is provided, only returns sessions that match exactly
+   * Fix 2: when `userId`, `orgId`, or `apiKey` is provided, only returns sessions that match exactly
    * (sessions with no recorded owner are excluded when a filter is set — strict mode).
    */
-  listSessions(opts?: { agentId?: string; limit?: number; userId?: string; orgId?: string }): Promise<SessionRecord[]>;
+  listSessions(opts?: { agentId?: string; limit?: number; userId?: string; orgId?: string; apiKey?: string }): Promise<SessionRecord[]>;
   /** List all memory blocks for a scope. For studio/admin UIs. */
   listBlocks(scope: Scope): Promise<MemoryBlock[]>;
   close(): Promise<void>;

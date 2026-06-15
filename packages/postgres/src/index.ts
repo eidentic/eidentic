@@ -173,26 +173,28 @@ export class PostgresStore implements StorePort, GraphPort, DurablePort {
 
   async createSession(s: SessionRecord): Promise<void> {
     await this.client.query(
-      `INSERT INTO sessions (id, agent_id, created_at, user_id, org_id) VALUES ($1, $2, $3, $4, $5)`,
-      [s.id, s.agentId, s.createdAt, s.userId ?? null, s.orgId ?? null],
+      `INSERT INTO sessions (id, agent_id, created_at, user_id, org_id, api_key) VALUES ($1, $2, $3, $4, $5, $6)`,
+      [s.id, s.agentId, s.createdAt, s.userId ?? null, s.orgId ?? null, s.apiKey ?? null],
     );
   }
 
   async getSession(id: string): Promise<SessionRecord | null> {
     const { rows } = await this.client.query(
-      `SELECT id, agent_id, created_at, user_id, org_id FROM sessions WHERE id = $1`,
+      `SELECT id, agent_id, created_at, user_id, org_id, api_key FROM sessions WHERE id = $1`,
       [id],
     );
     const row = rows[0];
     if (!row) return null;
     const userId = strNull(row.user_id);
     const orgId = strNull(row.org_id);
+    const apiKey = strNull(row.api_key);
     return {
       id: str(row.id),
       agentId: str(row.agent_id),
       createdAt: str(row.created_at),
       ...(userId !== null ? { userId } : {}),
       ...(orgId !== null ? { orgId } : {}),
+      ...(apiKey !== null ? { apiKey } : {}),
     };
   }
 
@@ -553,7 +555,7 @@ export class PostgresStore implements StorePort, GraphPort, DurablePort {
     return rows.length;
   }
 
-  async listSessions(opts?: { agentId?: string; limit?: number; userId?: string; orgId?: string }): Promise<SessionRecord[]> {
+  async listSessions(opts?: { agentId?: string; limit?: number; userId?: string; orgId?: string; apiKey?: string }): Promise<SessionRecord[]> {
     const conditions: string[] = [];
     const params: unknown[] = [];
     let idx = 1;
@@ -570,6 +572,10 @@ export class PostgresStore implements StorePort, GraphPort, DurablePort {
       conditions.push(`org_id = $${idx++}`);
       params.push(opts.orgId);
     }
+    if (opts?.apiKey !== undefined) {
+      conditions.push(`api_key = $${idx++}`);
+      params.push(opts.apiKey);
+    }
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
     let limitClause = "";
     if (opts?.limit !== undefined) {
@@ -579,18 +585,20 @@ export class PostgresStore implements StorePort, GraphPort, DurablePort {
       params.push(safeLimit);
     }
     const { rows } = await this.client.query(
-      `SELECT id, agent_id, created_at, user_id, org_id FROM sessions ${where} ORDER BY created_at DESC${limitClause}`,
+      `SELECT id, agent_id, created_at, user_id, org_id, api_key FROM sessions ${where} ORDER BY created_at DESC${limitClause}`,
       params,
     );
     return rows.map((r) => {
       const userId = strNull(r.user_id);
       const orgId = strNull(r.org_id);
+      const apiKey = strNull(r.api_key);
       return {
         id: str(r.id),
         agentId: str(r.agent_id),
         createdAt: str(r.created_at),
         ...(userId !== null ? { userId } : {}),
         ...(orgId !== null ? { orgId } : {}),
+        ...(apiKey !== null ? { apiKey } : {}),
       };
     });
   }

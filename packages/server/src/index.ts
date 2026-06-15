@@ -1430,6 +1430,7 @@ export function createServer(opts: ServerOptions): EidenticServer {
         () => agent.resume(sessionId, {
           userId: principal.userId,
           orgId: principal.orgId,
+          apiKey: principal.apiKey,
           decision,
           signal: c.req.raw.signal ?? new AbortController().signal,
         }) as AgentIterable,
@@ -1578,6 +1579,7 @@ export function createServer(opts: ServerOptions): EidenticServer {
             sessionId,
             userId: principal.userId,
             orgId: principal.orgId,
+            apiKey: principal.apiKey,
           })) {
             if (ev.type === "result") {
               terminalResult = { usage: ev.usage, cost: ev.cost };

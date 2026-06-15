@@ -152,6 +152,12 @@ export const MIGRATIONS: ReadonlyArray<{ version: number; sql: string }> = [
       ALTER TABLE facts ADD COLUMN last_corroborated_at INTEGER;
     `,
   },
+  {
+    version: 12,
+    sql: `
+      ALTER TABLE sessions ADD COLUMN api_key TEXT;
+    `,
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

@@ -208,12 +208,13 @@ export class ConvexStore implements StorePort, GraphPort, DurablePort {
     return (await this.runner.query(this.fns.getSession, { id })) as SessionRecord | null;
   }
 
-  async listSessions(opts?: { agentId?: string; limit?: number; userId?: string; orgId?: string }): Promise<SessionRecord[]> {
+  async listSessions(opts?: { agentId?: string; limit?: number; userId?: string; orgId?: string; apiKey?: string }): Promise<SessionRecord[]> {
     const args: Record<string, unknown> = {};
     if (opts?.agentId !== undefined) args["agentId"] = opts.agentId;
     if (opts?.limit !== undefined) args["limit"] = opts.limit;
     if (opts?.userId !== undefined) args["userId"] = opts.userId;
     if (opts?.orgId !== undefined) args["orgId"] = opts.orgId;
+    if (opts?.apiKey !== undefined) args["apiKey"] = opts.apiKey;
     return (await this.runner.query(this.fns.listSessions, args)) as SessionRecord[];
   }
 

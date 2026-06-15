@@ -243,6 +243,27 @@ describe("POST /v1/agents/:agentId/runs — fire-and-poll async run", () => {
     });
     expect(bobRes.status).toBe(403);
   });
+
+  it("apiKey-only async runs persist apiKey ownership on the created session", async () => {
+    const store = new InMemoryStore();
+    const { agent } = makeAgent([textResponse("api-key async")], store);
+    const app = createServer({
+      agents: { demo: agent },
+      auth: ApiKeyAuth({ "key-a": { apiKey: "key-a" } }),
+    });
+
+    const res = await app.request("/v1/agents/demo/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer key-a" },
+      body: JSON.stringify({ input: "hi", sessionId: "apikey-async-sess" }),
+    });
+    expect(res.status).toBe(202);
+    const body = await res.json() as { runId: string };
+    await waitForCompletion(app, "demo", body.runId, { authorization: "Bearer key-a" });
+
+    const session = await store.getSession("apikey-async-sess");
+    expect(session?.apiKey).toBe("key-a");
+  });
 });
 
 // ---------------------------------------------------------------------------

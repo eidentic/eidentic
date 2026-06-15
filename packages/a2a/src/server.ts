@@ -32,7 +32,15 @@ export interface AgentLike {
    * event has kind "result" and carries an `output` field.
    * A plain Promise<unknown> is also accepted for simpler fakes.
    */
-  query(input: string, opts?: { sessionId?: string }): AsyncIterable<unknown> | Promise<unknown>;
+  query(input: string, opts?: { sessionId?: string; userId?: string; orgId?: string; apiKey?: string }): AsyncIterable<unknown> | Promise<unknown>;
+}
+
+export interface A2AAuthPrincipal {
+  /** Stable task-owner identity. Defaults to apiKey, userId, orgId, or "*" when omitted. */
+  id?: string;
+  userId?: string;
+  orgId?: string;
+  apiKey?: string;
 }
 
 /**
@@ -51,9 +59,10 @@ export type A2AAuthVerifier = (
 ) =>
   | string
   | boolean
+  | A2AAuthPrincipal
   | null
   | undefined
-  | Promise<string | boolean | null | undefined>;
+  | Promise<string | boolean | A2AAuthPrincipal | null | undefined>;
 
 export interface A2AServerOptions {
   card: A2AAgentCard;
@@ -168,8 +177,13 @@ export function drainPromiseResult(result: unknown): string {
  *
  * This is the thin public dispatcher used by the A2A JSON-RPC handler.
  */
-async function drainAgent(agent: AgentLike, input: string, sessionId: string): Promise<string> {
-  const result = await agent.query(input, { sessionId });
+async function drainAgent(
+  agent: AgentLike,
+  input: string,
+  sessionId: string,
+  principal?: { userId?: string; orgId?: string; apiKey?: string },
+): Promise<string> {
+  const result = await agent.query(input, { sessionId, ...(principal ?? {}) });
 
   if (result != null && typeof result === "object" && Symbol.asyncIterator in (result as object)) {
     return drainIterableAgent(result as AsyncIterable<unknown>);
@@ -218,10 +232,23 @@ interface StoredTask {
  * - `true` (boolean)  → sentinel identity `"*"` (single-identity mode)
  * - Falsy             → reject (return null)
  */
-function resolveIdentity(raw: string | boolean | null | undefined): string | null {
+function resolvePrincipal(raw: string | boolean | A2AAuthPrincipal | null | undefined): {
+  owner: string;
+  query: { userId?: string; orgId?: string; apiKey?: string };
+} | null {
   if (!raw) return null;
-  if (raw === true) return "*";
-  return raw; // non-empty string
+  if (raw === true) return { owner: "*", query: { apiKey: "*" } };
+  if (typeof raw === "string") return { owner: raw, query: { apiKey: raw } };
+  const owner = raw.id ?? raw.apiKey ?? raw.userId ?? raw.orgId;
+  if (owner === undefined || owner.length === 0) return null;
+  return {
+    owner,
+    query: {
+      ...(raw.userId !== undefined ? { userId: raw.userId } : {}),
+      ...(raw.orgId !== undefined ? { orgId: raw.orgId } : {}),
+      ...(raw.apiKey !== undefined ? { apiKey: raw.apiKey } : {}),
+    },
+  };
 }
 
 export function a2aRoutes(opts: A2AServerOptions): Hono {
@@ -229,22 +256,31 @@ export function a2aRoutes(opts: A2AServerOptions): Hono {
   const maxTasks = opts.maxTasks ?? 1000;
   /** Ordered insertion map — Map preserves insertion order, used for FIFO eviction. */
   const taskStore = new Map<string, StoredTask>();
+  const contextOwners = new Map<string, string>();
 
   /** Evict oldest settled tasks to stay within `maxTasks`. Falls back to evicting
    *  oldest in-flight tasks if no settled tasks exist. */
+  function deleteTask(key: string): void {
+    const task = taskStore.get(key);
+    taskStore.delete(key);
+    if (task !== undefined && ![...taskStore.values()].some((t) => t.contextId === task.contextId)) {
+      contextOwners.delete(task.contextId);
+    }
+  }
+
   function evictIfNeeded(): void {
     if (taskStore.size < maxTasks) return;
     // First pass: find oldest settled task
     for (const [key, task] of taskStore) {
       const state = task.status.state as string;
       if (state === "completed" || state === "failed") {
-        taskStore.delete(key);
+        deleteTask(key);
         return;
       }
     }
     // Fallback: evict the oldest entry regardless of state
     const firstKey = taskStore.keys().next().value;
-    if (firstKey !== undefined) taskStore.delete(firstKey);
+    if (firstKey !== undefined) deleteTask(firstKey);
   }
 
   // --- Agent Card (always public — A2A discovery compliance) ---
@@ -268,13 +304,15 @@ export function a2aRoutes(opts: A2AServerOptions): Hono {
   app.post("/", async (c) => {
     // Auth guard (optional; when absent the endpoint is open / single-tenant).
     let callerIdentity: string | undefined;
+    let callerQueryIdentity: { userId?: string; orgId?: string; apiKey?: string } | undefined;
     if (opts.auth !== undefined) {
       const raw = await opts.auth.verify(c.req.raw);
-      const identity = resolveIdentity(raw);
-      if (identity === null) {
+      const principal = resolvePrincipal(raw);
+      if (principal === null) {
         return c.json(rpcErr(null, -32001, "Unauthorized"), 401);
       }
-      callerIdentity = identity;
+      callerIdentity = principal.owner;
+      callerQueryIdentity = principal.query;
     }
 
     let body: unknown;
@@ -326,10 +364,16 @@ export function a2aRoutes(opts: A2AServerOptions): Hono {
         typeof message["contextId"] === "string"
           ? message["contextId"]
           : randomUUID();
+      if (callerIdentity !== undefined) {
+        const existingOwner = contextOwners.get(contextId);
+        if (existingOwner !== undefined && existingOwner !== callerIdentity) {
+          return c.json(rpcErr(id, -32001, `Task not found: ${contextId}`));
+        }
+      }
 
       let output: string;
       try {
-        output = await drainAgent(opts.agent, text, contextId);
+        output = await drainAgent(opts.agent, text, contextId, callerQueryIdentity);
       } catch (e) {
         const msg2 = e instanceof Error ? e.message : String(e);
         return c.json(rpcErr(id, -32603, `Agent error: ${msg2}`));
@@ -357,6 +401,7 @@ export function a2aRoutes(opts: A2AServerOptions): Hono {
       };
       evictIfNeeded();
       taskStore.set(taskId, task);
+      if (callerIdentity !== undefined) contextOwners.set(contextId, callerIdentity);
 
       return c.json(rpcOk(id, task));
     }

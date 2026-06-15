@@ -33,8 +33,7 @@ describe("durable store — write-through + hydrate", () => {
       const path = join(dir, "runs.json");
       const reg = createWorkflowRunRegistry({ store: fileWorkflowRunStore(path) });
       const rec = reg.record("w", makeResult({ answer: 42 }));
-      // Give the fire-and-forget write a tick.
-      await new Promise((r) => setTimeout(r, 20));
+      await reg.flush();
 
       const fresh = createWorkflowRunRegistry({ store: fileWorkflowRunStore(path) });
       await fresh.hydrate();
@@ -59,8 +58,7 @@ describe("durable store — write-through + hydrate", () => {
       const a = reg.record("a", makeResult(1));
       const b = reg.record("b", makeResult(2));
       const c = reg.record("c", makeResult(3));
-      // Give the write chain time to flush (mkdir + writeFile + rename are real I/O).
-      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+      await reg.flush();
 
       const fresh = createWorkflowRunRegistry({ store: fileWorkflowRunStore(path) });
       await fresh.hydrate();
@@ -92,7 +90,7 @@ describe("durable store — write-through + hydrate", () => {
     };
     const reg = createWorkflowRunRegistry({ store: failingStore, onStoreError });
     const rec = reg.record("w", makeResult("x"));
-    await new Promise((r) => setTimeout(r, 20));
+    await reg.flush();
     expect(onStoreError).toHaveBeenCalledOnce();
     expect((onStoreError.mock.calls[0]![0] as Error).message).toBe("disk full");
     // In-memory record is unaffected.
@@ -121,7 +119,7 @@ describe("fileWorkflowRunStore — crash safety", () => {
       const reg1 = createWorkflowRunRegistry({ store: fileWorkflowRunStore(path) });
       const r1 = reg1.record("first", makeResult("one"));
       const r2 = reg1.record("second", makeResult("two"));
-      await new Promise((r) => setTimeout(r, 30));
+      await reg1.flush();
 
       // Process #2 starts fresh from the same file.
       const reg2 = createWorkflowRunRegistry({ store: fileWorkflowRunStore(path) });

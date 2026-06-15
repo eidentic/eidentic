@@ -118,12 +118,12 @@ export class SqliteStore implements StorePort, GraphPort, DurablePort {
 
   async createSession(s: SessionRecord) {
     this.db
-      .prepare(`INSERT INTO sessions (id, agent_id, created_at, user_id, org_id) VALUES (?, ?, ?, ?, ?)`)
-      .run(s.id, s.agentId, s.createdAt, s.userId ?? null, s.orgId ?? null);
+      .prepare(`INSERT INTO sessions (id, agent_id, created_at, user_id, org_id, api_key) VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(s.id, s.agentId, s.createdAt, s.userId ?? null, s.orgId ?? null, s.apiKey ?? null);
   }
   async getSession(id: string) {
-    const row = this.db.prepare(`SELECT id, agent_id, created_at, user_id, org_id FROM sessions WHERE id = ?`).get(id) as
-      | { id: string; agent_id: string; created_at: string; user_id: string | null; org_id: string | null }
+    const row = this.db.prepare(`SELECT id, agent_id, created_at, user_id, org_id, api_key FROM sessions WHERE id = ?`).get(id) as
+      | { id: string; agent_id: string; created_at: string; user_id: string | null; org_id: string | null; api_key: string | null }
       | undefined;
     if (!row) return null;
     return {
@@ -132,6 +132,7 @@ export class SqliteStore implements StorePort, GraphPort, DurablePort {
       createdAt: row.created_at,
       ...(row.user_id !== null ? { userId: row.user_id } : {}),
       ...(row.org_id !== null ? { orgId: row.org_id } : {}),
+      ...(row.api_key !== null ? { apiKey: row.api_key } : {}),
     };
   }
 
@@ -412,7 +413,7 @@ export class SqliteStore implements StorePort, GraphPort, DurablePort {
     return info.changes;
   }
 
-  async listSessions(opts?: { agentId?: string; limit?: number; userId?: string; orgId?: string }): Promise<SessionRecord[]> {
+  async listSessions(opts?: { agentId?: string; limit?: number; userId?: string; orgId?: string; apiKey?: string }): Promise<SessionRecord[]> {
     const conditions: string[] = [];
     const params: unknown[] = [];
     if (opts?.agentId !== undefined) {
@@ -428,8 +429,12 @@ export class SqliteStore implements StorePort, GraphPort, DurablePort {
       conditions.push("org_id = ?");
       params.push(opts.orgId);
     }
+    if (opts?.apiKey !== undefined) {
+      conditions.push("api_key = ?");
+      params.push(opts.apiKey);
+    }
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-    let sql = `SELECT id, agent_id, created_at, user_id, org_id FROM sessions ${where} ORDER BY created_at DESC`;
+    let sql = `SELECT id, agent_id, created_at, user_id, org_id, api_key FROM sessions ${where} ORDER BY created_at DESC`;
     if (opts?.limit !== undefined) {
       // Bind limit as a parameter to prevent SQL injection from non-integer inputs.
       const safeLimit = Number.isInteger(opts.limit) && opts.limit >= 0 ? opts.limit : 100;
@@ -438,13 +443,14 @@ export class SqliteStore implements StorePort, GraphPort, DurablePort {
     }
     const rows = this.db
       .prepare(sql)
-      .all(...params) as Array<{ id: string; agent_id: string; created_at: string; user_id: string | null; org_id: string | null }>;
+      .all(...params) as Array<{ id: string; agent_id: string; created_at: string; user_id: string | null; org_id: string | null; api_key: string | null }>;
     return rows.map((r) => ({
       id: r.id,
       agentId: r.agent_id,
       createdAt: r.created_at,
       ...(r.user_id !== null ? { userId: r.user_id } : {}),
       ...(r.org_id !== null ? { orgId: r.org_id } : {}),
+      ...(r.api_key !== null ? { apiKey: r.api_key } : {}),
     }));
   }
 

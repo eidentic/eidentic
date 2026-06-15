@@ -116,6 +116,9 @@ describe("GuardrailPort wiring", () => {
       expect(result).toBeDefined();
       expect(result!.subtype).toBe("guardrail");
       expect(String(result!.output)).toMatch(/output.*blocked.*guardrail/i);
+      const stored = await store.readEvents("s4");
+      expect(stored.some((e) => e.kind === "assistant")).toBe(false);
+      expect(JSON.stringify(stored)).not.toContain("sensitive output");
     });
 
     it("redact: final result carries the redacted text", async () => {
@@ -139,6 +142,9 @@ describe("GuardrailPort wiring", () => {
       expect(result?.subtype).toBe("success");
       expect(String(result?.output)).toContain("[PHONE]");
       expect(String(result?.output)).not.toContain("555-867-5309");
+      const stored = await store.readEvents("s5");
+      expect(JSON.stringify(stored)).toContain("[PHONE]");
+      expect(JSON.stringify(stored)).not.toContain("555-867-5309");
     });
   });
 

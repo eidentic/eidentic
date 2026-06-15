@@ -1,4 +1,13 @@
+import { Buffer } from "node:buffer";
 import type { VectorPort, VectorEntry, VectorSearchResult } from "@eidentic/types";
+
+function encodeIdPart(value: string): string {
+  return Buffer.from(value, "utf8").toString("base64url");
+}
+
+function physicalId(scopeKey: string, id: string): string {
+  return `${encodeIdPart(scopeKey)}/${encodeIdPart(id)}`;
+}
 
 /** A scored match as returned by Pinecone query (the subset we read). `score` is cosine similarity (higher = better). */
 export interface PineconeMatch {
@@ -52,8 +61,9 @@ export class PineconeVectorStore implements VectorPort {
     if (entry.vector.length !== this.dim) {
       throw new Error(`vector dim ${entry.vector.length} != index dim ${this.dim}`);
     }
+    const id = physicalId(entry.scopeKey, entry.id);
     await this.index.upsert({
-      records: [{ id: entry.id, values: entry.vector, metadata: { scope_key: entry.scopeKey, text: entry.text } }],
+      records: [{ id, values: entry.vector, metadata: { scope_key: entry.scopeKey, text: entry.text, orig_id: entry.id } }],
     });
   }
 
@@ -66,7 +76,7 @@ export class PineconeVectorStore implements VectorPort {
     });
     // Pinecone cosine `score` is cosine SIMILARITY (higher = better) — no normalization; ranking matches LanceDB.
     return matches.map((m) => ({
-      id: m.id,
+      id: String((m.metadata ?? {})["orig_id"] ?? m.id),
       text: String((m.metadata ?? {})["text"] ?? ""),
       score: m.score ?? 0,
     }));
@@ -83,11 +93,14 @@ export class PineconeVectorStore implements VectorPort {
    * per tenant (namespace isolation).
    */
   async delete(id: string, scopeKey: string): Promise<void> {
-    const result = await this.index.fetch({ ids: [id] });
-    const record = result.records[id];
-    if (record === undefined) return; // already absent — nothing to do
-    if (record.metadata?.["scope_key"] !== scopeKey) return; // belongs to a different scope; do not delete
-    await this.index.deleteOne({ id });
+    const scopedId = physicalId(scopeKey, id);
+    const result = await this.index.fetch({ ids: [scopedId, id] });
+    for (const candidate of [scopedId, id]) {
+      const record = result.records[candidate];
+      if (record === undefined) continue;
+      if (record.metadata?.["scope_key"] !== scopeKey) continue;
+      await this.index.deleteOne({ id: candidate });
+    }
   }
 
   /**
@@ -102,28 +115,25 @@ export class PineconeVectorStore implements VectorPort {
    * workloads the recommended approach is one namespace per tenant (namespace isolation).
    */
   async eraseScope(scopeKey: string): Promise<{ deleted: number }> {
-    let ids: string[];
+    const ids = new Set<string>();
     if (typeof this.index.listPaginated === "function") {
       // Paginate through all IDs; Pinecone listPaginated returns up to 100 at a time.
-      ids = [];
       let token: string | undefined;
       do {
-        const page = await this.index.listPaginated!({ prefix: `${scopeKey}/`, limit: 100, paginationToken: token });
-        for (const v of page.vectors ?? []) ids.push(v.id);
+        const page = await this.index.listPaginated!({ prefix: `${encodeIdPart(scopeKey)}/`, limit: 100, paginationToken: token });
+        for (const v of page.vectors ?? []) ids.add(v.id);
         token = page.pagination?.next;
       } while (token !== undefined);
-    } else {
-      // NOTE: approximation — high-topK zero-vector query used as enumeration proxy when
-      // `listPaginated` is unavailable.  May under-count scopes with > 10 000 records.
-      const dummyVector = new Array(this.dim).fill(0) as number[];
-      const { matches } = await this.index.query({
-        vector: dummyVector,
-        topK: 10_000,
-        filter: { scope_key: { $eq: scopeKey } },
-        includeMetadata: false,
-      });
-      ids = matches.map((m) => m.id);
     }
+    // Also query by metadata to catch legacy non-prefixed IDs and clients without listPaginated.
+    const dummyVector = new Array(this.dim).fill(0) as number[];
+    const { matches } = await this.index.query({
+      vector: dummyVector,
+      topK: 10_000,
+      filter: { scope_key: { $eq: scopeKey } },
+      includeMetadata: false,
+    });
+    for (const m of matches) ids.add(m.id);
     let deleted = 0;
     for (const id of ids) {
       await this.index.deleteOne({ id });
@@ -151,7 +161,7 @@ export class PineconeVectorStore implements VectorPort {
       includeValues: true,
     });
     return matches.map((m) => ({
-      id: m.id,
+      id: String((m.metadata ?? {})["orig_id"] ?? m.id),
       scopeKey: String((m.metadata ?? {})["scope_key"] ?? scopeKey),
       text: String((m.metadata ?? {})["text"] ?? ""),
       vector: m.values ?? [],

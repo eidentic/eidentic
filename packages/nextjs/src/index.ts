@@ -90,7 +90,7 @@ export interface WithEidenticOptions {
 
   /**
    * Derive the trusted principal identity server-side from the incoming request.
-   * When provided, the returned `userId` and `orgId` are used instead of any
+   * When provided, the returned `userId`, `orgId`, and `apiKey` are used instead of any
    * values supplied in the request body, preventing clients from spoofing their
    * identity.
    *
@@ -109,7 +109,7 @@ export interface WithEidenticOptions {
    * });
    * ```
    */
-  identify?: (req: Request) => { userId?: string; orgId?: string } | Promise<{ userId?: string; orgId?: string }>;
+  identify?: (req: Request) => { userId?: string; orgId?: string; apiKey?: string } | Promise<{ userId?: string; orgId?: string; apiKey?: string }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -361,10 +361,12 @@ export function withEidentic(
     // the client cannot spoof their identity.
     let userId: string | undefined;
     let orgId: string | undefined;
+    let apiKey: string | undefined;
     if (opts.identify) {
       const principal = await opts.identify(req);
       userId = principal.userId;
       orgId = principal.orgId;
+      apiKey = principal.apiKey;
     } else {
       // Fall back to body-supplied userId (single-tenant / no auth path).
       // WARNING: body.userId is caller-controlled; use `identify` in multi-tenant deployments.
@@ -376,7 +378,7 @@ export function withEidentic(
 
     const signal = req.signal;
 
-    const events = agent.query(input, { sessionId, userId, orgId, signal });
+    const events = agent.query(input, { sessionId, userId, orgId, apiKey, signal });
 
     if (protocol === "ai-sdk-ui") {
       const streamOpts: ToUIMessageStreamOptions = {};

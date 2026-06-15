@@ -141,6 +141,12 @@ export const MIGRATIONS: ReadonlyArray<{ version: number; sql: string }> = [
       ALTER TABLE facts ADD COLUMN IF NOT EXISTS last_corroborated_at BIGINT;
     `,
   },
+  {
+    version: 10,
+    sql: `
+      ALTER TABLE sessions ADD COLUMN IF NOT EXISTS api_key TEXT;
+    `,
+  },
 ];
 
 export async function runMigrations(client: PgClient): Promise<void> {

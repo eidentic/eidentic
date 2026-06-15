@@ -1,5 +1,6 @@
 import type { Agent } from "@eidentic/core";
 import type { ContentBlock, StreamEvent } from "@eidentic/types";
+import { randomUUID } from "node:crypto";
 import type { Step, StepContext } from "./types.js";
 
 // ─── Terminal result event type (from protocol.ts) ───────────────────────────
@@ -23,6 +24,8 @@ export interface AgentStepOptions<I, O> {
   userId?: string;
   /** Organization identifier forwarded into every `agent.query()` call. */
   orgId?: string;
+  /** API key identity forwarded into every `agent.query()` call. */
+  apiKey?: string;
 }
 
 /**
@@ -52,7 +55,7 @@ export function agentStep<I = string, O = unknown>(
     const rawSessionId =
       typeof sessionIdOpt === "function"
         ? sessionIdOpt(input)
-        : sessionIdOpt ?? `wf_${Math.random().toString(36).slice(2)}`;
+        : sessionIdOpt ?? `wf_${randomUUID()}`;
 
     const queryInput = toInput(input);
     let terminal: AgentResultEvent | undefined;
@@ -62,6 +65,7 @@ export function agentStep<I = string, O = unknown>(
       ...(ctx.signal ? { signal: ctx.signal } : {}),
       ...(adapt?.userId !== undefined ? { userId: adapt.userId } : {}),
       ...(adapt?.orgId !== undefined ? { orgId: adapt.orgId } : {}),
+      ...(adapt?.apiKey !== undefined ? { apiKey: adapt.apiKey } : {}),
     })) {
       if (ev.type === "result") {
         terminal = ev;

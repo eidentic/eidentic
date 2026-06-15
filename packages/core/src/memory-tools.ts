@@ -1,6 +1,7 @@
 import { z } from "zod";
-import type { BlockEdit, EditableMemoryPort, MemoryPort, Scope } from "@eidentic/types";
+import { scopeKey, type BlockEdit, type EditableMemoryPort, type MemoryPort, type Scope } from "@eidentic/types";
 import { createTool, type Tool } from "./tool.js";
+import { sha256Hex } from "./sha256.js";
 
 /** Structural guard: a MemoryPort whose blocks the agent can edit. */
 export function isEditableMemory(m: MemoryPort): m is EditableMemoryPort {
@@ -50,6 +51,7 @@ export function memoryTools(memory: EditableMemoryPort, scope: Scope): Tool[] {
         "Returns {ok:false, reason:'readonly'|'limit'|'invalid'} if rejected — read the reason, do not retry blindly.",
       inputSchema: z.object({ label: z.string(), text: z.string() }),
       sideEffect: "destructive",
+      idempotencyKey: async (input) => `memory_append:${scopeKey(scope)}:${input.label}:${await sha256Hex(input.text)}`,
       execute: async ({ input }) => {
         const err = validateLabel(input.label);
         if (err) return err;
@@ -63,6 +65,8 @@ export function memoryTools(memory: EditableMemoryPort, scope: Scope): Tool[] {
         versionHint,
       inputSchema: z.object({ label: z.string(), find: z.string(), replace: z.string(), version: z.number() }),
       sideEffect: "destructive",
+      idempotencyKey: async (input) =>
+        `memory_replace:${scopeKey(scope)}:${input.label}:v${input.version}:${await sha256Hex(`${input.find}\0${input.replace}`)}`,
       execute: async ({ input }) => {
         const err = validateLabel(input.label);
         if (err) return err;
@@ -74,6 +78,7 @@ export function memoryTools(memory: EditableMemoryPort, scope: Scope): Tool[] {
       description: "Replace a memory block's entire value. " + versionHint,
       inputSchema: z.object({ label: z.string(), value: z.string(), version: z.number() }),
       sideEffect: "destructive",
+      idempotencyKey: async (input) => `memory_rewrite:${scopeKey(scope)}:${input.label}:v${input.version}:${await sha256Hex(input.value)}`,
       execute: async ({ input }) => {
         const err = validateLabel(input.label);
         if (err) return err;
@@ -87,6 +92,7 @@ export function memoryTools(memory: EditableMemoryPort, scope: Scope): Tool[] {
         "Use for context not worth keeping always-in-context.",
       inputSchema: z.object({ text: z.string() }),
       sideEffect: "destructive",
+      idempotencyKey: async (input) => `memory_archive:${scopeKey(scope)}:${await sha256Hex(input.text)}`,
       execute: async ({ input }) => { await memory.archive(scope, input.text); return { ok: true }; },
     }),
   ];

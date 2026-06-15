@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "license": "Apache-2.0",
-  "packageManager": "pnpm@10.4.1",
+  "packageManager": "pnpm@10.8.1",
   "engines": { "node": ">=22.13.0" },
   "repository": { "type": "git", "url": "git+https://github.com/eidentic/eidentic.git" },
   "scripts": {
@@ -24,8 +24,5 @@
     "vitest": "^4.1.0",
     "vite": "^6.0.0",
     "@types/node": "^22.10.0"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": ["better-sqlite3", "esbuild", "@lancedb/lancedb", "sharp", "libsql"]
   }
 }
