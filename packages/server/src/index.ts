@@ -187,6 +187,23 @@ export const NoAuth: AuthPort = {
   },
 };
 
+function isProductionRuntime(): boolean {
+  return typeof process !== "undefined" && process.env?.NODE_ENV === "production";
+}
+
+function allowNoAuthInProduction(): boolean {
+  if (typeof process === "undefined") return false;
+  const value = process.env?.EIDENTIC_ALLOW_NO_AUTH;
+  return value === "1" || value === "true";
+}
+
+function assertNoAuthAllowed(auth: AuthPort): void {
+  if (auth !== NoAuth || !isProductionRuntime() || allowNoAuthInProduction()) return;
+  throw new Error(
+    "NoAuth is disabled when NODE_ENV=production. Configure an AuthPort or set EIDENTIC_ALLOW_NO_AUTH=1 for a trusted single-tenant deployment.",
+  );
+}
+
 /**
  * API-key auth: reads `Authorization: Bearer <key>` or `x-api-key` header,
  * looks it up in the provided key→principal map, returns null on mismatch.
@@ -927,6 +944,7 @@ function defaultGetClientKey(c: import("hono").Context, trustProxy: boolean): st
 export function createServer(opts: ServerOptions): EidenticServer {
   const resolve = makeResolver(opts.agents);
   const auth = opts.auth ?? NoAuth;
+  assertNoAuthAllowed(auth);
   const defaultKey = (p: AuthPrincipal, _agentId: string) => p.apiKey ?? p.userId ?? p.orgId ?? "anonymous";
   const getRateLimitKey = opts.rateLimitKey ?? defaultKey;
   const getQuotaKey = opts.quotaKey ?? defaultKey;

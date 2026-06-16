@@ -187,9 +187,9 @@ const studioCmd = defineCommand({
       process.exit(1);
     }
 
-    // S2: warn when auth is configured — the studio UI needs ?key=<token> to send the auth header.
+    // Auth-enabled Studio reads the token from the URL fragment so it is not sent in HTTP requests.
     if (config.auth && config.auth !== NoAuth) {
-      consola.warn(`Studio auth is active. Open the studio URL with ?key=<your-token> appended so the UI can authenticate (e.g. http://localhost:${port}/?key=<your-token>).`);
+      consola.warn(`Studio auth is active. Open the studio URL with #key=<your-token> appended so the UI can authenticate (e.g. http://localhost:${port}/#key=<your-token>).`);
     }
 
     let serveStudio: (opts: unknown, serveOpts: { port: number }) => Promise<{ close(): void }>;

@@ -51,3 +51,7 @@ jobs:
       - name: Check README examples
         if: matrix.node == '22'
         run: pnpm check:readme
+
+      - name: Security audit
+        if: matrix.node == '22'
+        run: pnpm audit --audit-level low

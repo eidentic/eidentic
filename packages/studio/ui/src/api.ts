@@ -131,7 +131,7 @@ export interface WorkflowRunDetail {
 }
 
 // ---------------------------------------------------------------------------
-// S2: Auth token helper — reads from ?key= query param (persisted to localStorage)
+// Auth token helper reads #key= from the URL fragment and persists it to localStorage.
 // or from localStorage directly. Returns { Authorization: "Bearer <token>" } when
 // a token is present, else {} (NoAuth path — behavior unchanged).
 // ---------------------------------------------------------------------------
@@ -139,12 +139,17 @@ export interface WorkflowRunDetail {
 const STORAGE_KEY = "eidentic_studio_key";
 
 export function authHeaders(): Record<string, string> {
-  // Read from URL query on first load and persist to localStorage.
   if (typeof window !== "undefined") {
-    const params = new URLSearchParams(window.location.search);
-    const keyFromUrl = params.get("key");
+    const hashParams = new URLSearchParams(window.location.hash.startsWith("#") ? window.location.hash.slice(1) : window.location.hash);
+    const queryParams = new URLSearchParams(window.location.search);
+    const keyFromUrl = hashParams.get("key") ?? queryParams.get("key");
     if (keyFromUrl) {
       localStorage.setItem(STORAGE_KEY, keyFromUrl);
+      hashParams.delete("key");
+      queryParams.delete("key");
+      const query = queryParams.toString();
+      const hash = hashParams.toString();
+      window.history.replaceState(null, "", `${window.location.pathname}${query ? `?${query}` : ""}${hash ? `#${hash}` : ""}`);
     }
     const token = localStorage.getItem(STORAGE_KEY);
     if (token) return { Authorization: `Bearer ${token}` };

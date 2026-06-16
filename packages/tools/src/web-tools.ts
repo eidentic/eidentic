@@ -25,6 +25,14 @@ export interface WebToolsOptions {
   /** Override the fetch implementation (tests / custom agents). Defaults to globalThis.fetch. */
   fetchImpl?: typeof fetch;
   /**
+   * Resolve hostname A/AAAA records and reject any private/loopback/link-local
+   * address before fetching. Defaults true with global fetch, false with a
+   * custom fetch implementation so tests/custom runtimes stay deterministic.
+   */
+  resolveHosts?: boolean;
+  /** Custom hostname resolver used when `resolveHosts` is enabled. */
+  resolveHost?: (hostname: string) => Promise<string[]>;
+  /**
    * BYO search provider (like the embedder — no default). When omitted, NO web_search tool
    * is returned. The provider reads any API key from `ctx.secrets` (§10.3) — NEVER a model
    * parameter.
@@ -219,6 +227,25 @@ export function safeUrlForError(url: URL | string): string {
   }
 }
 
+async function resolveHostname(hostname: string): Promise<string[]> {
+  const dns = await import("node:dns/promises");
+  const records = await dns.lookup(hostname, { all: true });
+  return records.map((r) => r.address);
+}
+
+async function assertResolvedPublicHost(
+  url: URL,
+  resolveHosts: boolean,
+  resolveHost: (hostname: string) => Promise<string[]>,
+): Promise<void> {
+  if (!resolveHosts || isBlockedHost(url.hostname)) return;
+  const addresses = await resolveHost(url.hostname);
+  const blocked = addresses.find((address) => isBlockedHost(address));
+  if (blocked !== undefined) {
+    throw new Error(`resolved host maps to blocked private/loopback address: ${url.hostname}`);
+  }
+}
+
 /**
  * Assert that `rawUrl` is safe to fetch — no SSRF hazards.
  *
@@ -300,6 +327,8 @@ function legacyAsPort(
  */
 export function webTools(opts: WebToolsOptions): Tool[] {
   const doFetch = opts.fetchImpl ?? globalThis.fetch;
+  const resolveHosts = opts.resolveHosts ?? opts.fetchImpl === undefined;
+  const resolveHost = opts.resolveHost ?? resolveHostname;
 
   const webFetch = createTool({
     id: "web_fetch",
@@ -332,6 +361,7 @@ export function webTools(opts: WebToolsOptions): Tool[] {
       if (isBlockedHost(parsed.hostname)) {
         throw new Error(`web_fetch: host is a blocked private/loopback address: ${parsed.hostname}`);
       }
+      await assertResolvedPublicHost(parsed, resolveHosts, resolveHost);
       // Sealed: GET only, no custom headers/body. Use redirect:"manual" so we can re-validate
       // the redirect target host before following it (redirect policy: manual single-hop re-check).
       // resilientFetch adds per-request timeout + retry on 5xx/network + agent abort link.
@@ -367,6 +397,7 @@ export function webTools(opts: WebToolsOptions): Tool[] {
         if (isBlockedHost(next.hostname)) {
           throw new Error(`web_fetch: redirect target is a blocked private/loopback address: ${next.hostname}`);
         }
+        await assertResolvedPublicHost(next, resolveHosts, resolveHost);
         let followed: Response;
         try {
           followed = await resilientFetch(

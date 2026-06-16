@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { Agent } from "@eidentic/core";
 import type { Tool } from "@eidentic/core";
 import { MockModel, InMemoryStore } from "@eidentic/types/testing";
@@ -135,6 +135,19 @@ describe("GET /api/health", () => {
 // ---------------------------------------------------------------------------
 
 describe("Auth enforcement", () => {
+  it("requires an explicit NoAuth override in production", () => {
+    try {
+      vi.stubEnv("NODE_ENV", "production");
+      vi.stubEnv("EIDENTIC_ALLOW_NO_AUTH", "");
+      expect(() => createStudioApi({ agents: { [AGENT_ID]: agent } })).toThrow(/Studio NoAuth is disabled/);
+
+      vi.stubEnv("EIDENTIC_ALLOW_NO_AUTH", "1");
+      expect(() => createStudioApi({ agents: { [AGENT_ID]: agent } })).not.toThrow();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("returns 401 on protected routes without key", async () => {
     const app = createStudioApi({
       agents: { [AGENT_ID]: agent },
