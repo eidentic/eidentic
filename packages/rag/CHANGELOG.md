@@ -1,5 +1,12 @@
 # @eidentic/rag
 
+## 0.1.6
+
+### Patch Changes
+
+- Updated dependencies [ccb1481]
+  - @eidentic/tools@0.1.6
+
 ## 0.1.5
 
 ### Patch Changes
