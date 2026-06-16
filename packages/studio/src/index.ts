@@ -86,6 +86,23 @@ export interface StudioOptions {
   prices?: PriceTable;
 }
 
+function isProductionRuntime(): boolean {
+  return typeof process !== "undefined" && process.env?.NODE_ENV === "production";
+}
+
+function allowNoAuthInProduction(): boolean {
+  if (typeof process === "undefined") return false;
+  const value = process.env?.EIDENTIC_ALLOW_NO_AUTH;
+  return value === "1" || value === "true";
+}
+
+function assertNoAuthAllowed(auth: AuthPort): void {
+  if (auth !== NoAuth || !isProductionRuntime() || allowNoAuthInProduction()) return;
+  throw new Error(
+    "Studio NoAuth is disabled when NODE_ENV=production. Configure an AuthPort or set EIDENTIC_ALLOW_NO_AUTH=1 for a trusted local-only deployment.",
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -214,6 +231,7 @@ function usdForUsage(
  */
 export function createStudioApi(opts: StudioOptions): StudioHandle {
   const auth = opts.auth ?? NoAuth;
+  assertNoAuthAllowed(auth);
   const base = (opts.basePath ?? "/api").replace(/\/$/, "");
   const app = new Hono({ strict: false });
 

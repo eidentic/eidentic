@@ -32,16 +32,16 @@
   "dependencies": {
     "@eidentic/cli": "workspace:*",
     "@eidentic/core": "workspace:*",
-    "@eidentic/types": "workspace:*",
+    "@eidentic/memory": "workspace:*",
     "@eidentic/model": "workspace:*",
     "@eidentic/sqlite": "workspace:*",
-    "@eidentic/memory": "workspace:*"
+    "@eidentic/types": "workspace:*"
   },
   "peerDependencies": {
     "ai": "^6.0.0"
   },
   "devDependencies": {
-    "ai": "^6.0.0"
+    "ai": "^6.0.207"
   },
   "description": "The open-source TypeScript SDK for AI agents with self-improving memory and production fundamentals built in.",
   "keywords": [

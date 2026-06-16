@@ -395,6 +395,21 @@ describe("NoAuth", () => {
     });
     expect(res.status).toBe(200);
   });
+
+  it("requires an explicit override in production", () => {
+    const { agent } = makeAgent([textResponse("ok")]);
+
+    try {
+      vi.stubEnv("NODE_ENV", "production");
+      vi.stubEnv("EIDENTIC_ALLOW_NO_AUTH", "");
+      expect(() => createServer({ agents: { demo: agent } })).toThrow(/NoAuth is disabled/);
+
+      vi.stubEnv("EIDENTIC_ALLOW_NO_AUTH", "1");
+      expect(() => createServer({ agents: { demo: agent } })).not.toThrow();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

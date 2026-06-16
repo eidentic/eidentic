@@ -120,6 +120,17 @@ describe("webTools — sealed web_fetch + egress allowlist (§5.6)", () => {
     expect(out.truncated).toBe(true);
     expect(out.content.length).toBeLessThan(big.length);
   });
+  it("web_fetch rejects allowlisted host when DNS resolves to private IP", async () => {
+    const tools = webTools({
+      allowlist: ["example.com"],
+      fetchImpl: fakeFetch("secret"),
+      resolveHosts: true,
+      resolveHost: async () => ["10.0.0.5"],
+    });
+
+    await expect(byId(tools, "web_fetch").execute({ url: "https://example.com/" }))
+      .rejects.toThrow(/resolved host maps to blocked/);
+  });
 });
 
 describe("webTools — SSRF private-IP guard (isBlockedHost)", () => {

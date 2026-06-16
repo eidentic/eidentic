@@ -46,8 +46,8 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^3.0.0",
-    "@ai-sdk/openai": "^3.0.69",
+    "@ai-sdk/anthropic": "^3.0.85",
+    "@ai-sdk/openai": "^3.0.72",
     "@eidentic/a2a": "workspace:*",
     "@eidentic/bench": "workspace:*",
     "@eidentic/better-auth": "workspace:*",
@@ -68,7 +68,7 @@
     "@eidentic/transformers": "workspace:*",
     "@eidentic/types": "workspace:*",
     "@electric-sql/pglite": "^0.4.6",
-    "ai": "^6.0.0",
+    "ai": "^6.0.207",
     "eidentic": "workspace:*",
     "zod": "^4.0.0"
   },
