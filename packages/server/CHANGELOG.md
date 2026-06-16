@@ -1,5 +1,21 @@
 # @eidentic/server
 
+## 0.3.1
+
+### Patch Changes
+
+- ccb1481: Harden the SDK security posture.
+
+  Dependency updates remove known vulnerable transitive ranges and CI now runs a low-threshold audit gate. Server and Studio reject accidental `NoAuth` usage in production unless explicitly opted in with `EIDENTIC_ALLOW_NO_AUTH=1`. The sealed `web_fetch` tool now resolves allowlisted hostnames before fetch and rejects private, loopback, and link-local targets to reduce DNS rebinding SSRF risk. Studio auth token handoff now prefers URL fragments so bearer tokens are not sent in HTTP requests, while preserving legacy query-token support.
+
+- 37a4615: Fix: `toUIMessageStream` / `toUIMessageStreamResponse` no longer duplicates a streamed assistant
+  message. When a turn streamed token-by-token (`stream.delta` events), the turn-final `assistant`
+  event carries the same accumulated text — it was being re-emitted as a second `text-start` /
+  `text-delta` / `text-end` block, so `useChat` rendered the reply twice. The converter now skips the
+  `assistant` text blocks for a turn that already streamed (and still emits them for non-streamed
+  turns, e.g. non-streaming model adapters). Fixes the double reply seen via `@eidentic/nextjs` + `useChat`.
+  - @eidentic/core@0.3.0
+
 ## 0.3.0
 
 ### Minor Changes

@@ -1,5 +1,20 @@
 # @eidentic/model
 
+## 0.2.4
+
+### Patch Changes
+
+- 37a4615: Docs fix: correct the README code examples to the real (async factory) API.
+
+  - `@eidentic/model`: `new AIEmbedder(model, { dim })` → `await AIEmbedder.create(model)`. The
+    constructor is private and the embedding dimension is probed automatically — the old example did
+    not compile.
+  - `@eidentic/e2b`: `E2BSandbox.create(...)` → `await E2BSandbox.create(...)` (it returns a Promise).
+
+- ccb1481: Harden the SDK security posture.
+
+  Dependency updates remove known vulnerable transitive ranges and CI now runs a low-threshold audit gate. Server and Studio reject accidental `NoAuth` usage in production unless explicitly opted in with `EIDENTIC_ALLOW_NO_AUTH=1`. The sealed `web_fetch` tool now resolves allowlisted hostnames before fetch and rejects private, loopback, and link-local targets to reduce DNS rebinding SSRF risk. Studio auth token handoff now prefers URL fragments so bearer tokens are not sent in HTTP requests, while preserving legacy query-token support.
+
 ## 0.2.3
 
 ### Patch Changes
