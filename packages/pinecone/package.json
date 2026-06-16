@@ -43,7 +43,7 @@
     }
   },
   "devDependencies": {
-    "@pinecone-database/pinecone": "^7.2.0"
+    "@pinecone-database/pinecone": "^8.0.0"
   },
   "description": "Pinecone vector store adapter for Eidentic — fully-managed vector search for agent memory via the Pinecone API.",
   "keywords": [

@@ -45,10 +45,10 @@
   "devDependencies": {
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
-    "@vitejs/plugin-react": "^4.5.2",
+    "@vitejs/plugin-react": "^6.0.2",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "vite": "^6.3.5"
+    "vite": "^8.0.16"
   },
   "description": "Local dev studio for Eidentic — inspect agent sessions, memory, skills, and workflow runs via a web dashboard.",
   "keywords": [
