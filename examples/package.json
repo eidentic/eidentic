@@ -67,7 +67,7 @@
     "@eidentic/tools": "workspace:*",
     "@eidentic/transformers": "workspace:*",
     "@eidentic/types": "workspace:*",
-    "@electric-sql/pglite": "^0.5.3",
+    "@electric-sql/pglite": "^0.4.6",
     "ai": "^6.0.207",
     "eidentic": "workspace:*",
     "zod": "^4.0.0"
