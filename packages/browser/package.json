@@ -45,7 +45,7 @@
     }
   },
   "devDependencies": {
-    "playwright-core": "^1.52.0"
+    "playwright-core": "^1.61.0"
   },
   "description": "Sealed browser-automation tools for Eidentic — first-class sandboxed browser tools over an injected Playwright-like page (PageLike interface).",
   "keywords": [
