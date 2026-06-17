@@ -37,6 +37,23 @@ For a packaging preview:
 pnpm run release:dry-run -- --skip-install
 ```
 
+## v1 Release Criteria
+
+Do not tag `v1.0.0` until these checks are true:
+
+- GitHub has no open `p0` issues in the `v1.0` milestone.
+- `pnpm run release:check -- --skip-install` passes locally on a clean tree.
+- CI is green for Node 22 and Node 24.
+- Cross-runtime smoke is green for Node, Bun, and Deno.
+- `pnpm audit --audit-level low` reports no known vulnerabilities.
+- README and package README examples match the current public API.
+- Fresh install quickstarts work from outside the monorepo.
+- npm Trusted Publishing is the only normal publish path.
+- Public API stability is documented for core packages and experimental surfaces are named explicitly.
+- Release notes call out breaking changes, migration notes, security changes, and known limitations.
+
+For v1, major dependency migrations must be handled as explicit migration PRs, not automatic grouped dependency updates.
+
 ## Release Flow
 
 After the PR is merged into `main`:
@@ -63,6 +80,17 @@ runs `pnpm audit --audit-level low`, and publishes only versioned packages with:
 ```sh
 pnpm changeset publish
 ```
+
+## Dependency Automation
+
+Dependabot is enabled for weekly npm and GitHub Actions updates. Patch and minor updates can be merged when CI is green.
+
+Semver-major npm updates are intentionally ignored by Dependabot. Open a human-owned migration issue/PR for those updates, run the full release gate, and document any required user migration.
+
+If a Dependabot PR fails CI, either:
+
+- fix the PR and merge it with green checks, or
+- close it with a comment explaining the blocker and create a follow-up issue.
 
 ## npm Trusted Publisher Setup
 
