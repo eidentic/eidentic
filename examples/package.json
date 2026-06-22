@@ -47,7 +47,7 @@
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.85",
-    "@ai-sdk/openai": "^3.0.72",
+    "@ai-sdk/openai": "^3.0.74",
     "@eidentic/a2a": "workspace:*",
     "@eidentic/bench": "workspace:*",
     "@eidentic/better-auth": "workspace:*",
@@ -67,8 +67,8 @@
     "@eidentic/tools": "workspace:*",
     "@eidentic/transformers": "workspace:*",
     "@eidentic/types": "workspace:*",
-    "@electric-sql/pglite": "^0.4.6",
-    "ai": "^6.0.207",
+    "@electric-sql/pglite": "^0.5.3",
+    "ai": "^6.0.208",
     "eidentic": "workspace:*",
     "zod": "^4.0.0"
   },

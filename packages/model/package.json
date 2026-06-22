@@ -34,7 +34,7 @@
   },
   "dependencies": {
     "@eidentic/types": "workspace:*",
-    "ai": "^6.0.207"
+    "ai": "^6.0.208"
   },
   "peerDependencies": {
     "ollama-ai-provider": ">=1.0.0"
