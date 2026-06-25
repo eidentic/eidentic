@@ -8,6 +8,9 @@ updates:
       - dependency-name: "*"
         update-types:
           - "version-update:semver-major"
+      - dependency-name: "@electric-sql/pglite"
+        versions:
+          - ">=0.5.0"
     groups:
       npm-dependencies:
         patterns:
