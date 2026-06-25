@@ -23,3 +23,10 @@ overrides:
 
 patchedDependencies:
   read-yaml-file@1.1.0: patches/read-yaml-file@1.1.0.patch
+
+allowBuilds:
+  better-sqlite3: true
+  esbuild: true
+  onnxruntime-node: true
+  protobufjs: true
+  sharp: true
