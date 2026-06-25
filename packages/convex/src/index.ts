@@ -1,12 +1,13 @@
 /**
- * @eidentic/convex — a Convex-backed `StorePort & GraphPort` (`ConvexStore`) and `VectorPort`
- * (`ConvexVectorStore`).
+ * @eidentic/convex — Convex-backed Eidentic stores and runners.
  *
- * Architecture (app-functions model, NOT a Convex Component): the agent runtime runs OUTSIDE
- * Convex and talks to a deployment via an injectable `runner`. In production the runner wraps a
- * `ConvexHttpClient`; in tests it wraps a `convex-test` instance. The Convex function handlers
- * live in `@eidentic/convex/server` and are re-exported by the host app from a file in its
- * `convex/` directory; the schema tables live in `@eidentic/convex/schema`.
+ * Preferred architecture: install the Convex Component from
+ * `@eidentic/convex/convex.config.js`, then use `EidenticComponentStore` from a host action
+ * through `ctx.runQuery` / `ctx.runMutation`.
+ *
+ * Compatibility architecture: the app-functions model still lets an agent runtime outside Convex
+ * talk to a deployment via an injectable `runner`. In production the runner wraps a
+ * `ConvexHttpClient`; in tests it wraps a `convex-test` instance.
  *
  * IDs cross the client boundary as strings (see server.ts), so the client passes plain string
  * scope keys / ids and never touches Convex document `_id`s.
@@ -31,13 +32,14 @@ import {
   type DurablePort,
   type Checkpoint,
   type IdempotencyRecord,
+  type IdempotencyMetadata,
   type SuspendDecision,
 } from "@eidentic/types";
 
 // Re-export the authorization hook + secure factory so apps can import them from "@eidentic/convex".
 // (The handler functions themselves live at "@eidentic/convex/server" and are re-exported from the
 // host app's own `convex/` module, NOT from here.)
-export { eidenticFunctions, type EidenticAuthorize } from "./server.js";
+export { eidenticFunctions, type EidenticAuthorize, type EidenticFunctionsOptions } from "./server.js";
 
 // ---------------------------------------------------------------------------
 // Runner + function references
@@ -128,6 +130,40 @@ export function defaultVectorFns(prefix = "eidentic"): ConvexVectorFns {
   return Object.fromEntries(VECTOR_FN_NAMES.map((n) => [n, `${prefix}:${n}`])) as unknown as ConvexVectorFns;
 }
 
+function resolveFunctionNamespace(source: unknown): Record<string, FnRef> {
+  const root = source as Record<string, unknown>;
+  const nested = root["functions"];
+  if (nested && typeof nested === "object") return nested as Record<string, FnRef>;
+  return root as Record<string, FnRef>;
+}
+
+function pickFns<T>(source: unknown, names: readonly string[], label: string): T {
+  const ns = resolveFunctionNamespace(source);
+  const out: Record<string, FnRef> = {};
+  for (const name of names) {
+    const ref = ns[name];
+    if (ref === undefined) {
+      throw new Error(`missing Eidentic ${label} function reference '${name}'`);
+    }
+    out[name] = ref;
+  }
+  return out as T;
+}
+
+/**
+ * Extract store function refs from either a generated component API
+ * (`components.eidentic` / `components.eidentic.functions`) or an app-functions API module
+ * (`api.eidentic`).
+ */
+export function storeFnsFrom(source: unknown): ConvexStoreFns {
+  return pickFns<ConvexStoreFns>(source, STORE_FN_NAMES, "store");
+}
+
+/** Extract vector function refs from a generated component or app-functions API module. */
+export function vectorFnsFrom(source: unknown): ConvexVectorFns {
+  return pickFns<ConvexVectorFns>(source, VECTOR_FN_NAMES, "vector");
+}
+
 /** Minimal structural view of `ConvexHttpClient` (from `convex/browser`). */
 export interface ConvexHttpClientLike {
   query(fn: unknown, args: Record<string, unknown>): Promise<unknown>;
@@ -155,6 +191,29 @@ export function convexHttpRunner(client: ConvexHttpClientLike): ConvexRunner {
   };
 }
 
+/** Minimal structural view of Convex's `ActionCtx` / mutation ctx runner methods. */
+export interface ConvexActionCtxLike {
+  runQuery(fn: unknown, args: Record<string, unknown>): Promise<unknown>;
+  runMutation(fn: unknown, args: Record<string, unknown>): Promise<unknown>;
+  runAction?: (fn: unknown, args: Record<string, unknown>) => Promise<unknown>;
+}
+
+/**
+ * Build an in-process runner for Convex actions. This is the natural runner for the component path:
+ * host actions authenticate and assemble business context, then call Eidentic component functions
+ * through `ctx.runQuery` / `ctx.runMutation`.
+ */
+export function convexActionRunner(ctx: ConvexActionCtxLike): ConvexRunner {
+  return {
+    query: (fn, args) => ctx.runQuery(fn, args),
+    mutation: (fn, args) => ctx.runMutation(fn, args),
+    action: (fn, args) => {
+      if (!ctx.runAction) throw new Error("ctx.runAction is not available on this Convex context");
+      return ctx.runAction(fn, args);
+    },
+  };
+}
+
 /**
  * Rethrow a server-side conflict (thrown with the "conflict:" marker prefix in server.ts) as a
  * `StoreConflictError`. Convex serializes thrown errors into the message, so we match on the
@@ -166,6 +225,15 @@ function rethrowConflict(err: unknown): never {
     throw new StoreConflictError(`conflict: ${msg}`);
   }
   throw err;
+}
+
+function idempotencyMetadataArgs(metadata?: IdempotencyMetadata): Record<string, unknown> {
+  if (!metadata) return {};
+  return {
+    ...(metadata.scopeKey !== undefined ? { scopeKey: metadata.scopeKey } : {}),
+    ...(metadata.sessionId !== undefined ? { sessionId: metadata.sessionId } : {}),
+    ...(metadata.ownerKey !== undefined ? { ownerKey: metadata.ownerKey } : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -361,22 +429,40 @@ export class ConvexStore implements StorePort, GraphPort, DurablePort {
     return (await this.runner.query(this.fns.lastCheckpoint, { sessionId })) as Checkpoint | null;
   }
 
-  async recordIntent(key: string, argsHash: string): Promise<void> {
-    await this.runner.mutation(this.fns.recordIntent, { key, argsHash, now: this.now() });
+  async recordIntent(key: string, argsHash: string, metadata?: IdempotencyMetadata): Promise<void> {
+    await this.runner.mutation(this.fns.recordIntent, {
+      key,
+      argsHash,
+      now: this.now(),
+      ...idempotencyMetadataArgs(metadata),
+    });
   }
 
-  async recordCompletion(key: string, result: unknown): Promise<void> {
+  async recordCompletion(key: string, result: unknown, metadata?: IdempotencyMetadata): Promise<void> {
     // Serialize so the result's object-key order survives the Convex `v.any()` round-trip.
     await this.runner.mutation(this.fns.recordCompletion, {
       key,
       result: JSON.stringify(result ?? null),
       now: this.now(),
+      ...idempotencyMetadataArgs(metadata),
     });
   }
 
-  async getIdempotency(key: string): Promise<IdempotencyRecord | null> {
-    const row = (await this.runner.query(this.fns.getIdempotency, { key })) as
-      | { key: string; argsHash: string; status: "intent" | "applied"; result?: string; createdAt: string }
+  async getIdempotency(key: string, metadata?: IdempotencyMetadata): Promise<IdempotencyRecord | null> {
+    const row = (await this.runner.query(this.fns.getIdempotency, {
+      key,
+      ...idempotencyMetadataArgs(metadata),
+    })) as
+      | {
+          key: string;
+          argsHash: string;
+          status: "intent" | "applied";
+          result?: string;
+          createdAt: string;
+          scopeKey?: string;
+          sessionId?: string;
+          ownerKey?: string;
+        }
       | null;
     if (!row) return null;
     // `result` is a JSON string on the wire (preserves object-key order) — parse it here.
@@ -386,6 +472,9 @@ export class ConvexStore implements StorePort, GraphPort, DurablePort {
       status: row.status,
       ...(row.result !== undefined ? { result: JSON.parse(row.result) } : {}),
       createdAt: row.createdAt,
+      ...(row.scopeKey !== undefined ? { scopeKey: row.scopeKey } : {}),
+      ...(row.sessionId !== undefined ? { sessionId: row.sessionId } : {}),
+      ...(row.ownerKey !== undefined ? { ownerKey: row.ownerKey } : {}),
     };
   }
 
@@ -401,6 +490,18 @@ export class ConvexStore implements StorePort, GraphPort, DurablePort {
   async getDecision(sessionId: string, callId: string): Promise<SuspendDecision | null> {
     const raw = (await this.runner.query(this.fns.getDecision, { sessionId, callId })) as string | null;
     return raw === null ? null : (JSON.parse(raw) as SuspendDecision);
+  }
+}
+
+export interface EidenticComponentStoreOptions extends Omit<ConvexStoreOptions, "fns"> {
+  /** Optional explicit refs; by default refs are extracted from the generated component API. */
+  fns?: ConvexStoreFns;
+}
+
+export class EidenticComponentStore extends ConvexStore {
+  constructor(ctx: ConvexActionCtxLike, component: unknown, opts: EidenticComponentStoreOptions = {}) {
+    const { fns, ...storeOpts } = opts;
+    super(convexActionRunner(ctx), { ...storeOpts, fns: fns ?? storeFnsFrom(component) });
   }
 }
 
@@ -443,5 +544,17 @@ export class ConvexVectorStore implements VectorPort {
 
   async list(scopeKey: string): Promise<VectorEntry[]> {
     return (await this.runner.query(this.fns.vectorList, { scopeKey })) as VectorEntry[];
+  }
+}
+
+export interface EidenticComponentVectorStoreOptions extends Omit<ConvexVectorStoreOptions, "fns"> {
+  /** Optional explicit refs; by default refs are extracted from the generated component API. */
+  fns?: ConvexVectorFns;
+}
+
+export class EidenticComponentVectorStore extends ConvexVectorStore {
+  constructor(ctx: ConvexActionCtxLike, component: unknown, opts: EidenticComponentVectorStoreOptions = {}) {
+    const { fns } = opts;
+    super(convexActionRunner(ctx), { fns: fns ?? vectorFnsFrom(component) });
   }
 }

@@ -1,5 +1,31 @@
 # @eidentic/convex
 
+## 0.7.0
+
+### Minor Changes
+
+- Add a component-first Convex integration while keeping the existing app-functions path source-compatible.
+
+  - New `@eidentic/convex/convex.config.js` export installs Eidentic as a Convex Component.
+  - New `@eidentic/convex/component` export provides `EidenticComponentStore`,
+    `EidenticComponentVectorStore`, `convexActionRunner`, `storeFnsFrom`, and `vectorFnsFrom`.
+  - Component-owned tables use isolated singular snake_case names:
+    `session`, `event`, `block`, `block_history`, `memory`, `fact`, `vector`, `checkpoint`,
+    `idempotency`, and `decision`.
+  - New `@eidentic/convex/app-functions/*` exports make the legacy/manual path explicit.
+  - `createEidenticTableNames` and `createEidenticTables` support prefixed app-functions table
+    names such as `eidentic_session` and `eidentic_block_history`.
+  - `eidenticFunctions({ tables, authorize })` can bind handlers to custom table names and still
+    run the authorization hook before every handler.
+  - Durable idempotency handlers now accept optional `scopeKey`, `sessionId`, and `ownerKey`
+    metadata so multi-tenant authorization hooks do not need to parse opaque idempotency keys.
+
+  Backward compatibility: existing `@eidentic/convex`, `@eidentic/convex/schema`, and
+  `@eidentic/convex/server` imports keep their original behavior and default table names. The bare
+  public `export * from "@eidentic/convex/server"` path remains available for trusted/single-tenant
+  installs, but multi-tenant apps should use `eidenticFunctions({ authorize })` or migrate to the
+  component path.
+
 ## 0.6.0
 
 ### Minor Changes

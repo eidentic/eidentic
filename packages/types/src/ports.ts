@@ -501,8 +501,20 @@ export interface Checkpoint {
 
 export type IdempotencyStatus = "intent" | "applied";
 
+export interface IdempotencyMetadata {
+  /**
+   * Optional logical memory scope. Convex public handlers can use this in authorization hooks
+   * instead of parsing it back out of an opaque idempotency key.
+   */
+  scopeKey?: string;
+  /** Optional session owner for durable tool keys, usually the caller's sessionId. */
+  sessionId?: string;
+  /** Optional host-defined owner key, such as a workspace/user/org principal. */
+  ownerKey?: string;
+}
+
 /** One ledger row: intent written before a side-effecting tool runs, flipped to applied after. */
-export interface IdempotencyRecord {
+export interface IdempotencyRecord extends IdempotencyMetadata {
   key: string;
   argsHash: string;
   status: IdempotencyStatus;
@@ -521,11 +533,11 @@ export interface DurablePort {
   /** The highest-seq checkpoint for the session, or null if none. */
   lastCheckpoint(sessionId: string): Promise<Checkpoint | null>;
   /** Record intent BEFORE a destructive/idempotent tool runs. No-op if the key already exists. */
-  recordIntent(key: string, argsHash: string): Promise<void>;
+  recordIntent(key: string, argsHash: string, metadata?: IdempotencyMetadata): Promise<void>;
   /** Flip the key to applied AFTER it succeeds, persisting the result for skip-on-resume. */
-  recordCompletion(key: string, result: unknown): Promise<void>;
+  recordCompletion(key: string, result: unknown, metadata?: IdempotencyMetadata): Promise<void>;
   /** Read the ledger row (with parsed result) for a key, or null if absent. */
-  getIdempotency(key: string): Promise<IdempotencyRecord | null>;
+  getIdempotency(key: string, metadata?: IdempotencyMetadata): Promise<IdempotencyRecord | null>;
   /**
    * Human-in-the-loop suspension (§9.4). Persist the human decision for a suspended tool call,
    * keyed by (sessionId, callId) so the same key is stable across the original run and the resume.

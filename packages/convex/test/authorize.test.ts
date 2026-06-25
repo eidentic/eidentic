@@ -87,6 +87,23 @@ describe("eidenticFunctions authorize hook", () => {
     expect(last?.args["scopeKey"]).toBe("agent:a1");
   });
 
+  it("passes idempotency ownership metadata to the hook and stores it", async () => {
+    const store = authorizedStore();
+    await store.recordIntent("sess1:send_email:a@test.com", "hash1", {
+      sessionId: "sess1",
+      ownerKey: "user:u1",
+    });
+
+    const last = authState.calls.at(-1);
+    expect(last?.op).toBe("recordIntent");
+    expect(last?.args["sessionId"]).toBe("sess1");
+    expect(last?.args["ownerKey"]).toBe("user:u1");
+
+    const row = await store.getIdempotency("sess1:send_email:a@test.com", { sessionId: "sess1" });
+    expect(row?.sessionId).toBe("sess1");
+    expect(row?.ownerKey).toBe("user:u1");
+  });
+
   it("guards vector ops too", async () => {
     const vectors = authorizedVectorStore();
     authState.mode = "deny";
