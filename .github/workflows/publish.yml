@@ -6,7 +6,7 @@ on:
       - "v*"
 
 permissions:
-  contents: read
+  contents: write # read repository contents and create the GitHub Release for the tag
   id-token: write # required for npm Trusted Publishing (OIDC) + provenance
 
 concurrency:
@@ -39,3 +39,13 @@ jobs:
       # Runs install/build/test/typecheck/readme/audit, then publishes only versioned packages.
       # Provenance is attached automatically by npm trusted publishing via OIDC.
       - run: pnpm run release:publish
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release edit "${GITHUB_REF_NAME}" --latest
+          else
+            gh release create "${GITHUB_REF_NAME}" --generate-notes --latest
+          fi

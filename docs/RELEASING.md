@@ -6,9 +6,10 @@ Do not publish from a local machine during the normal release path.
 ## Why
 
 - Changesets owns package version bumps, changelogs, and internal dependency ranges.
+- Packages are independently versioned in this monorepo; the repository `v*` tag marks a coordinated publish, not a single package version.
 - npm Trusted Publishing uses GitHub Actions OIDC instead of long-lived npm write tokens.
 - npm provenance is generated automatically for public packages published from the public repo.
-- The publish workflow runs the same release gate used locally before it calls `changeset publish`.
+- The publish workflow runs the same release gate used locally before it calls `changeset publish`, then creates the GitHub Release for the pushed tag.
 
 ## Per-Change Flow
 
@@ -80,6 +81,14 @@ runs `pnpm audit --audit-level low`, and publishes only versioned packages with:
 ```sh
 pnpm changeset publish
 ```
+
+After npm publishing succeeds, the workflow creates the matching GitHub Release from the pushed
+tag using generated notes and marks it as the latest release.
+
+The GitHub Release version may not match every npm package version. For example, the umbrella
+`eidentic` package and individual `@eidentic/*` packages can advance at different patch/minor
+rates. Use `npm view <package> version` for a package's current npm version, and GitHub Releases
+for the coordinated repository publish history.
 
 ## Dependency Automation
 
