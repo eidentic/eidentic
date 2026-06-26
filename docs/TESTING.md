@@ -30,7 +30,7 @@ DEBUG=eidentic:* pnpm -C examples hello:<name>
 | Feature | What it's for | Test |
 |---|---|---|
 | Stateful ReAct agent | The base loop: reason → tool → observe, event-sourced sessions | `hello` |
-| Real model | The same agent against a real provider (AI SDK v6) | `hello:real` (needs key) |
+| Real model | The same agent against a real provider (AI SDK v7) | `hello:real` (needs key) |
 | Token streaming | Stream the model output token-by-token | `hello:stream` |
 | Built-in tools | Sealed file / bash / web tools (bash never touches the host; web has SSRF guards) | `hello:tools` |
 | Embedded usage | Drop the agent into your own backend (plain `node:http`, no server pkg) | `hello:embedded` |

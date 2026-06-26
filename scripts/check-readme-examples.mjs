@@ -59,7 +59,7 @@ const STUB_MODULES = [
   "better-sqlite3", "pg", "@electric-sql/pglite", "@libsql/client", "convex", "convex/server",
   "convex/browser", "convex/values", "@lancedb/lancedb", "apache-arrow", "@qdrant/js-client-rest",
   "@pinecone-database/pinecone", "@e2b/code-interpreter", "@huggingface/transformers",
-  "ollama-ai-provider", "@modelcontextprotocol/sdk", "@modelcontextprotocol/sdk/*",
+  "@modelcontextprotocol/sdk", "@modelcontextprotocol/sdk/*",
 ];
 
 const stubs = [

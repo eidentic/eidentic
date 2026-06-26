@@ -1,4 +1,4 @@
-import { tool, jsonSchema, type ModelMessage as AIMessage, type SystemModelMessage, type ToolSet, type TextPart, type ToolCallPart, type ImagePart } from "ai";
+import { tool, jsonSchema, type Instructions, type ModelMessage as AIMessage, type SystemModelMessage, type ToolSet, type TextPart, type ToolCallPart, type ImagePart } from "ai";
 import type {
   ModelMessage as KMessage,
   ContentBlock,
@@ -17,7 +17,7 @@ const ANTHROPIC_CACHE_BREAKPOINT: SystemModelMessage["providerOptions"] = {
 };
 
 /**
- * Split Eidentic messages into AI SDK's `system` option + non-system `messages`.
+ * Split Eidentic messages into AI SDK's `instructions` option + non-system `messages`.
  * When `cacheControl` is `true`, the system value is returned as a `SystemModelMessage`
  * object carrying an Anthropic `cacheControl: { type: "ephemeral" }` breakpoint. Providers
  * that do not support prefix caching ignore the `providerOptions` field silently.
@@ -25,7 +25,7 @@ const ANTHROPIC_CACHE_BREAKPOINT: SystemModelMessage["providerOptions"] = {
 export function mapMessages(
   msgs: KMessage[],
   opts?: { cacheControl?: boolean },
-): { system?: string | SystemModelMessage; messages: AIMessage[] } {
+): { instructions?: Instructions; messages: AIMessage[] } {
   const systemParts: string[] = [];
   const messages: AIMessage[] = [];
 
@@ -110,11 +110,11 @@ export function mapMessages(
     // Anthropic reads cacheControl to place a KV-cache breakpoint after the system message.
     // Other providers ignore the providerOptions field gracefully.
     return {
-      system: { role: "system" as const, content: systemText, providerOptions: ANTHROPIC_CACHE_BREAKPOINT },
+      instructions: { role: "system" as const, content: systemText, providerOptions: ANTHROPIC_CACHE_BREAKPOINT },
       messages,
     };
   }
-  return { system: systemText, messages };
+  return { instructions: systemText, messages };
 }
 
 function textOf(content: ContentBlock[]): string {
@@ -138,27 +138,35 @@ export function buildTools(schemas: ToolSchema[]): ToolSet {
 export interface AIResultLike {
   text: string;
   toolCalls: Array<{ toolCallId: string; toolName: string; input: unknown }>;
-  usage: { inputTokens?: number; outputTokens?: number; cachedInputTokens?: number };
+  usage: {
+    inputTokens?: number;
+    outputTokens?: number;
+    inputTokenDetails?: { cacheReadTokens?: number };
+  };
   /**
-   * Present when the call was made with `experimental_output` (structured output). The AI SDK
+   * Present when the call was made with `output` (structured output). The AI SDK
    * parses the model's JSON against the schema and exposes it here. Accessing this getter on a
    * turn where the model produced no structured object can throw inside the SDK, so callers read
    * it via `readStructuredOutput`, which swallows that and only when tool calls are absent.
    */
-  experimental_output?: unknown;
+  output?: unknown;
 }
 
 /**
- * Safely read the structured `experimental_output` from an AI SDK result. The SDK getter can throw
+ * Safely read the structured `output` from an AI SDK result. The SDK getter can throw
  * when no object was produced (e.g. the turn emitted tool calls instead), so we swallow that and
  * return undefined — the loop treats "no object this turn" identically to a normal text turn.
  */
 export function readStructuredOutput(result: AIResultLike): unknown {
   try {
-    return result.experimental_output;
+    return result.output;
   } catch {
     return undefined;
   }
+}
+
+export function readUsageCacheReadTokens(usage: AIResultLike["usage"]): number | undefined {
+  return usage.inputTokenDetails?.cacheReadTokens;
 }
 
 export function mapResult(result: AIResultLike, opts?: { structured?: boolean }): ModelResponse {
@@ -167,9 +175,9 @@ export function mapResult(result: AIResultLike, opts?: { structured?: boolean })
   for (const tc of result.toolCalls) {
     content.push({ type: "tool_use", callId: tc.toolCallId, name: tc.toolName, input: tc.input });
   }
-  const cached = result.usage.cachedInputTokens;
+  const cached = readUsageCacheReadTokens(result.usage);
   // Only surface a structured object when structured output was REQUESTED for this call AND the turn
-  // is terminal (no tool calls) — experimental_output is meaningful only once the model stops calling
+  // is terminal (no tool calls) — output is meaningful only once the model stops calling
   // tools and emits its final structured answer. Reading it otherwise would either throw inside the
   // SDK (no output configured) or return the raw text, neither of which is a structured object.
   const object = opts?.structured && result.toolCalls.length === 0

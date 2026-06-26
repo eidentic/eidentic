@@ -15,7 +15,7 @@ lock-in) and #3 (swappable fundamentals).
    Driving adapters  →   │            CORE               │   ← Driven adapters
    (how you call it)     │   (depends on ports only)     │   (what it depends on)
                          │                              │
-   • SDK API (query)     │   Agent loop                 │   • ModelPort   → AI SDK v6
+   • SDK API (query)     │   Agent loop                 │   • ModelPort   → AI SDK v7
    • CLI                 │   Context engine             │   • StorePort   → libSQL / PG
    • Server (REST)       │   Tool dispatch              │   • VectorPort  → LanceDB / pgvector
    • Workflow/pipeline   │   Memory orchestrator        │   • SandboxPort → E2B / microsandbox
@@ -176,7 +176,7 @@ are safe (in-memory tracer, conservative caps, deny-by-default perms) and always
 ## 2.9 Technology substrate (defaults; all swappable)
 
 - **Language/runtime:** TypeScript, Node 22+ / Bun / Deno; edge-aware (no hard Node-only deps in core).
-- **Model abstraction:** AI SDK v6 (`ai`) behind `ModelPort`.
+- **Model abstraction:** AI SDK v7 (`ai`) behind `ModelPort`.
 - **Validation:** Standard Schema (Zod 4 / Valibot / ArkType) for all tool/skill/memory schemas.
 - **Store:** **better-sqlite3** (Node embedded default; ships FTS5 for BM25) + **libsql** adapter
   (async / Turso Cloud); Bun→`bun:sqlite`; Deno→libsql → **Postgres** (scale). *(`node:sqlite` lacks

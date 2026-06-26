@@ -1,11 +1,11 @@
 import { generateText, streamText, jsonSchema, Output, type LanguageModel } from "ai";
 import type { ModelPort, ModelRequest, ModelResponse, ModelStreamPart, ContentBlock } from "@eidentic/types";
-import { mapMessages, buildTools, mapResult, type AIResultLike } from "./map.js";
+import { mapMessages, buildTools, mapResult, readUsageCacheReadTokens, type AIResultLike } from "./map.js";
 
 const toolsArg = (t: import("ai").ToolSet) => (Object.keys(t).length > 0 ? t : undefined);
 
 /**
- * Build the AI SDK `experimental_output` from a Eidentic `ModelRequest.outputSchema` (JSON Schema),
+ * Build the AI SDK `output` from a Eidentic `ModelRequest.outputSchema` (JSON Schema),
  * or undefined when the request did not ask for structured output. `Output.object` constrains the
  * model's final answer to the schema (sets `responseFormat: json`) while still allowing tool calls
  * on intermediate turns — exactly what the multi-turn agent loop needs.
@@ -49,7 +49,7 @@ type GenerationSettingKey =
 export type AIModelOptions = Pick<GenParams, GenerationSettingKey>;
 
 /**
- * A Eidentic `ModelPort` backed by Vercel AI SDK v6.
+ * A Eidentic `ModelPort` backed by Vercel AI SDK v7.
  * Pass a concrete AI SDK `LanguageModel` (e.g. `anthropic("claude-...")`) or a resolver
  * that turns the request's `model` string into a `LanguageModel`. The optional second
  * argument sets generation defaults (temperature, maxOutputTokens, …) applied to every call.
@@ -66,7 +66,7 @@ export class AIModel implements ModelPort {
       this.modelId = undefined;
     } else {
       this.resolve = () => model;
-      // AI SDK v6 LanguageModel exposes .modelId
+      // AI SDK LanguageModel exposes .modelId for concrete provider models.
       this.modelId = (model as { modelId?: string }).modelId;
     }
     this.settings = options;
@@ -74,19 +74,19 @@ export class AIModel implements ModelPort {
 
   async complete(request: ModelRequest): Promise<ModelResponse> {
     const model = await this.resolve(request.model);
-    const { system, messages } = mapMessages(request.messages, { cacheControl: request.cacheControl });
+    const { instructions, messages } = mapMessages(request.messages, { cacheControl: request.cacheControl });
     const tools = buildTools(request.tools);
 
     const output = outputArg(request.outputSchema);
 
     const result = await generateText({
       model,
-      system,
+      instructions,
       messages,
       tools: toolsArg(tools),
       ...this.settings,
       // no `stopWhen` and no tool `execute` → single round-trip; tool calls returned to our loop
-      ...(output ? { experimental_output: output } : {}),
+      ...(output ? { output } : {}),
       ...(request.signal ? { abortSignal: request.signal } : {}),
     });
 
@@ -95,23 +95,23 @@ export class AIModel implements ModelPort {
 
   async *stream(request: ModelRequest): AsyncIterable<ModelStreamPart> {
     const model = await this.resolve(request.model);
-    const { system, messages } = mapMessages(request.messages, { cacheControl: request.cacheControl });
+    const { instructions, messages } = mapMessages(request.messages, { cacheControl: request.cacheControl });
     const tools = buildTools(request.tools);
 
     const output = outputArg(request.outputSchema);
 
     const result = streamText({
       model,
-      system,
+      instructions,
       messages,
       tools: toolsArg(tools),
       ...this.settings,
-      ...(output ? { experimental_output: output } : {}),
+      ...(output ? { output } : {}),
       ...(request.signal ? { abortSignal: request.signal } : {}),
     });
 
     const toolUses: ContentBlock[] = [];
-    for await (const part of result.fullStream) {
+    for await (const part of result.stream) {
       if (part.type === "text-delta") {
         yield { type: "delta", delta: { text: part.text } };
       } else if (part.type === "tool-call") {
@@ -134,16 +134,15 @@ export class AIModel implements ModelPort {
     if (text) content.push({ type: "text", text });
     content.push(...toolUses);
 
-    const cached = (usage as { cachedInputTokens?: number }).cachedInputTokens;
+    const cached = readUsageCacheReadTokens(usage);
     // Surface the structured object only on a terminal (tool-less) turn — mirrors mapResult().
-    // For streamText there is no synchronous `experimental_output` getter; `Output.object` emits the
-    // full JSON as the text stream, so we parse the accumulated text. Core re-validates against the
-    // source schema, so a parse failure here is harmless (the object is simply left undefined and
-    // core reports the validation/parse error from the terminal text).
+    // AI SDK v7 exposes the parsed value via `result.output` when `output: Output.object(...)`
+    // was requested. If no structured output was produced, the SDK can throw; in that case the
+    // core loop re-validates the terminal text and reports the useful schema/parse error.
     let object: unknown;
-    if (output && toolUses.length === 0 && text) {
+    if (output && toolUses.length === 0) {
       try {
-        object = JSON.parse(text);
+        object = await result.output;
       } catch {
         object = undefined;
       }

@@ -20,6 +20,8 @@ export type Provider = "anthropic" | "openai" | "google" | "deepseek" | "mistral
 interface ProviderMeta {
   /** npm package name for @ai-sdk/<provider> */
   package: string;
+  /** v7-compatible npm version range for the provider package. */
+  packageVersion: string;
   /** environment variable key */
   envVar: string;
   /** import line for src/agent.ts */
@@ -33,6 +35,7 @@ interface ProviderMeta {
 const PROVIDERS: Record<Provider, ProviderMeta> = {
   anthropic: {
     package: "@ai-sdk/anthropic",
+    packageVersion: "^4.0.0",
     envVar: "ANTHROPIC_API_KEY",
     importLine: 'import { anthropic } from "@ai-sdk/anthropic";',
     modelId: "claude-sonnet-4-5",
@@ -40,6 +43,7 @@ const PROVIDERS: Record<Provider, ProviderMeta> = {
   },
   openai: {
     package: "@ai-sdk/openai",
+    packageVersion: "^4.0.0",
     envVar: "OPENAI_API_KEY",
     importLine: 'import { openai } from "@ai-sdk/openai";',
     modelId: "gpt-4o",
@@ -47,6 +51,7 @@ const PROVIDERS: Record<Provider, ProviderMeta> = {
   },
   google: {
     package: "@ai-sdk/google",
+    packageVersion: "^4.0.0",
     envVar: "GOOGLE_GENERATIVE_AI_API_KEY",
     importLine: 'import { google } from "@ai-sdk/google";',
     modelId: "gemini-2.5-pro",
@@ -54,6 +59,7 @@ const PROVIDERS: Record<Provider, ProviderMeta> = {
   },
   deepseek: {
     package: "@ai-sdk/deepseek",
+    packageVersion: "^3.0.0",
     envVar: "DEEPSEEK_API_KEY",
     importLine: 'import { deepseek } from "@ai-sdk/deepseek";',
     modelId: "deepseek-chat",
@@ -61,6 +67,7 @@ const PROVIDERS: Record<Provider, ProviderMeta> = {
   },
   mistral: {
     package: "@ai-sdk/mistral",
+    packageVersion: "^4.0.0",
     envVar: "MISTRAL_API_KEY",
     importLine: 'import { mistral } from "@ai-sdk/mistral";',
     modelId: "mistral-large-latest",
@@ -154,8 +161,8 @@ function packageJson(name: string, providerMeta: ProviderMeta): string {
         scripts: { dev: "tsx src/agent.ts", typecheck: "tsc --noEmit" },
         dependencies: {
           eidentic: "latest",
-          ai: "^6.0.0",
-          [providerMeta.package]: "^1.0.0",
+          ai: "^7.0.2",
+          [providerMeta.package]: providerMeta.packageVersion,
           zod: "^4.0.0",
         },
         devDependencies: { tsx: "^4.19.0", typescript: "^5.9.0" },
@@ -320,9 +327,9 @@ function nextjsPackageJson(name: string, providerMeta: ProviderMeta): string {
           eidentic: "latest",
           "@eidentic/nextjs": "latest",
           "@eidentic/libsql": "latest",
-          ai: "^6.0.0",
-          "@ai-sdk/react": "^1.0.0",
-          [providerMeta.package]: "^1.0.0",
+          ai: "^7.0.2",
+          "@ai-sdk/react": "^4.0.2",
+          [providerMeta.package]: providerMeta.packageVersion,
           next: "^15.0.0",
           react: "^19.0.0",
           "react-dom": "^19.0.0",
@@ -476,8 +483,8 @@ function bunAgentPackageJson(name: string, providerMeta: ProviderMeta): string {
           eidentic: "latest",
           "@eidentic/server": "latest",
           "@eidentic/libsql": "latest",
-          ai: "^6.0.0",
-          [providerMeta.package]: "^1.0.0",
+          ai: "^7.0.2",
+          [providerMeta.package]: providerMeta.packageVersion,
           hono: "^4.0.0",
         },
         devDependencies: {

@@ -87,7 +87,7 @@ the production gap it answers.
 ## 1.6 Non-goals (YAGNI)
 
 - **Not** an end-user assistant app, chat UI, or hosted product (at least not in the SDK core).
-- **Not** a model provider or a gateway/proxy — we build on AI SDK v6 for provider access.
+- **Not** a model provider or a gateway/proxy — we build on AI SDK v7 for provider access.
 - **Not** a no-code/visual workflow builder.
 - **No** bespoke vector database, durable-execution engine, or sandbox runtime — we
   define clean adapter interfaces and ship sane defaults, not reinvented infra.

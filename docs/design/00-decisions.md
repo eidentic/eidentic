@@ -32,7 +32,7 @@ avoid leaking the underlying lib (the AI-SDK model class is `AIModel`, not `AISD
 | Layer | Decision | Notes / correction |
 |-------|----------|--------------------|
 | Language/runtime | TypeScript; **Node 22 min, 24 recommended**; Bun/Deno supported; edge-aware | Node 26 too new for a min baseline |
-| Model abstraction | **AI SDK v6** (`ai@^6`, `@ai-sdk/*@^3`) as `ModelPort` only | API: `inputSchema`/`outputSchema` (not `parameters`); structured output via `Output.object/array/choice` (`generateObject` deprecated); their loop class is `ToolLoopAgent` — **we build our own loop**, using AI SDK for single round-trips + provider breadth + `@ai-sdk/mcp` + prompt-cache control |
+| Model abstraction | **AI SDK v7** (`ai@^7`, `@ai-sdk/*` v7-compatible providers) as `ModelPort` only | API: `inputSchema`/`outputSchema` (not `parameters`); structured output via `output: Output.object/array/choice`; their loop class is `ToolLoopAgent` — **we build our own loop**, using AI SDK for single round-trips + provider breadth + `@ai-sdk/mcp` + prompt-cache control |
 | Validation | **Standard Schema** (Zod 4 / Valibot / ArkType); JSON Schema via `~standard.jsonSchema` | Valibot needs `@valibot/to-json-schema` |
 | Embedded relational store | **better-sqlite3** (Node default) + **libsql** adapter (async / Turso Cloud sync); Bun→`bun:sqlite`; Deno→libsql | **Correction:** `node:sqlite` is RC + **lacks FTS5** (we need FTS5 for BM25) → not the default. "Turso Database"/Limbo is beta — not used. |
 | Server relational store | **Postgres** (`@eidentic/store-pg`) + pgvector 0.8.2 | pgvector has **no native BM25**; hybrid = pgvector + tsvector/ParadeDB + RRF |

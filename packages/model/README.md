@@ -1,8 +1,8 @@
 # @eidentic/model
 
-Model and embedder wrappers for Eidentic — `AIModel` wraps any Vercel AI SDK provider,
+Model and embedder wrappers for Eidentic — `AIModel` wraps any Vercel AI SDK 7 provider,
 `AIEmbedder` wraps embedding models, and the package ships a live price table (sourced
-from LiteLLM) plus an Ollama adapter for local inference.
+from LiteLLM).
 
 ## Install
 
@@ -10,6 +10,9 @@ from LiteLLM) plus an Ollama adapter for local inference.
 pnpm add @eidentic/model ai @ai-sdk/anthropic
 # or any other @ai-sdk/* provider
 ```
+
+`@eidentic/model` follows AI SDK 7 and is ESM-only. Use ESM `import`, not CommonJS
+`require()`.
 
 ## Usage
 
@@ -29,8 +32,9 @@ import { defaultPrices, pricesUpdatedAt } from "@eidentic/model";
 console.log(defaultPrices["claude-sonnet-4-5"]); // { inputUsd: ..., outputUsd: ... }
 
 // Ollama for local inference
-import { createOllamaModel } from "@eidentic/model";
-const local = createOllamaModel("llama3.2", { baseURL: "http://localhost:11434" });
+// pnpm add ai-sdk-ollama
+import { ollama } from "ai-sdk-ollama";
+const local = new AIModel(ollama("llama3.2"));
 ```
 
 ## Links

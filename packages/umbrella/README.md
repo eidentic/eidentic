@@ -15,6 +15,9 @@ npm install eidentic ai @ai-sdk/anthropic
 pnpm add eidentic ai @ai-sdk/anthropic
 ```
 
+Eidentic's AI SDK integration targets AI SDK 7. The umbrella package is ESM-only; use
+ESM `import`, not CommonJS `require()`.
+
 ## Quickstart
 
 ```ts

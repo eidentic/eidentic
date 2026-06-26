@@ -43,7 +43,7 @@ export const POST = withEidentic(agent);
 ```
 
 ```tsx
-// Client component — Vercel AI SDK v5+
+// Client component — Vercel AI SDK v7+
 import { useChat } from "@ai-sdk/react";
 
 export function Chat() {

@@ -7,16 +7,15 @@ import type { OllamaProviderFactory } from "../src/ollama.js";
 /**
  * Tests for createOllamaModel.
  * We never hit a real Ollama instance — the provider factory is injected via the
- * `_factory` option so no `ollama-ai-provider` package is needed to run these tests.
+ * `_factory` option so no community Ollama provider package is needed to run these tests.
  */
 
-/** Build a minimal fake LanguageModel matching AI SDK v6 shape. */
+/** Build a minimal fake LanguageModel matching AI SDK v7's v4 provider shape. */
 function makeFakeLanguageModel(modelId: string): LanguageModel {
   return {
-    specificationVersion: "v2",
+    specificationVersion: "v4",
     provider: "ollama",
     modelId,
-    defaultObjectGenerationMode: "json" as const,
     doGenerate: vi.fn(),
     doStream: vi.fn(),
   } as unknown as LanguageModel;
@@ -38,7 +37,11 @@ describe("createOllamaModel", () => {
     expect(model).toBeDefined();
     expect((model as any).modelId).toBe("llama3.2");
     expect((model as any).provider).toBe("ollama");
-    expect((model as any).specificationVersion).toBe("v2");
+    expect((model as any).specificationVersion).toBe("v4");
+  });
+
+  it("throws a migration error when no v7-compatible provider factory is injected", () => {
+    expect(() => createOllamaModel("llama3.2")).toThrow(/ai-sdk-ollama/);
   });
 
   it("passes baseURL to the underlying Ollama provider", () => {

@@ -12,7 +12,7 @@
  * ## Provider-native batch (e.g. Anthropic Message Batches API)
  *
  * The Anthropic Message Batches API offers ~50% cost savings for async jobs but
- * is exposed via a separate REST API, NOT through the AI SDK v6 `generateText` /
+ * is exposed via a separate REST API, NOT through the AI SDK v7 `generateText` /
  * `streamText` surface. Wiring it would require either a dedicated HTTP client
  * per provider or a non-trivial AI-SDK fork — too large for v1.
  *

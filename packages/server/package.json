@@ -11,14 +11,14 @@
     "url": "git+https://github.com/eidentic/eidentic.git",
     "directory": "packages/server"
   },
-  "main": "./dist/index.cjs",
+  "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
+      "default": "./dist/index.js"
     }
   },
   "sideEffects": false,
@@ -28,14 +28,14 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsup src/index.ts --format esm,cjs --dts --clean",
+    "build": "tsup src/index.ts --format esm --dts --clean",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@eidentic/core": "workspace:*",
     "@eidentic/types": "workspace:*",
     "@eidentic/workflow": "workspace:*",
-    "ai": "^6.0.207",
+    "ai": "^7.0.2",
     "cron-parser": "^5.5.0",
     "hono": "^4.12.25"
   },

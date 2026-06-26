@@ -11,7 +11,7 @@
     "url": "git+https://github.com/eidentic/eidentic.git",
     "directory": "packages/umbrella"
   },
-  "main": "./dist/index.cjs",
+  "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
@@ -21,7 +21,7 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
+      "default": "./dist/index.js"
     }
   },
   "sideEffects": false,
@@ -38,10 +38,10 @@
     "@eidentic/types": "workspace:*"
   },
   "peerDependencies": {
-    "ai": "^6.0.0"
+    "ai": "^7.0.0"
   },
   "devDependencies": {
-    "ai": "^6.0.207"
+    "ai": "^7.0.2"
   },
   "description": "The open-source TypeScript SDK for AI agents with self-improving memory and production fundamentals built in.",
   "keywords": [
