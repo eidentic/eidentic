@@ -1,5 +1,27 @@
 # eidentic
 
+## 0.3.0
+
+### Minor Changes
+
+- 4cf1e3b: Add production ergonomics for multi-tenant SDK users:
+
+  - `Agent.query()` and `Agent.resume()` now accept `principal` separately from `memoryScope`, so session ownership/permissions can differ from the memory/tool scope used by a run.
+  - `Agent.query()` accepts `guardrailInput` for checking untrusted user text separately from a composed operator prompt.
+  - Guardrail results can include machine-readable `code` and `severity`, and terminal guardrail events surface them through `result.details`.
+  - Structured output parse/validation failures now include `result.details.errorKind`, `validationIssues`, and `rawOutput`.
+  - Add `eidenticGuardrails.pii()`, `policies.*` cost-policy presets, `permissions.*` permission presets, `scopes.*` constructors, and `Agent.eraseScopes()`.
+
+### Patch Changes
+
+- Updated dependencies [4cf1e3b]
+  - @eidentic/core@0.4.0
+  - @eidentic/types@0.5.0
+  - @eidentic/cli@0.1.11
+  - @eidentic/memory@0.1.6
+  - @eidentic/model@0.3.1
+  - @eidentic/sqlite@0.2.2
+
 ## 0.2.0
 
 ### Minor Changes

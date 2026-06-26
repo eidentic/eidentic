@@ -1,5 +1,14 @@
 # @eidentic/nextjs
 
+## 0.3.1
+
+### Patch Changes
+
+- Updated dependencies [4cf1e3b]
+  - @eidentic/core@0.4.0
+  - @eidentic/types@0.5.0
+  - @eidentic/server@0.4.1
+
 ## 0.3.0
 
 ### Minor Changes

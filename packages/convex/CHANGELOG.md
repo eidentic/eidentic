@@ -1,5 +1,12 @@
 # @eidentic/convex
 
+## 0.7.1
+
+### Patch Changes
+
+- Updated dependencies [4cf1e3b]
+  - @eidentic/types@0.5.0
+
 ## 0.7.0
 
 ### Minor Changes
