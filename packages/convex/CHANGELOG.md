@@ -4,27 +4,29 @@
 
 ### Minor Changes
 
-- Add a component-first Convex integration while keeping the existing app-functions path source-compatible.
+- 4b06c20: Add a component-first Convex adapter while preserving the existing app-functions/HTTP runner path.
 
-  - New `@eidentic/convex/convex.config.js` export installs Eidentic as a Convex Component.
-  - New `@eidentic/convex/component` export provides `EidenticComponentStore`,
-    `EidenticComponentVectorStore`, `convexActionRunner`, `storeFnsFrom`, and `vectorFnsFrom`.
-  - Component-owned tables use isolated singular snake_case names:
-    `session`, `event`, `block`, `block_history`, `memory`, `fact`, `vector`, `checkpoint`,
-    `idempotency`, and `decision`.
-  - New `@eidentic/convex/app-functions/*` exports make the legacy/manual path explicit.
-  - `createEidenticTableNames` and `createEidenticTables` support prefixed app-functions table
-    names such as `eidentic_session` and `eidentic_block_history`.
-  - `eidenticFunctions({ tables, authorize })` can bind handlers to custom table names and still
-    run the authorization hook before every handler.
-  - Durable idempotency handlers now accept optional `scopeKey`, `sessionId`, and `ownerKey`
-    metadata so multi-tenant authorization hooks do not need to parse opaque idempotency keys.
+  `@eidentic/convex` now exports a Convex Component config at `@eidentic/convex/convex.config.js`
+  and a runtime helper surface at `@eidentic/convex/component` with `EidenticComponentStore`,
+  `EidenticComponentVectorStore`, `convexActionRunner`, and generated-ref extraction helpers. Component
+  tables are isolated and use singular snake_case names. The app-functions path remains source
+  compatible, but also gains explicit `@eidentic/convex/app-functions/*` exports plus table-name
+  factories for prefixed schemas.
+
+  Durable idempotency records now accept optional `scopeKey`, `sessionId`, and `ownerKey` metadata.
+  Eidentic core passes `sessionId` metadata for durable tool dispatch so Convex authorization hooks can
+  check structured ownership fields instead of parsing opaque keys.
 
   Backward compatibility: existing `@eidentic/convex`, `@eidentic/convex/schema`, and
   `@eidentic/convex/server` imports keep their original behavior and default table names. The bare
   public `export * from "@eidentic/convex/server"` path remains available for trusted/single-tenant
   installs, but multi-tenant apps should use `eidenticFunctions({ authorize })` or migrate to the
   component path.
+
+### Patch Changes
+
+- Updated dependencies [4b06c20]
+  - @eidentic/types@0.4.0
 
 ## 0.6.0
 
