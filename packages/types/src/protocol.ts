@@ -153,11 +153,17 @@ export type ResultDetails =
   | { subtype: "max_tokens"; tokensUsed: number; tokenLimit: number }
   | { subtype: "max_wall_clock"; elapsedMs: number; limitMs: number }
   | { subtype: "max_turns"; turns: number; limit: number }
-  | { subtype: "error"; errorName?: string }
+  | {
+      subtype: "error";
+      errorName?: string;
+      errorKind?: "structured_output_parse" | "structured_output_validation";
+      validationIssues?: string[];
+      rawOutput?: string;
+    }
   | { subtype: "suspended"; callId?: string; toolName?: string }
   | { subtype: "success" }
   | { subtype: "aborted" }
-  | { subtype: "guardrail" };
+  | { subtype: "guardrail"; reason?: string; code?: string; severity?: "low" | "medium" | "high" };
 
 // --- Stored events (the append-only log) ---
 /**

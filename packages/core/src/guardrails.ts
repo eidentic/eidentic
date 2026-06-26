@@ -29,6 +29,8 @@
 
 import type { GuardrailPort, GuardrailResult } from "@eidentic/types";
 
+export type PiiEntity = "email" | "phone" | "credit_card" | "ssn";
+
 // ---------------------------------------------------------------------------
 // PII patterns
 // ---------------------------------------------------------------------------
@@ -80,9 +82,11 @@ const SSN_RE =
 const REPLACEMENTS = {
   email: "[EMAIL]",
   phone: "[PHONE]",
-  creditCard: "[CREDIT_CARD]",
+  credit_card: "[CREDIT_CARD]",
   ssn: "[SSN]",
 } as const;
+
+const DEFAULT_PII_ENTITIES: PiiEntity[] = ["email", "phone", "credit_card", "ssn"];
 
 // Fix 7: module-level compiled regexes — avoid re-compilation on every call.
 // Global (/g) regexes for redactPii: String.prototype.replace() resets lastIndex itself before
@@ -99,24 +103,27 @@ const CREDIT_CARD_RE_NG = new RegExp(CREDIT_CARD_RE.source);
 const PHONE_RE_NG = new RegExp(PHONE_RE.source);
 const EMAIL_RE_NG = new RegExp(EMAIL_RE.source);
 
-/** Replace all PII in `text` with labelled placeholders. Returns the redacted string. */
-function redactPii(text: string): string {
+/** Replace configured PII entities in `text` with labelled placeholders. Returns the redacted string. */
+function redactPii(text: string, entities: readonly PiiEntity[] = DEFAULT_PII_ENTITIES): string {
+  const selected = new Set(entities);
   // Order matters: SSN first (overlaps with bare-digit sequences), then credit card, then phone,
   // then email (least risk of partial match). String.replace() resets /g lastIndex before each call.
-  return text
-    .replace(SSN_RE_G, REPLACEMENTS.ssn)
-    .replace(CREDIT_CARD_RE_G, REPLACEMENTS.creditCard)
-    .replace(PHONE_RE_G, REPLACEMENTS.phone)
-    .replace(EMAIL_RE_G, REPLACEMENTS.email);
+  let out = text;
+  if (selected.has("ssn")) out = out.replace(SSN_RE_G, REPLACEMENTS.ssn);
+  if (selected.has("credit_card")) out = out.replace(CREDIT_CARD_RE_G, REPLACEMENTS.credit_card);
+  if (selected.has("phone")) out = out.replace(PHONE_RE_G, REPLACEMENTS.phone);
+  if (selected.has("email")) out = out.replace(EMAIL_RE_G, REPLACEMENTS.email);
+  return out;
 }
 
 /** Return true when any of the PII patterns match anywhere in `text`. */
-function containsPii(text: string): boolean {
+function containsPii(text: string, entities: readonly PiiEntity[] = DEFAULT_PII_ENTITIES): boolean {
+  const selected = new Set(entities);
   return (
-    EMAIL_RE_NG.test(text) ||
-    SSN_RE_NG.test(text) ||
-    CREDIT_CARD_RE_NG.test(text) ||
-    PHONE_RE_NG.test(text)
+    (selected.has("email") && EMAIL_RE_NG.test(text)) ||
+    (selected.has("ssn") && SSN_RE_NG.test(text)) ||
+    (selected.has("credit_card") && CREDIT_CARD_RE_NG.test(text)) ||
+    (selected.has("phone") && PHONE_RE_NG.test(text))
   );
 }
 
@@ -136,6 +143,8 @@ export interface RegexPiiGuardrailOptions {
    * Which directions to check. Defaults to both `"input"` and `"output"`.
    */
   check?: Array<"input" | "output">;
+  /** Which entity families to detect/redact. Defaults to all built-in entities. */
+  entities?: PiiEntity[];
 }
 
 /**
@@ -162,12 +171,13 @@ export interface RegexPiiGuardrailOptions {
 export function regexPiiGuardrail(opts: RegexPiiGuardrailOptions = {}): GuardrailPort {
   const mode = opts.mode ?? "redact";
   const checkDirs = new Set(opts.check ?? ["input", "output"]);
+  const entities = opts.entities ?? DEFAULT_PII_ENTITIES;
 
   function handle(text: string): GuardrailResult {
-    if (!containsPii(text)) return { action: "allow" };
-    if (mode === "block") return { action: "block", reason: "PII detected" };
-    const redacted = redactPii(text);
-    return { action: "redact", text: redacted, reason: "PII redacted" };
+    if (!containsPii(text, entities)) return { action: "allow" };
+    if (mode === "block") return { action: "block", reason: "PII detected", code: "pii_sensitive", severity: "medium" };
+    const redacted = redactPii(text, entities);
+    return { action: "redact", text: redacted, reason: "PII redacted", code: "pii_sensitive", severity: "medium" };
   }
 
   return {
@@ -190,6 +200,36 @@ export const PII_PATTERNS = {
   CREDIT_CARD_RE,
   SSN_RE,
 };
+
+export interface PiiGuardrailPresetOptions {
+  /** Input-side action. Defaults to "redact". */
+  input?: "off" | "redact" | "block";
+  /** Output-side action. Defaults to "redact". */
+  output?: "off" | "redact" | "block";
+  /** Entity families to detect/redact. Defaults to all built-in entities. */
+  entities?: PiiEntity[];
+}
+
+function piiPreset(opts: PiiGuardrailPresetOptions = {}): GuardrailPort {
+  const input = opts.input ?? "redact";
+  const output = opts.output ?? "redact";
+  const entities = opts.entities ?? DEFAULT_PII_ENTITIES;
+
+  const handle = (mode: Exclude<PiiGuardrailPresetOptions["input"], "off" | undefined>, text: string): GuardrailResult => {
+    if (!containsPii(text, entities)) return { action: "allow" };
+    if (mode === "block") return { action: "block", reason: "PII detected", code: "pii_sensitive", severity: "medium" };
+    return { action: "redact", text: redactPii(text, entities), reason: "PII redacted", code: "pii_sensitive", severity: "medium" };
+  };
+
+  return {
+    ...(input !== "off" ? { checkInput: (text: string): GuardrailResult => handle(input, text) } : {}),
+    ...(output !== "off" ? { checkOutput: (text: string): GuardrailResult => handle(output, text) } : {}),
+  };
+}
+
+export const eidenticGuardrails = {
+  pii: piiPreset,
+} as const;
 
 // ---------------------------------------------------------------------------
 // Topic guardrail (LLM-judge scope enforcement)

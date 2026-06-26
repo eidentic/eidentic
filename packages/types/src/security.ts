@@ -22,7 +22,10 @@ export type PermissionDecision = "allow" | "deny" | "ask";
 export interface PermissionPolicy {
   mode?: PermissionMode;   // default "default"
   allow?: string[];        // tool-id globs pre-approved
+  ask?: string[];          // tool-id globs that require dynamic approval
   deny?: string[];         // tool-id globs denied (bare-name deny ⇒ removed from schema)
+  /** Fall-through decision when no allow/ask/deny/mode rule matches. Defaults to "allow" for back-compat. */
+  default?: PermissionDecision;
 }
 
 /** Credential vault: the model never sees secrets; tools fetch them at call time (§10.3). */
@@ -77,6 +80,12 @@ export interface GuardrailContext {
   agentId?: string;
   /** The session identifier for the current run. */
   sessionId?: string;
+  /** Which side of the run is being inspected. */
+  source?: "input" | "output";
+  /** Optional channel label supplied by the host, e.g. "email" or "chat". */
+  channel?: string;
+  /** Host-supplied metadata for guardrail analytics/routing. */
+  metadata?: Record<string, unknown>;
 }
 
 /**
@@ -94,8 +103,8 @@ export interface GuardrailContext {
  */
 export type GuardrailResult =
   | { action: "allow" }
-  | { action: "block"; reason: string }
-  | { action: "redact"; text: string; reason?: string };
+  | { action: "block"; reason: string; code?: string; severity?: "low" | "medium" | "high" }
+  | { action: "redact"; text: string; reason?: string; code?: string; severity?: "low" | "medium" | "high" };
 
 /**
  * Content guardrail port (D7). Implement this interface to add PII redaction, content

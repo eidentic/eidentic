@@ -37,6 +37,15 @@ export const scopeKey = (s: Scope): string => {
   return `shared:${s.blockId}`;
 };
 
+/** Convenience constructors for stable memory/erasure scopes. */
+export const scopes = {
+  agent: (agentId: string): Scope => ({ kind: "agent", agentId }),
+  user: (agentId: string, userId: string): Scope => ({ kind: "user", agentId, userId }),
+  thread: (agentId: string, sessionId: string): Scope => ({ kind: "thread", agentId, sessionId }),
+  org: (agentId: string, orgId: string): Scope => ({ kind: "org", agentId, orgId }),
+  shared: (blockId: string): Scope => ({ kind: "shared", blockId }),
+} as const;
+
 // --- Model port ---
 export interface ModelMessage {
   role: "system" | "user" | "assistant" | "tool";

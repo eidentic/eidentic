@@ -10,14 +10,15 @@ is the engine that all other Eidentic packages build on.
 pnpm add @eidentic/core
 ```
 
-Peer: `ai ^6.0.0` (Vercel AI SDK — bring your own provider package).
+Runtime: Node.js 22+. When used with `@eidentic/model`, bring AI SDK 7-compatible
+provider packages.
 
 ## Usage
 
 ```ts
 import { Agent, AIModel, createTool, SqliteStore } from "eidentic"; // umbrella re-export
 // or import directly:
-import { Agent, createTool, ToolRegistry, NoopLogger } from "@eidentic/core";
+import { Agent, createTool, eidenticGuardrails, permissions, policies, ToolRegistry, NoopLogger } from "@eidentic/core";
 import { AIModel } from "@eidentic/model";
 import { SqliteStore } from "@eidentic/sqlite";
 import { anthropic } from "@ai-sdk/anthropic";
@@ -32,13 +33,21 @@ const weatherTool = createTool({
 
 const agent = new Agent({
   id: "assistant",
+  instructions: "You are a concise weather assistant.",
   model: new AIModel(anthropic("claude-sonnet-4-5")),
   store: new SqliteStore("./eidentic.sqlite"),
   tools: [weatherTool],
-  policy: { maxCostUsd: 0.10 }, // hard stop per turn
+  policy: policies.customerReply({ maxCostUsd: 0.10 }),
+  guardrails: eidenticGuardrails.pii({ input: "redact", output: "redact" }),
+  permissions: permissions.denyByDefault({ allow: ["get_weather"] }),
 });
 
-for await (const ev of agent.query("What's the weather in Berlin?", { sessionId: "u-1" })) {
+for await (const ev of agent.query("What's the weather in Berlin?", {
+  sessionId: "s-1",
+  principal: { userId: "viewer-1", orgId: "workspace-1" },
+  memoryScope: { kind: "user", agentId: "assistant", userId: "contact-1" },
+  guardrailInput: { userText: "What's the weather in Berlin?", channel: "chat" },
+})) {
   if (ev.type === "stream.delta") process.stdout.write(ev.delta.text);
 }
 ```

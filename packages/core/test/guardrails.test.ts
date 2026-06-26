@@ -258,5 +258,83 @@ describe("GuardrailPort wiring", () => {
       expect(capturedCtx?.agentId).toBe("guardrail-test");
       expect(capturedCtx?.sessionId).toBe("ctx-session");
     });
+
+    it("guardrailInput lets input guardrails inspect user text instead of the whole prompt", async () => {
+      const store = new InMemoryStore();
+      await store.migrate();
+      const model = new MockModel([
+        { content: [textBlock("ok")], usage: { inputTokens: 1, outputTokens: 1 } },
+      ]);
+
+      let checkedText = "";
+      let capturedCtx: { source?: string; channel?: string; metadata?: Record<string, unknown> } | undefined;
+      const refundGuardrail: GuardrailPort = {
+        checkInput: (text, ctx) => {
+          checkedText = text;
+          capturedCtx = ctx;
+          return /refund/i.test(text)
+            ? { action: "block", reason: "refund policy", code: "refunds_legal", severity: "high" }
+            : { action: "allow" };
+        },
+      };
+
+      const agent = makeAgent(model, store, refundGuardrail);
+      const events: StreamEvent[] = [];
+      for await (const e of agent.query("Operator policy: mention refund rules. Customer says hello.", {
+        sessionId: "guardrail-segment",
+        guardrailInput: {
+          userText: "hello",
+          channel: "email",
+          metadata: { conversationId: "c1" },
+        },
+      })) events.push(e);
+
+      expect(checkedText).toBe("hello");
+      expect(capturedCtx?.source).toBe("input");
+      expect(capturedCtx?.channel).toBe("email");
+      expect(capturedCtx?.metadata).toEqual({ conversationId: "c1" });
+      expect(model.calls).toHaveLength(1);
+      expect((events.at(-1) as Extract<StreamEvent, { type: "result" }>).subtype).toBe("success");
+    });
+
+    it("guardrail block details carry machine-readable code and severity", async () => {
+      const store = new InMemoryStore();
+      await store.migrate();
+      const model = new MockModel([
+        { content: [textBlock("never")], usage: { inputTokens: 1, outputTokens: 1 } },
+      ]);
+      const guardrail: GuardrailPort = {
+        checkInput: () => ({ action: "block", reason: "refund policy", code: "refunds_legal", severity: "high" }),
+      };
+      const agent = makeAgent(model, store, guardrail);
+      const events = await run(agent, "refund please", "guardrail-code");
+      const result = events.find((e) => e.type === "result") as Extract<StreamEvent, { type: "result" }>;
+      expect(result.subtype).toBe("guardrail");
+      expect(result.details).toEqual({
+        subtype: "guardrail",
+        reason: "refund policy",
+        code: "refunds_legal",
+        severity: "high",
+      });
+    });
+
+    it("guardrailInput redaction patches the full prompt when the checked segment is embedded", async () => {
+      const store = new InMemoryStore();
+      await store.migrate();
+      const model = new MockModel([
+        { content: [textBlock("ok")], usage: { inputTokens: 1, outputTokens: 1 } },
+      ]);
+      const guardrail: GuardrailPort = {
+        checkInput: (text) => ({ action: "redact", text: text.replace("secret", "[REDACTED]"), code: "secret" }),
+      };
+      const agent = makeAgent(model, store, guardrail);
+      for await (const _ of agent.query("Operator context.\nCustomer: my secret", {
+        sessionId: "guardrail-redact-segment",
+        guardrailInput: { userText: "my secret" },
+      })) { /* drain */ }
+      const userMsg = model.calls[0]!.messages.find((m) => m.role === "user");
+      expect(String(userMsg?.content)).toContain("my [REDACTED]");
+      expect(String(userMsg?.content)).not.toContain("my secret");
+    });
   });
 });

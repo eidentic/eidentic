@@ -31,6 +31,8 @@ export {
   evaluatePermission,
   filterToolsForSchema,
   globMatch,
+  permissions,
+  policies,
   EnvSecrets,
   NoopSandbox,
   NoopLogger,
@@ -41,12 +43,15 @@ export {
   reflection,
   planAndExecute,
   regexPiiGuardrail,
+  eidenticGuardrails,
   topicGuardrail,
 } from "@eidentic/core";
 
 export type {
   AgentConfig,
   QueryOptions,
+  QueryPrincipal,
+  GuardrailInput,
   SubAgent,
   EraseScopeResult,
   Tool,
@@ -65,13 +70,17 @@ export type {
   StrategyContext,
   GroundSignal,
   RegexPiiGuardrailOptions,
+  PiiEntity,
+  PiiGuardrailPresetOptions,
   TopicGuardrailOptions,
+  PermissionPresetOptions,
 } from "@eidentic/core";
 
 // --- Shared types (ports, errors, protocol, observability, security) ---
 // @eidentic/types is the canonical source for all shared type contracts.
 export {
   scopeKey,
+  scopes,
   textBlock,
   toolUseBlock,
   imageBlock,

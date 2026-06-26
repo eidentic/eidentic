@@ -84,7 +84,14 @@ function buildStructuredOutput(schema: z.ZodType): StructuredOutputSpec {
       const r = schema.safeParse(v);
       return r.success
         ? { ok: true as const, value: r.data }
-        : { ok: false as const, error: r.error.message };
+        : {
+            ok: false as const,
+            error: r.error.message,
+            issues: r.error.issues.map((issue) => {
+              const path = issue.path.length > 0 ? issue.path.map(String).join(".") : "<root>";
+              return `${path}: ${issue.message}`;
+            }),
+          };
     },
   };
 }
@@ -349,12 +356,31 @@ export interface AgentConfig {
 
 export interface QueryOptions {
   sessionId: string;
+  /**
+   * Trusted caller identity for session ownership, permission resolution, and audit correlation.
+   * Prefer this over overloading `userId`/`orgId` when the memory scope intentionally differs from
+   * the authenticated actor. Legacy top-level `userId`/`orgId`/`apiKey` still work and override
+   * matching fields here for backward compatibility.
+   */
+  principal?: QueryPrincipal;
   userId?: string;
   /** The org identity for multi-tenant session ownership (Fix 1). When set, recorded on the SessionRecord. */
   orgId?: string;
   /** The API key identity for multi-tenant session ownership (H1 fix). When set and no userId/orgId
    * is present, recorded on the SessionRecord so apiKey-only principals own their sessions. */
   apiKey?: string;
+  /**
+   * Explicit memory/tool scope for this run. When set, memory retrieval/write, memory tools,
+   * graph tools, erasure-oriented tool context, and tracing scope use this value instead of
+   * deriving a scope from `userId`/`orgId`.
+   */
+  memoryScope?: Scope;
+  /**
+   * Optional untrusted user segment for input guardrails. Use this when the prompt passed to
+   * `query()` contains trusted operator instructions plus user text; guardrails should inspect
+   * the raw user segment, not the whole assembled prompt.
+   */
+  guardrailInput?: GuardrailInput;
   /** AbortSignal threaded into ToolContext.signal for every tool invocation in this query. */
   signal?: AbortSignal;
   /**
@@ -373,6 +399,20 @@ export interface QueryOptions {
    */
   outputSchema?: z.ZodType;
 }
+
+export interface QueryPrincipal {
+  userId?: string;
+  orgId?: string;
+  apiKey?: string;
+}
+
+export type GuardrailInput =
+  | string
+  | {
+      userText: string;
+      channel?: string;
+      metadata?: Record<string, unknown>;
+    };
 
 /**
  * Internal-only query options (NOT part of the public API). `_depth` tracks spawn depth for
@@ -771,19 +811,42 @@ export class Agent {
     });
   }
 
+  private principalFor(opts?: Pick<QueryOptions, "principal" | "userId" | "orgId" | "apiKey">): QueryPrincipal {
+    return {
+      ...(opts?.principal ?? {}),
+      ...(opts?.userId !== undefined ? { userId: opts.userId } : {}),
+      ...(opts?.orgId !== undefined ? { orgId: opts.orgId } : {}),
+      ...(opts?.apiKey !== undefined ? { apiKey: opts.apiKey } : {}),
+    };
+  }
+
+  private guardrailInputFor(opts: Pick<QueryOptions, "guardrailInput">): { text: string; channel?: string; metadata?: Record<string, unknown> } | undefined {
+    const input = opts.guardrailInput;
+    if (input === undefined) return undefined;
+    if (typeof input === "string") return { text: input };
+    return {
+      text: input.userText,
+      ...(input.channel !== undefined ? { channel: input.channel } : {}),
+      ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+    };
+  }
+
   private async permissionsFor(opts: QueryOptions): Promise<PermissionPolicy | undefined> {
     if (!this.config.permissionsFor) return undefined;
+    const principal = this.principalFor(opts);
     return this.config.permissionsFor({
       sessionId: opts.sessionId,
-      ...(opts.userId !== undefined ? { userId: opts.userId } : {}),
-      ...(opts.orgId !== undefined ? { orgId: opts.orgId } : {}),
-      ...(opts.apiKey !== undefined ? { apiKey: opts.apiKey } : {}),
+      ...(principal.userId !== undefined ? { userId: principal.userId } : {}),
+      ...(principal.orgId !== undefined ? { orgId: principal.orgId } : {}),
+      ...(principal.apiKey !== undefined ? { apiKey: principal.apiKey } : {}),
     });
   }
 
-  private scopeFor(opts?: { userId?: string; orgId?: string; sessionId?: string }): Scope {
-    if (opts?.userId) return { kind: "user", agentId: this.config.id, userId: opts.userId };
-    if (opts?.orgId) return { kind: "org", agentId: this.config.id, orgId: opts.orgId };
+  private scopeFor(opts?: { principal?: QueryPrincipal; userId?: string; orgId?: string; apiKey?: string; sessionId?: string; memoryScope?: Scope }): Scope {
+    if (opts?.memoryScope) return opts.memoryScope;
+    const principal = this.principalFor(opts);
+    if (principal.userId) return { kind: "user", agentId: this.config.id, userId: principal.userId };
+    if (principal.orgId) return { kind: "org", agentId: this.config.id, orgId: principal.orgId };
     return { kind: "agent", agentId: this.config.id };
   }
 
@@ -809,6 +872,7 @@ export class Agent {
     const newId = this.config.newId ?? this.defaultNewId;
     const durable = this.resolveDurable();
     const scope = this.scopeFor(opts);
+    const principal = this.principalFor(opts);
 
     // §8.3: spawn_agent is added ONLY when subAgents exist AND depth < maxDepth — so a child at
     // the depth limit structurally cannot see (and thus cannot call) spawn_agent.
@@ -831,19 +895,21 @@ export class Agent {
       newId,
       ...(this.config.upcasters ? { upcasters: this.config.upcasters } : {}),
       // Fix 1: record owner identity so the session belongs to the authenticated principal.
-      ...(opts.userId !== undefined ? { userId: opts.userId } : {}),
-      ...(opts.orgId !== undefined ? { orgId: opts.orgId } : {}),
+      ...(principal.userId !== undefined ? { userId: principal.userId } : {}),
+      ...(principal.orgId !== undefined ? { orgId: principal.orgId } : {}),
       // H1 fix: record apiKey when present so apiKey-only principals own their sessions.
-      ...(opts.apiKey !== undefined ? { apiKey: opts.apiKey } : {}),
+      ...(principal.apiKey !== undefined ? { apiKey: principal.apiKey } : {}),
     });
 
     // runtime.model overrides this.config.model for plan-execute executor sub-runs.
     const effectiveModel = runtime?.model ?? this.config.model;
+    const guardrailInput = this.guardrailInputFor(opts);
 
     yield* runTurn({
       agentId: this.config.id,
       instructions: this.config.instructions,
       input,
+      ...(guardrailInput ? { guardrailInput } : {}),
       model: effectiveModel,
       registry,
       session,
@@ -882,10 +948,11 @@ export class Agent {
    * `store.migrate()`), and warn (once) when memory is configured but no `userId` was passed —
    * cross-session memory is scoped per userId, so omitting it silently disables persistence.
    */
-  private async ensureReady(identity: { userId?: string; orgId?: string } | undefined): Promise<void> {
+  private async ensureReady(identity: Pick<QueryOptions, "principal" | "userId" | "orgId" | "apiKey" | "memoryScope"> | undefined): Promise<void> {
     this._migrated ??= Promise.resolve(this.config.store.migrate());
     await this._migrated;
-    if (this.config.memory && identity?.userId === undefined && identity?.orgId === undefined && !this._warnedNoUserId) {
+    const principal = this.principalFor(identity);
+    if (this.config.memory && identity?.memoryScope === undefined && principal.userId === undefined && principal.orgId === undefined && !this._warnedNoUserId) {
       this._warnedNoUserId = true;
       (this.config.logger ?? envLogger()).log(
         "warn",
@@ -926,16 +993,21 @@ export class Agent {
     // it faithfully and mapMessages can later decode it to produce AI SDK ImagePart objects.
     // For text-only ContentBlock[], collapse to a plain string (no encoding overhead).
     let loopInput: string;
+    let queryOpts = opts;
     if (Array.isArray(input)) {
       const hasImages = input.some((b) => b.type === "image");
-      loopInput = hasImages ? encodeMultimodalInput(input) : extractTextFromBlocks(input);
+      const extractedText = extractTextFromBlocks(input);
+      loopInput = hasImages ? encodeMultimodalInput(input) : extractedText;
+      if (opts.guardrailInput === undefined) {
+        queryOpts = { ...opts, guardrailInput: extractedText };
+      }
     } else {
       loopInput = input;
     }
 
     // No strategy (or react() default) → byte-identical path to the previous implementation.
     if (!this.config.strategy) {
-      yield* this.runReact(loopInput, opts);
+      yield* this.runReact(loopInput, queryOpts);
       return;
     }
 
@@ -948,11 +1020,11 @@ export class Agent {
 
     // FIX 2: pass the internal opts (including _budget/_depth) into the StrategyContext
     // so strategies can thread the shared budget through all their sub-runs.
-    const internalOpts = opts as InternalQueryOptions;
+    const internalOpts = queryOpts as InternalQueryOptions;
 
     const ctx: StrategyContext = {
       input: loopInput,
-      opts,
+      opts: queryOpts,
       model: this.config.model,
       _internalOpts: internalOpts,
       react: boundReact,
@@ -980,21 +1052,22 @@ export class Agent {
    * final text is validated against the schema and the parsed object is attached. Backward-compatible:
    * when omitted, `resume()` behaves byte-identically to before.
    */
-  async *resume(sessionId: string, opts?: { userId?: string; orgId?: string; apiKey?: string; decision?: SuspendDecision; signal?: AbortSignal; outputSchema?: z.ZodType }): AsyncIterable<StreamEvent> {
+  async *resume(sessionId: string, opts?: { principal?: QueryPrincipal; userId?: string; orgId?: string; apiKey?: string; memoryScope?: Scope; decision?: SuspendDecision; signal?: AbortSignal; outputSchema?: z.ZodType }): AsyncIterable<StreamEvent> {
     await this.ensureReady(opts);
     const durable = this.resolveDurable();
     if (!durable) throw new Error("Agent.resume requires `durable: true` and a DurablePort store.");
+    const principal = this.principalFor(opts);
 
     // Ownership check: when any identity is provided, verify it matches the session's recorded owner.
-    const callerIdentity = opts?.userId !== undefined || opts?.orgId !== undefined || opts?.apiKey !== undefined;
+    const callerIdentity = principal.userId !== undefined || principal.orgId !== undefined || principal.apiKey !== undefined;
     if (callerIdentity) {
       const rec = await this.config.store.getSession(sessionId);
       if (rec !== null) {
         const sessionHasOwner = rec.userId !== undefined || rec.orgId !== undefined || rec.apiKey !== undefined;
         if (sessionHasOwner) {
-          const userMatch = opts?.userId === undefined || opts.userId === rec.userId;
-          const orgMatch = opts?.orgId === undefined || opts.orgId === rec.orgId;
-          const apiKeyMatch = opts?.apiKey === undefined || opts.apiKey === rec.apiKey;
+          const userMatch = principal.userId === undefined || principal.userId === rec.userId;
+          const orgMatch = principal.orgId === undefined || principal.orgId === rec.orgId;
+          const apiKeyMatch = principal.apiKey === undefined || principal.apiKey === rec.apiKey;
           if (!userMatch || !orgMatch || !apiKeyMatch) {
             throw new Error(
               `Agent.resume: session ownership mismatch for session "${sessionId}". ` +
@@ -1035,9 +1108,11 @@ export class Agent {
     const resumeLogger2 = this.config.logger ?? envLogger();
     const permissions = await this.permissionsFor({
       sessionId,
+      ...(opts?.principal !== undefined ? { principal: opts.principal } : {}),
       ...(opts?.userId !== undefined ? { userId: opts.userId } : {}),
       ...(opts?.orgId !== undefined ? { orgId: opts.orgId } : {}),
       ...(opts?.apiKey !== undefined ? { apiKey: opts.apiKey } : {}),
+      ...(opts?.memoryScope !== undefined ? { memoryScope: opts.memoryScope } : {}),
     });
     const registry = this.buildRegistry(tools, durable, scope, undefined, sessionId, resumeLogger2, permissions);
     resumeExecSkillRegRef.registry = registry;
@@ -1050,9 +1125,9 @@ export class Agent {
       newId,
       ...(this.config.upcasters ? { upcasters: this.config.upcasters } : {}),
       // Fix 1: record owner identity on resume (only affects new sessions; existing sessions already have their owner).
-      ...(opts?.userId !== undefined ? { userId: opts.userId } : {}),
-      ...(opts?.orgId !== undefined ? { orgId: opts.orgId } : {}),
-      ...(opts?.apiKey !== undefined ? { apiKey: opts.apiKey } : {}),
+      ...(principal.userId !== undefined ? { userId: principal.userId } : {}),
+      ...(principal.orgId !== undefined ? { orgId: principal.orgId } : {}),
+      ...(principal.apiKey !== undefined ? { apiKey: principal.apiKey } : {}),
     });
 
     yield* resumeTurn({
@@ -1149,6 +1224,15 @@ export class Agent {
     const { deleted: store } = await this.config.store.eraseScope(scope);
     this.emitErasureAudit(scope, { store, vector: 0, graph: 0 }, true);
     return { store, vector: 0, graph: 0, memorySkipped: true };
+  }
+
+  /** Erase multiple scopes in order. Stops on the first failure so callers can retry idempotently. */
+  async eraseScopes(scopes: Scope[]): Promise<EraseScopeResult[]> {
+    const results: EraseScopeResult[] = [];
+    for (const scope of scopes) {
+      results.push(await this.eraseScope(scope));
+    }
+    return results;
   }
 
   /** Emit an `erasure` audit event (best-effort; a throwing sink is swallowed + logged). */
