@@ -9,6 +9,7 @@ import {
   type CostPolicy,
   type CostThresholdInfo,
   type DurablePort,
+  type GuardrailContext,
   type GuardrailPort,
   type LoggerPort,
   type MemoryBlock,
@@ -40,6 +41,8 @@ export interface RunTurnArgs {
   agentId: string;
   instructions: string;
   input: string;
+  /** Optional untrusted user segment used for input guardrails instead of the full assembled prompt. */
+  guardrailInput?: { text: string; channel?: string; metadata?: Record<string, unknown> };
   model: ModelPort;
   registry: ToolRegistry;
   session: Session;
@@ -194,7 +197,7 @@ export interface StructuredOutputSpec {
   /** JSON Schema sent to the model over `ModelRequest.outputSchema` (a hint to the provider). */
   json: unknown;
   /** Authoritative validation of the model's final object against the source (e.g. Zod) schema. */
-  validate: (value: unknown) => { ok: true; value: unknown } | { ok: false; error: string };
+  validate: (value: unknown) => { ok: true; value: unknown } | { ok: false; error: string; issues?: string[] };
 }
 
 /**
@@ -261,24 +264,43 @@ const ZERO_USAGE: Usage = { inputTokens: 0, outputTokens: 0 };
  * Run a guardrail chain over `text`. Returns the (possibly-redacted) final text, or throws a
  * special sentinel if any guardrail blocks.
  *
- * Returns `{ text: finalText }` on allow/redact, or `{ blocked: reason }` on first block.
+ * Returns `{ text: finalText }` on allow/redact, or `{ blocked }` on first block.
  */
 async function runGuardrails(
   guardrails: GuardrailPort[],
   text: string,
   check: "checkInput" | "checkOutput",
-  ctx: { agentId?: string; sessionId?: string },
-): Promise<{ text: string; blocked?: undefined } | { blocked: string; text?: undefined }> {
+  ctx: GuardrailContext,
+): Promise<
+  | { text: string; blocked?: undefined }
+  | { blocked: { reason: string; code?: string; severity?: "low" | "medium" | "high" }; text?: undefined }
+> {
   let current = text;
   for (const g of guardrails) {
     const fn = g[check];
     if (!fn) continue;
     const result = await fn.call(g, current, ctx);
-    if (result.action === "block") return { blocked: result.reason };
+    if (result.action === "block") {
+      return {
+        blocked: {
+          reason: result.reason,
+          ...(result.code !== undefined ? { code: result.code } : {}),
+          ...(result.severity !== undefined ? { severity: result.severity } : {}),
+        },
+      };
+    }
     if (result.action === "redact") current = result.text;
     // action === "allow": pass through unchanged
   }
   return { text: current };
+}
+
+function applyGuardrailRedaction(input: string, checkedText: string, redactedText: string): string {
+  if (input === checkedText) return redactedText;
+  if (checkedText.length > 0 && input.includes(checkedText)) {
+    return input.split(checkedText).join(redactedText);
+  }
+  return input;
 }
 
 function replaceTextBlocks(content: ContentBlock[], text: string): ContentBlock[] {
@@ -345,6 +367,12 @@ function buildDetails(
     turns?: number;
     turnLimit?: number;
     errorName?: string;
+    errorKind?: "structured_output_parse" | "structured_output_validation";
+    validationIssues?: string[];
+    rawOutput?: string;
+    guardrailReason?: string;
+    guardrailCode?: string;
+    guardrailSeverity?: "low" | "medium" | "high";
     callId?: string;
     toolName?: string;
   },
@@ -371,7 +399,13 @@ function buildDetails(
       }
       return undefined;
     case "error":
-      return { subtype: "error", ...(opts?.errorName !== undefined ? { errorName: opts.errorName } : {}) };
+      return {
+        subtype: "error",
+        ...(opts?.errorName !== undefined ? { errorName: opts.errorName } : {}),
+        ...(opts?.errorKind !== undefined ? { errorKind: opts.errorKind } : {}),
+        ...(opts?.validationIssues !== undefined ? { validationIssues: opts.validationIssues } : {}),
+        ...(opts?.rawOutput !== undefined ? { rawOutput: opts.rawOutput } : {}),
+      };
     case "suspended":
       return { subtype: "suspended", ...(opts?.callId !== undefined ? { callId: opts.callId } : {}), ...(opts?.toolName !== undefined ? { toolName: opts.toolName } : {}) };
     case "success":
@@ -379,7 +413,12 @@ function buildDetails(
     case "aborted":
       return { subtype: "aborted" };
     case "guardrail":
-      return { subtype: "guardrail" };
+      return {
+        subtype: "guardrail",
+        ...(opts?.guardrailReason !== undefined ? { reason: opts.guardrailReason } : {}),
+        ...(opts?.guardrailCode !== undefined ? { code: opts.guardrailCode } : {}),
+        ...(opts?.guardrailSeverity !== undefined ? { severity: opts.guardrailSeverity } : {}),
+      };
     default:
       return undefined;
   }
@@ -1058,19 +1097,23 @@ async function* runLoop(
     if (toolUses.length === 0) {
       let text = response.content.filter(isText).map((b) => b.text).join("");
       if (args.guardrails && args.guardrails.length > 0) {
-        const guardrailCtx = { agentId: args.agentId, sessionId: args.session.id };
+        const guardrailCtx: GuardrailContext = { agentId: args.agentId, sessionId: args.session.id, source: "output" };
         const gr = await runGuardrails(args.guardrails, text, "checkOutput", guardrailCtx);
         if (gr.blocked !== undefined) {
-          logger.log("debug", "eidentic:loop", "output blocked by guardrail", { reason: gr.blocked, numTurns: turn });
+          logger.log("debug", "eidentic:loop", "output blocked by guardrail", { reason: gr.blocked.reason, code: gr.blocked.code, numTurns: turn });
           yield {
             type: "result",
             subtype: "guardrail",
-            output: `Output blocked by guardrail: ${gr.blocked}`,
+            output: `Output blocked by guardrail: ${gr.blocked.reason}`,
             usage,
             numTurns: turn,
             sessionId: args.session.id,
             cost: breakdownFor(usage, args.prices, args.modelId, args.budget),
-            details: buildDetails("guardrail"),
+            details: buildDetails("guardrail", {
+              guardrailReason: gr.blocked.reason,
+              guardrailCode: gr.blocked.code,
+              guardrailSeverity: gr.blocked.severity,
+            }),
           };
           endRoot(usage, "error", "guardrail");
           return;
@@ -1192,7 +1235,11 @@ async function* runLoop(
             output: `structured output requested but the model's final answer is not valid JSON: ${text.slice(0, 200)}`,
             usage, numTurns: turn, sessionId: args.session.id,
             cost: breakdownFor(usage, args.prices, args.modelId, args.budget),
-            details: buildDetails("error", { errorName: "SyntaxError" }),
+            details: buildDetails("error", {
+              errorName: "SyntaxError",
+              errorKind: "structured_output_parse",
+              rawOutput: text,
+            }),
           };
           endRoot(usage, "error", "structured output parse error");
           return;
@@ -1224,7 +1271,12 @@ async function* runLoop(
             output: `structured output failed schema validation: ${validated.error}`,
             usage, numTurns: turn, sessionId: args.session.id,
             cost: breakdownFor(usage, args.prices, args.modelId, args.budget),
-            details: buildDetails("error", { errorName: "ValidationError" }),
+            details: buildDetails("error", {
+              errorName: "ValidationError",
+              errorKind: "structured_output_validation",
+              validationIssues: validated.issues,
+              rawOutput: text,
+            }),
           };
           endRoot(usage, "error", "structured output validation error");
           return;
@@ -1355,22 +1407,33 @@ export async function* runTurn(args: RunTurnArgs): AsyncIterable<StreamEvent> {
   // text is used for memory retrieval and the initial model messages instead of the original.
   let effectiveInput = args.input;
   if (args.guardrails && args.guardrails.length > 0) {
-    const guardrailCtx = { agentId: args.agentId, sessionId: args.session.id };
-    const gr = await runGuardrails(args.guardrails, args.input, "checkInput", guardrailCtx);
+    const checkedText = args.guardrailInput?.text ?? args.input;
+    const guardrailCtx: GuardrailContext = {
+      agentId: args.agentId,
+      sessionId: args.session.id,
+      source: "input",
+      ...(args.guardrailInput?.channel !== undefined ? { channel: args.guardrailInput.channel } : {}),
+      ...(args.guardrailInput?.metadata !== undefined ? { metadata: args.guardrailInput.metadata } : {}),
+    };
+    const gr = await runGuardrails(args.guardrails, checkedText, "checkInput", guardrailCtx);
     if (gr.blocked !== undefined) {
       yield {
         type: "result",
         subtype: "guardrail",
-        output: `Input blocked by guardrail: ${gr.blocked}`,
+        output: `Input blocked by guardrail: ${gr.blocked.reason}`,
         usage: ZERO_USAGE,
         numTurns: 0,
         sessionId: args.session.id,
         cost: breakdownFor(ZERO_USAGE, args.prices, args.modelId, args.budget),
-        details: buildDetails("guardrail"),
+        details: buildDetails("guardrail", {
+          guardrailReason: gr.blocked.reason,
+          guardrailCode: gr.blocked.code,
+          guardrailSeverity: gr.blocked.severity,
+        }),
       };
       return;
     }
-    effectiveInput = gr.text;
+    effectiveInput = applyGuardrailRedaction(args.input, checkedText, gr.text);
   }
 
   const blocks = args.memory ? await args.memory.getAlwaysInContext(args.scope) : await args.store.getBlocks(args.scope);
@@ -1465,12 +1528,35 @@ export async function* resumeTurn(args: RunTurnArgs): AsyncIterable<StreamEvent>
         try {
           candidate = JSON.parse(text);
         } catch {
-          yield { type: "result", subtype: "error", output: `structured output requested but the resumed final answer is not valid JSON: ${text.slice(0, 200)}`, usage: priorUsage, numTurns, sessionId: args.session.id, cost };
+          yield {
+            type: "result",
+            subtype: "error",
+            output: `structured output requested but the resumed final answer is not valid JSON: ${text.slice(0, 200)}`,
+            usage: priorUsage,
+            numTurns,
+            sessionId: args.session.id,
+            cost,
+            details: buildDetails("error", { errorName: "SyntaxError", errorKind: "structured_output_parse", rawOutput: text }),
+          };
           return;
         }
         const validated = args.outputSchema.validate(candidate);
         if (!validated.ok) {
-          yield { type: "result", subtype: "error", output: `structured output failed schema validation: ${validated.error}`, usage: priorUsage, numTurns, sessionId: args.session.id, cost };
+          yield {
+            type: "result",
+            subtype: "error",
+            output: `structured output failed schema validation: ${validated.error}`,
+            usage: priorUsage,
+            numTurns,
+            sessionId: args.session.id,
+            cost,
+            details: buildDetails("error", {
+              errorName: "ValidationError",
+              errorKind: "structured_output_validation",
+              validationIssues: validated.issues,
+              rawOutput: text,
+            }),
+          };
           return;
         }
         yield { type: "result", subtype: "success", output: text, object: validated.value, usage: priorUsage, numTurns, sessionId: args.session.id, cost };
@@ -1519,18 +1605,22 @@ export async function* resumeTurn(args: RunTurnArgs): AsyncIterable<StreamEvent>
   //   - allow  → no-op (effective text matches what's already in the window).
   let effectiveLastUserText: string | undefined = lastUser ? String(lastUser.payload) : undefined;
   if (args.guardrails && args.guardrails.length > 0 && effectiveLastUserText !== undefined) {
-    const guardrailCtx = { agentId: args.agentId, sessionId: args.session.id };
+    const guardrailCtx: GuardrailContext = { agentId: args.agentId, sessionId: args.session.id, source: "input" };
     const gr = await runGuardrails(args.guardrails, effectiveLastUserText, "checkInput", guardrailCtx);
     if (gr.blocked !== undefined) {
       yield {
         type: "result",
         subtype: "guardrail",
-        output: `Input blocked by guardrail on resume: ${gr.blocked}`,
+        output: `Input blocked by guardrail on resume: ${gr.blocked.reason}`,
         usage: priorUsage,
         numTurns: 0,
         sessionId: args.session.id,
         cost: breakdownFor(priorUsage, args.prices, args.modelId, args.budget),
-        details: buildDetails("guardrail"),
+        details: buildDetails("guardrail", {
+          guardrailReason: gr.blocked.reason,
+          guardrailCode: gr.blocked.code,
+          guardrailSeverity: gr.blocked.severity,
+        }),
       };
       return;
     }

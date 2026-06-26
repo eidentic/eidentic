@@ -7,7 +7,7 @@
  *  - No false-positives on ordinary numbers where avoidable
  */
 import { describe, it, expect } from "vitest";
-import { regexPiiGuardrail } from "../src/guardrails.js";
+import { eidenticGuardrails, regexPiiGuardrail } from "../src/guardrails.js";
 
 // Helper: run checkInput synchronously
 function checkIn(text: string, opts?: Parameters<typeof regexPiiGuardrail>[0]) {
@@ -230,6 +230,31 @@ describe("regexPiiGuardrail — mixed PII patterns", () => {
       expect(r.text).toContain("[EMAIL]");
       expect(r.text).not.toContain("user@example.com");
       expect(r.text).not.toContain("4111 1111 1111 1111");
+    }
+  });
+});
+
+describe("eidenticGuardrails.pii preset", () => {
+  it("supports input/output modes and entity selection", () => {
+    const g = eidenticGuardrails.pii({ input: "redact", output: "off", entities: ["email"] });
+    expect(g.checkInput).toBeDefined();
+    expect(g.checkOutput).toBeUndefined();
+    const r = g.checkInput!("Email user@example.com and call 555-867-5309");
+    expect(r.action).toBe("redact");
+    if (r.action === "redact") {
+      expect(r.code).toBe("pii_sensitive");
+      expect(r.text).toContain("[EMAIL]");
+      expect(r.text).toContain("555-867-5309");
+    }
+  });
+
+  it("can block output PII with machine code", () => {
+    const g = eidenticGuardrails.pii({ input: "off", output: "block", entities: ["ssn"] });
+    const r = g.checkOutput!("SSN 123-45-6789");
+    expect(r.action).toBe("block");
+    if (r.action === "block") {
+      expect(r.code).toBe("pii_sensitive");
+      expect(r.severity).toBe("medium");
     }
   });
 });

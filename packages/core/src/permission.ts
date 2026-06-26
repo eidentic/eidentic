@@ -93,8 +93,9 @@ export function argScopedDenies(
  * 2. BARE deny glob matches → deny. (Arg-scoped denies require input, evaluated at dispatch.)
  * 3. plan mode + non-read-only → deny.
  * 4. allow glob matches → allow.
- * 5. ask mode → ask.
- * 6. Default fall-through → allow.
+ * 5. ask glob matches → ask.
+ * 6. ask mode → ask.
+ * 7. Explicit default fall-through, else allow.
  */
 export function evaluatePermission(
   policy: PermissionPolicy | undefined,
@@ -112,11 +113,15 @@ export function evaluatePermission(
   // 4. Allow globs → allow (skip ask).
   if (policy.allow?.some((glob) => globMatch(glob, tool.id))) return "allow";
 
-  // 5. Ask mode → ask (dynamic resolution at dispatch time).
+  // 5. Ask globs → ask (dynamic resolution at dispatch time).
+  if (policy.ask?.some((glob) => globMatch(glob, tool.id))) return "ask";
+
+  // 6. Ask mode → ask (dynamic resolution at dispatch time).
   if (policy.mode === "ask") return "ask";
 
-  // 6. All other modes (default, bypass, acceptEdits) fall through to allow.
-  return "allow";
+  // 7. All other modes (default, bypass, acceptEdits) fall through to the explicit default
+  //    when present, or allow for back-compat.
+  return policy.default ?? "allow";
 }
 
 /**
@@ -129,3 +134,48 @@ export function filterToolsForSchema(tools: Tool[], policy?: PermissionPolicy): 
   if (!policy) return tools;
   return tools.filter((t) => evaluatePermission(policy, t) !== "deny");
 }
+
+export interface PermissionPresetOptions {
+  allow?: string[];
+  ask?: string[];
+  deny?: string[];
+}
+
+export const permissions = {
+  /**
+   * Hide and deny every tool except explicit `allow` and `ask` globs.
+   * `ask` tools stay visible to the model but require `onPermissionRequest` at dispatch time.
+   */
+  denyByDefault(opts: PermissionPresetOptions = {}): PermissionPolicy {
+    return {
+      allow: opts.allow ?? [],
+      ask: opts.ask ?? [],
+      deny: opts.deny ?? [],
+      default: "deny",
+    };
+  },
+
+  /**
+   * Keep unlisted tools visible, but require dynamic approval unless explicitly allowed.
+   */
+  askByDefault(opts: PermissionPresetOptions = {}): PermissionPolicy {
+    return {
+      allow: opts.allow ?? [],
+      ask: opts.ask ?? [],
+      deny: opts.deny ?? [],
+      default: "ask",
+    };
+  },
+
+  /**
+   * Read-only planning mode with optional allow/deny refinements.
+   */
+  plan(opts: PermissionPresetOptions = {}): PermissionPolicy {
+    return {
+      mode: "plan",
+      allow: opts.allow ?? [],
+      ask: opts.ask ?? [],
+      deny: opts.deny ?? [],
+    };
+  },
+} as const;

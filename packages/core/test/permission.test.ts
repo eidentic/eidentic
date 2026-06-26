@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { z } from "zod";
 import { createTool } from "../src/tool.js";
-import { globMatch, evaluatePermission, filterToolsForSchema } from "../src/permission.js";
+import { globMatch, evaluatePermission, filterToolsForSchema, permissions } from "../src/permission.js";
 import type { PermissionPolicy } from "@eidentic/types";
 
 // --- helper ---
@@ -109,6 +109,27 @@ describe("evaluatePermission", () => {
     const policy: PermissionPolicy = { mode: "acceptEdits" };
     expect(evaluatePermission(policy, { id: "any_tool", sideEffect: "destructive" })).toBe("allow");
   });
+
+  it("ask globs require approval while unrelated tools keep the default", () => {
+    const policy: PermissionPolicy = { ask: ["email_*"] };
+    expect(evaluatePermission(policy, { id: "email_send", sideEffect: "destructive" })).toBe("ask");
+    expect(evaluatePermission(policy, { id: "read_file", sideEffect: "read-only" })).toBe("allow");
+  });
+
+  it("explicit default supports deny-by-default policies", () => {
+    const policy: PermissionPolicy = { allow: ["read_*"], ask: ["email_*"], default: "deny" };
+    expect(evaluatePermission(policy, { id: "read_orders", sideEffect: "read-only" })).toBe("allow");
+    expect(evaluatePermission(policy, { id: "email_send", sideEffect: "destructive" })).toBe("ask");
+    expect(evaluatePermission(policy, { id: "delete_order", sideEffect: "destructive" })).toBe("deny");
+  });
+
+  it("permissions.denyByDefault builds the sharp preset", () => {
+    const policy = permissions.denyByDefault({ allow: ["knowledge_*"], ask: ["email_*"], deny: ["admin_*"] });
+    expect(evaluatePermission(policy, { id: "knowledge_search", sideEffect: "read-only" })).toBe("allow");
+    expect(evaluatePermission(policy, { id: "email_send", sideEffect: "destructive" })).toBe("ask");
+    expect(evaluatePermission(policy, { id: "admin_read", sideEffect: "read-only" })).toBe("deny");
+    expect(evaluatePermission(policy, { id: "deal_update", sideEffect: "idempotent" })).toBe("deny");
+  });
 });
 
 // ─── filterToolsForSchema ─────────────────────────────────────────────────────
@@ -155,5 +176,12 @@ describe("filterToolsForSchema", () => {
     // plan removes write + upsert (non-read-only); deny removes db_upsert (already gone); net: only read_file
     const result = filterToolsForSchema([read, write, upsert], policy);
     expect(result.map((t) => t.id)).toEqual(["read_file"]);
+  });
+
+  it("deny-by-default schema keeps allow/ask tools and hides unlisted tools", () => {
+    const email = makeTool("email_send", "destructive");
+    const policy = permissions.denyByDefault({ allow: ["read_*"], ask: ["email_*"] });
+    const result = filterToolsForSchema([read, write, email], policy);
+    expect(result.map((t) => t.id)).toEqual(["read_file", "email_send"]);
   });
 });

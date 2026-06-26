@@ -95,19 +95,24 @@ describe("Agent structured output (D2)", () => {
     // age is a string, not a number → schema mismatch.
     const model = new MockModel([objResponse('{"name":"Ada","age":"old"}', { name: "Ada", age: "old" })]);
     const events = await runWith(model, Person);
-    const result = events.at(-1) as { type: string; subtype: string; output?: unknown; object?: unknown };
+    const result = events.at(-1) as { type: string; subtype: string; output?: unknown; object?: unknown; details?: Record<string, unknown> };
     expect(result.type).toBe("result");
     expect(result.subtype).toBe("error");
     expect(String(result.output)).toMatch(/schema validation/i);
     expect(result.object).toBeUndefined();
+    expect(result.details?.errorKind).toBe("structured_output_validation");
+    expect(result.details?.validationIssues).toEqual(expect.arrayContaining([expect.stringMatching(/age/i)]));
+    expect(result.details?.rawOutput).toBe('{"name":"Ada","age":"old"}');
   });
 
   it("terminates with error when the final answer is not valid JSON", async () => {
     const model = new MockModel([{ content: [textBlock("I cannot do that")], usage }]);
     const events = await runWith(model, Person);
-    const result = events.at(-1) as { type: string; subtype: string; output?: unknown };
+    const result = events.at(-1) as { type: string; subtype: string; output?: unknown; details?: Record<string, unknown> };
     expect(result.subtype).toBe("error");
     expect(String(result.output)).toMatch(/not valid JSON/i);
+    expect(result.details?.errorKind).toBe("structured_output_parse");
+    expect(result.details?.rawOutput).toBe("I cannot do that");
   });
 
   it("back-compat: a query WITHOUT outputSchema never forwards a schema and yields no object", async () => {

@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { z } from "zod";
 import { createTool, ToolRegistry } from "../src/tool.js";
+import { permissions } from "../src/permission.js";
 import { MapSecrets } from "@eidentic/types/testing";
 import type { PermissionPolicy, PermissionDecision, Scope } from "@eidentic/types";
 import type { ToolContext } from "../src/tool.js";
@@ -98,6 +99,20 @@ describe("ToolRegistry dispatch permission gate", () => {
     const policy: PermissionPolicy = { mode: "ask" };
     const reg = new ToolRegistry([t], { permissions: policy }); // no onPermissionRequest
     const [r] = await reg.dispatch([{ callId: "c1", name: "risky", input: {} }]);
+    expect(ran).toBe(false);
+    expect(r!.isError).toBe(true);
+    expect(r!.meta?.permissionDenied).toBe(true);
+  });
+
+  it("denyByDefault: unlisted tools are denied without executing", async () => {
+    let ran = false;
+    const t = createTool({
+      id: "deal_update", description: "updates", sideEffect: "idempotent",
+      inputSchema: z.object({}),
+      execute: async () => { ran = true; return { ok: true }; },
+    });
+    const reg = new ToolRegistry([t], { permissions: permissions.denyByDefault({ allow: ["knowledge_*"] }) });
+    const [r] = await reg.dispatch([{ callId: "c1", name: "deal_update", input: {} }]);
     expect(ran).toBe(false);
     expect(r!.isError).toBe(true);
     expect(r!.meta?.permissionDenied).toBe(true);
