@@ -1,5 +1,12 @@
 # @eidentic/model
 
+## 0.2.5
+
+### Patch Changes
+
+- Updated dependencies [4b06c20]
+  - @eidentic/types@0.4.0
+
 ## 0.2.4
 
 ### Patch Changes

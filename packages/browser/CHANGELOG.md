@@ -1,5 +1,13 @@
 # @eidentic/browser
 
+## 0.1.7
+
+### Patch Changes
+
+- Updated dependencies [4b06c20]
+  - @eidentic/core@0.3.1
+  - @eidentic/tools@0.1.7
+
 ## 0.1.6
 
 ### Patch Changes

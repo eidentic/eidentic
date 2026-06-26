@@ -1,5 +1,17 @@
 # eidentic
 
+## 0.1.10
+
+### Patch Changes
+
+- Updated dependencies [4b06c20]
+  - @eidentic/types@0.4.0
+  - @eidentic/core@0.3.1
+  - @eidentic/cli@0.1.9
+  - @eidentic/memory@0.1.5
+  - @eidentic/model@0.2.5
+  - @eidentic/sqlite@0.2.1
+
 ## 0.1.9
 
 ### Patch Changes

@@ -1,5 +1,12 @@
 # @eidentic/sqlite
 
+## 0.2.1
+
+### Patch Changes
+
+- Updated dependencies [4b06c20]
+  - @eidentic/types@0.4.0
+
 ## 0.2.0
 
 ### Minor Changes

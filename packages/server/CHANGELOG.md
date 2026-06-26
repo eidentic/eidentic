@@ -1,5 +1,14 @@
 # @eidentic/server
 
+## 0.3.2
+
+### Patch Changes
+
+- Updated dependencies [4b06c20]
+  - @eidentic/types@0.4.0
+  - @eidentic/core@0.3.1
+  - @eidentic/workflow@0.2.1
+
 ## 0.3.1
 
 ### Patch Changes

@@ -1,5 +1,12 @@
 # @eidentic/pgvector
 
+## 0.2.3
+
+### Patch Changes
+
+- Updated dependencies [4b06c20]
+  - @eidentic/types@0.4.0
+
 ## 0.2.2
 
 ### Patch Changes
