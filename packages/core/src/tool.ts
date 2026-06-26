@@ -359,7 +359,8 @@ export class ToolRegistry {
         // that a previously-settled destructive tool is not re-executed after an upgrade.
         // New completions are ALWAYS written with the prefixed key so the bare-key path is
         // purely read-compat and will age out naturally as sessions complete.
-        let rec = await this.durable.getIdempotency(key);
+        const idempotencyMetadata = this.sessionId !== undefined ? { sessionId: this.sessionId } : undefined;
+        let rec = await this.durable.getIdempotency(key, idempotencyMetadata);
         if (rec == null && this.sessionId !== undefined && toolKey !== key) {
           const legacyRec = await this.durable.getIdempotency(toolKey);
           if (legacyRec?.status === "applied") {
@@ -384,9 +385,9 @@ export class ToolRegistry {
           await this.firePostHook(tool.id, parsed.value, skippedResult, dispatchStart);
           return skippedResult;
         }
-        await this.durable.recordIntent(key, argsHash);
+        await this.durable.recordIntent(key, argsHash, idempotencyMetadata);
         const r = await this.execOne(call, tool, parsed.value, ctx);
-        if (!r.isError) await this.durable.recordCompletion(key, r.output);
+        if (!r.isError) await this.durable.recordCompletion(key, r.output, idempotencyMetadata);
         this.logger.log("debug", "eidentic:tool", "result", { tool: call.name, ok: !r.isError });
         await this.firePostHook(tool.id, parsed.value, r, dispatchStart);
         return r;

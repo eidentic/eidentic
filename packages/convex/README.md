@@ -1,110 +1,134 @@
 # @eidentic/convex
 
-A [Convex](https://www.convex.dev)-backed store adapter for [Eidentic](https://github.com/eidentic/eidentic).
+A [Convex](https://www.convex.dev)-backed adapter for [Eidentic](https://github.com/eidentic/eidentic).
 
-`ConvexStore` implements **`StorePort` + `GraphPort` + `DurablePort`** (sessions, the append-only
-event log, always-in-context memory blocks with CAS, the lexical memory index, the temporal
-knowledge graph, **and durable execution** — checkpoints, an exactly-once idempotency ledger, and
-human-in-the-loop suspension decisions). `ConvexVectorStore` implements **`VectorPort`**
-(cosine-ranked vector search). All come from `@eidentic/types`.
+Recommended path: install Eidentic as a **Convex Component** so Eidentic's sessions, events,
+memory, graph, vector, checkpoint, idempotency, and decision tables live inside an isolated component
+schema instead of being spread into your host app schema.
 
-Convex's serializable mutations make the durable ledger atomic by construction: every
-checkpoint/intent/completion/decision write is a single transaction, so checkpoint-resume and
-exactly-once tool dispatch hold under concurrency without extra locking.
-
-The agent runtime runs **outside** Convex and talks to a deployment through an injectable runner.
-This is the *app-functions* model — you re-export a handful of Convex functions from your own
-`convex/` directory and spread the adapter's tables into your schema. It is **not** a Convex
-Component.
+The older app-functions/HTTP runner path is still supported for external workers and server
+processes. Existing `@eidentic/convex`, `@eidentic/convex/schema`, and `@eidentic/convex/server`
+imports continue to work.
 
 ## Install
 
 ```bash
 npm i @eidentic/convex convex
-# convex is a peer dependency
 ```
 
-## Two-step setup
+`convex` is a peer dependency.
 
-### 1. Spread the tables into your schema
+## Component Setup
+
+Add the component to `convex/convex.config.ts`:
 
 ```ts
-// convex/schema.ts
+import { defineApp } from "convex/server";
+import eidentic from "@eidentic/convex/convex.config.js";
+
+const app = defineApp();
+
+app.use(eidentic, { name: "eidentic" });
+
+export default app;
+```
+
+Run Convex codegen as usual:
+
+```bash
+npx convex dev
+```
+
+Use the component from a host action or mutation after your app has authenticated the caller and
+resolved workspace/org/business context:
+
+```ts
+import { components } from "./_generated/api";
+import { action } from "./_generated/server";
+import { EidenticComponentStore, EidenticComponentVectorStore } from "@eidentic/convex/component";
+
+export const runAgent = action({
+  args: {},
+  handler: async (ctx) => {
+    const store = new EidenticComponentStore(ctx, components.eidentic);
+    const vectors = new EidenticComponentVectorStore(ctx, components.eidentic);
+
+    await store.upsertBlock(
+      { kind: "agent", agentId: "support-bot" },
+      { label: "profile", value: "Name: Ada" },
+    );
+
+    return await vectors.list("agent:support-bot");
+  },
+});
+```
+
+Component tables use singular snake_case names internally:
+
+```txt
+session, event, block, block_history, memory, fact, vector,
+checkpoint, idempotency, decision
+```
+
+Those tables are owned by the component and do not appear in the host app's schema.
+
+## Security Model
+
+Do not expose component functions directly as your product API. Route client calls through host app
+functions such as `api.ai.eidentic.draftReply`, authenticate there, check workspace/org/role
+permissions, assemble business context, and then call the component.
+
+This keeps Eidentic focused on durable agent runtime state while your app remains the authority for
+users, tenants, model credentials, and final side effects.
+
+## App-Functions Path
+
+Use app-functions when the Eidentic runtime runs outside Convex and talks to a deployment through
+`ConvexHttpClient`.
+
+### Legacy schema spread
+
+This is unchanged and remains source-compatible:
+
+```ts
 import { defineSchema } from "convex/server";
 import { eidenticTables } from "@eidentic/convex/schema";
 
 export default defineSchema({
   ...eidenticTables,
-  // ...your own tables
 });
 ```
 
-`eidenticTables` defines `sessions`, `events`, `blocks`, `blockHistory`, `memories`, `facts`, and
-`vectors` with the indexes the adapter queries.
+### Prefixed app-functions schema
 
-### 2. Re-export the function handlers
+For new app-functions installs, prefer prefixed table names:
+
+```ts
+// convex/schema.ts
+import { defineSchema } from "convex/server";
+import { createEidenticTableNames, createEidenticTables } from "@eidentic/convex/app-functions/schema";
+
+export const eidenticTableNames = createEidenticTableNames({ prefix: "eidentic_" });
+
+export default defineSchema({
+  ...createEidenticTables({ names: eidenticTableNames }),
+});
+```
+
+Register handlers with the same table map:
 
 ```ts
 // convex/eidentic.ts
-export * from "@eidentic/convex/server";
-```
+import { eidenticFunctions, type EidenticAuthorize } from "@eidentic/convex/app-functions/server";
+import { eidenticTableNames } from "./schema.js";
 
-The handlers are built with Convex's generic builders (`queryGeneric` / `mutationGeneric`) typed
-over the eidentic schema, so they do **not** depend on your app's `_generated` codegen. The module
-name (`eidentic`) determines the function paths (`eidentic:appendEvents`, …).
-
-Run `npx convex dev` (or `codegen`) as usual so Convex picks up the new tables and functions.
-
-### 3. Build the runner and the store
-
-```ts
-import { ConvexHttpClient } from "convex/browser";
-import { ConvexStore, ConvexVectorStore, convexHttpRunner } from "@eidentic/convex";
-
-const client = new ConvexHttpClient(process.env.CONVEX_URL!);
-const runner = convexHttpRunner(client);
-
-const store = new ConvexStore(runner);          // StorePort, GraphPort & DurablePort
-const vectors = new ConvexVectorStore(runner);  // VectorPort
-```
-
-`convexHttpRunner` defaults the function references to the `eidentic:*` string paths produced by
-`defaultStoreFns()` / `defaultVectorFns()`. If you re-exported the handlers from a module other
-than `convex/eidentic.ts`, pass custom refs:
-
-```ts
-import { defaultStoreFns } from "@eidentic/convex";
-const store = new ConvexStore(runner, { fns: defaultStoreFns("memory") }); // convex/memory.ts
-```
-
-You can also pass codegen `api.eidentic.appendEvents` references or `anyApi` refs directly via the
-`fns` option — any value `ConvexHttpClient` accepts as a function reference works.
-
-## Securing the functions (recommended)
-
-> ⚠️ The bare `export * from "@eidentic/convex/server"` path registers all 31 functions as
-> **public** Convex functions. Anyone who knows your deployment URL can call them with **any**
-> `scopeKey` and read or write agent memory. That path is only suitable for trusted, single-tenant
-> deployments. For anything multi-tenant, gate every call with an `authorize` hook.
-
-The functions **must** stay public — the runtime calls them over HTTP via `ConvexHttpClient`, and
-Convex `internal*` functions are not HTTP-callable. So the fix is an in-function authorization hook,
-not making them internal. Build the functions with `eidenticFunctions({ authorize })` instead of the
-bare `export *`:
-
-```ts
-// convex/eidentic.ts
-import { eidenticFunctions, type EidenticAuthorize } from "@eidentic/convex";
-
-// Runs BEFORE every handler. Throw to DENY; return/resolve to ALLOW.
 const authorize: EidenticAuthorize = async (ctx, { op, args }) => {
   const identity = await ctx.auth.getUserIdentity();
   if (!identity) throw new Error("unauthenticated");
 
-  // Optional: enforce scopeKey ownership. Most ops carry a `scopeKey`; assert the caller owns it.
-  const scopeKey = args["scopeKey"];
-  if (typeof scopeKey === "string" && !scopeKey.includes(identity.subject)) {
-    throw new Error(`forbidden: ${op} on ${scopeKey}`);
+  const sessionId = args["sessionId"];
+  if (typeof sessionId === "string" && !sessionId.startsWith(identity.subject)) {
+    throw new Error(`forbidden: ${op}`);
   }
 };
 
@@ -115,70 +139,64 @@ export const {
   sweepExpired, eraseScope, writeCheckpoint, lastCheckpoint, recordIntent,
   recordCompletion, getIdempotency, recordDecision, getDecision,
   vectorUpsert, vectorSearch, vectorDelete, vectorEraseScope, vectorList,
-} = eidenticFunctions({ authorize });
+} = eidenticFunctions({
+  tables: eidenticTableNames,
+  authorize,
+});
 ```
 
-`eidenticFunctions` returns the same 31 functions as the bare `export *`, but wraps each handler so
-`authorize(ctx, { op, args })` is **awaited before the handler body runs** — a thrown error rejects
-the op. `op` is the function name (e.g. `"upsertBlock"`); `args` is the validated argument object.
-Omitting `authorize` (`eidenticFunctions()`) yields functions functionally identical to the bare
-exports.
+The bare `export * from "@eidentic/convex/server"` path is still supported, but treat it as
+legacy/trusted-only. In multi-tenant products, use `eidenticFunctions({ authorize })`.
 
-On the runner side, authenticate the `ConvexHttpClient` so `ctx.auth.getUserIdentity()` is populated
-inside the hook:
+### HTTP runner
 
 ```ts
 import { ConvexHttpClient } from "convex/browser";
-import { ConvexStore, convexHttpRunner } from "@eidentic/convex";
+import { ConvexStore, ConvexVectorStore, convexHttpRunner } from "@eidentic/convex";
 
 const client = new ConvexHttpClient(process.env.CONVEX_URL!);
-client.setAuth(process.env.CONVEX_AUTH_TOKEN!); // a JWT, or a () => Promise<string> token fetcher
-const store = new ConvexStore(convexHttpRunner(client));
+client.setAuth(process.env.CONVEX_AUTH_TOKEN!);
+
+const runner = convexHttpRunner(client);
+const store = new ConvexStore(runner);
+const vectors = new ConvexVectorStore(runner);
 ```
 
-No runner option is needed for auth — the hook reads identity straight off `ctx.auth`. The adapter
-classes (`ConvexStore` / `ConvexVectorStore`) are unchanged; only your `convex/eidentic.ts` differs.
+## Durable Idempotency Metadata
 
-## Quickstart
+`recordIntent`, `recordCompletion`, and `getIdempotency` accept optional ownership metadata:
 
 ```ts
-const scope = { kind: "user", agentId: "support-bot", userId: "u_42" } as const;
-
-await store.createSession({ id: "s1", agentId: "support-bot", createdAt: new Date().toISOString() });
-await store.appendEvents([
-  { id: "e0", sessionId: "s1", seq: 0, kind: "user", schemaVersion: 1, payload: "hi", createdAt: "..." },
-]);
-
-await store.upsertBlock(scope, { label: "profile", value: "Name: Ada" });
-await store.indexMemory([{ scope, id: "m1", text: "Ada prefers email over phone" }]);
-const hits = await store.searchMemory(scope, "email", 5);
-
-// Temporal knowledge graph
-await store.assertFact(scope, { subject: "Ada", predicate: "lives_in", object: "Paris" });
-const facts = await store.queryFacts({ scope, subject: "Ada" });
+await store.recordIntent("sess1:send_email:a@test.com", "args-hash", {
+  sessionId: "sess1",
+  ownerKey: "user:u1",
+});
 ```
 
-## Notes
+This gives Convex authorization hooks structured fields to check instead of parsing opaque keys.
+Eidentic core passes `sessionId` automatically for durable tool dispatch.
 
-- **`migrate()` and `close()` are no-ops.** Convex owns the schema (managed via `convex dev`), and
-  there is no client connection to tear down.
-- **Atomicity.** A single Convex mutation is one transaction, so multi-row writes
-  (`appendEvents`, `upsertBlock` + history, `indexMemory` delete-then-insert, `assertFact`
-  invalidate + insert, `eraseScope`) commit or roll back together. `appendEvents` checks **all**
-  conflicts (duplicate id, duplicate `(sessionId, seq)`, intra-batch duplicates) **before** any
-  insert and throws a `StoreConflictError` so the whole batch rolls back.
-- **Search is computed in the handler, not by native indexes.** Both lexical (`searchMemory`) and
-  vector (`vectorSearch`) ranking read the scope's rows via the scope index and score in JS (TF for
-  lexical, cosine for vectors). This is deterministic and fully testable under `convex-test`.
-  Convex's native `searchIndex` / `vectorIndex` are a **future performance optimization** — they
-  are not used today.
+## Vector Strategy
+
+`ConvexVectorStore` remains a zero-infra vector adapter that stores vectors in Convex and scores
+with deterministic JS cosine ranking. It is suitable for demos, tests, and small deployments.
+
+For production semantic memory at scale, prefer an external `VectorPort` such as
+`@eidentic/qdrant` and keep a separate collection for Eidentic memory.
+
+## Migration Notes
+
+- Existing app-functions installs can upgrade without code changes.
+- New Convex apps should use the component path.
+- Existing app-functions installs that want prefixed table names need a data migration or a fresh
+  Convex deployment; changing table names is not automatic.
+- The bare public handler re-export remains available for compatibility, but multi-tenant apps
+  should migrate to `eidenticFunctions({ authorize })` or to the component path.
 
 ## Testing
 
-The package's own conformance tests use [`convex-test`](https://github.com/get-convex/convex-test)
-with the `edge-runtime` Vitest environment — no `convex dev` login required. The same injectable
-runner wraps a `convexTest(schema, modules)` instance, and the shared `storeConformanceCases` /
-`vectorConformanceCases` from `@eidentic/types/testing` run against it.
+This package is covered by Convex store/vector/durable conformance tests via `convex-test`, plus
+tests for table-name factories, authorization metadata, and in-process runners.
 
 ## License
 

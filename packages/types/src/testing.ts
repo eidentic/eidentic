@@ -20,6 +20,7 @@ import type {
   DurablePort,
   Checkpoint,
   IdempotencyRecord,
+  IdempotencyMetadata,
   IdempotencyStatus,
   SuspendDecision,
 } from "./ports.js";
@@ -378,18 +379,28 @@ export class InMemoryStore implements StorePort, GraphPort, DurablePort {
     return { ...top };
   }
 
-  async recordIntent(key: string, argsHash: string): Promise<void> {
+  async recordIntent(key: string, argsHash: string, metadata?: IdempotencyMetadata): Promise<void> {
     if (this.idempotency.has(key)) return; // intent is write-once; never downgrade applied → intent
-    this.idempotency.set(key, { key, argsHash, status: "intent", createdAt: this.graphNow() });
+    this.idempotency.set(key, { key, argsHash, status: "intent", createdAt: this.graphNow(), ...metadata });
   }
 
-  async recordCompletion(key: string, result: unknown): Promise<void> {
+  async recordCompletion(key: string, result: unknown, metadata?: IdempotencyMetadata): Promise<void> {
     const existing = this.idempotency.get(key);
     const argsHash = existing?.argsHash ?? "";
     const status: IdempotencyStatus = "applied";
     // JSON round-trip so the in-memory store matches the SQLite store's serialize/parse semantics.
     const stored = JSON.parse(JSON.stringify(result ?? null));
-    this.idempotency.set(key, { key, argsHash, status, result: stored, createdAt: existing?.createdAt ?? this.graphNow() });
+    this.idempotency.set(key, {
+      key,
+      argsHash,
+      createdAt: existing?.createdAt ?? this.graphNow(),
+      ...(existing?.scopeKey !== undefined ? { scopeKey: existing.scopeKey } : {}),
+      ...(existing?.sessionId !== undefined ? { sessionId: existing.sessionId } : {}),
+      ...(existing?.ownerKey !== undefined ? { ownerKey: existing.ownerKey } : {}),
+      ...metadata,
+      status,
+      result: stored,
+    });
   }
 
   async getIdempotency(key: string): Promise<IdempotencyRecord | null> {
