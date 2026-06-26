@@ -1,9 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { MockEmbeddingModelV3 } from "ai/test";
+import { MockEmbeddingModelV4 } from "ai/test";
 import { AIEmbedder } from "../src/embedder.js";
 
 function mock(vector: number[]) {
-  return new MockEmbeddingModelV3({
+  return new MockEmbeddingModelV4({
     doEmbed: async ({ values }: { values: string[] }) => ({
       embeddings: values.map(() => vector),
       usage: { tokens: 1 },

@@ -9,7 +9,7 @@ harness.
 
 ## 3.1 Build our own loop (don't outsource it)
 
-**Decision:** Eidentic owns the agentic loop. AI SDK v6 is used *only* as the `ModelPort`
+**Decision:** Eidentic owns the agentic loop. AI SDK v7 is used *only* as the `ModelPort`
 transport — `streamText`/`generateText` for a single model round-trip with tool-call
 parsing and structured output. We do **not** delegate the multi-step loop to AI SDK's
 `ToolLoopAgent`.
@@ -81,7 +81,7 @@ async function* runTurn(agent, session, input, opts): AsyncIterable<EidenticEven
 
     // single model-selection point (§0-C8 precedence): cascade routing → prepareStep → cost-threshold downgrade
     const model = resolveModel(agent, turn, session, cost)
-    const completion = model.stream(window)          // AI SDK v6 single round-trip
+    const completion = model.stream(window)          // AI SDK v7 single round-trip
     const { text, toolCalls, usage } = yield* relay(completion)   // emits assistant/delta
     cost.record(usage)
 

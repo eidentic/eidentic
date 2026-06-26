@@ -34,7 +34,7 @@ export const POST = withEidentic(myAgent);
 
 ```tsx
 // Any React component
-import { useChat } from "ai/react";   // Vercel AI SDK
+import { useChat } from "@ai-sdk/react"; // Vercel AI SDK
 
 export function Chat() {
   const { messages, input, handleInputChange, handleSubmit } = useChat({

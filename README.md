@@ -77,6 +77,9 @@ server-side (it holds your model key); your frontend just calls your endpoint.
 npm install eidentic ai @ai-sdk/anthropic
 ```
 
+Eidentic targets AI SDK 7. Packages that bridge to AI SDK are ESM-only, so use ESM
+`import` syntax in Node.js 22+ projects.
+
 **Next.js (App Router)** — `app/api/chat/route.ts`:
 
 > **Next.js / serverless:** use `@eidentic/libsql` (pure-JS, bundler-friendly), not `SqliteStore`.

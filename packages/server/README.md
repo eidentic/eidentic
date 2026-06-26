@@ -39,6 +39,9 @@ await serveNode(app, { port: 3000 });
 The stream format is compatible with Vercel AI SDK's `useChat` and `@eidentic/react`'s
 `useEidenticStream` out of the box.
 
+`@eidentic/server` follows AI SDK 7's ESM-only runtime surface. Use ESM `import`, not
+CommonJS `require()`.
+
 ## Links
 
 - [GitHub](https://github.com/eidentic/eidentic)

@@ -11,14 +11,14 @@
     "url": "git+https://github.com/eidentic/eidentic.git",
     "directory": "packages/model"
   },
-  "main": "./dist/index.cjs",
+  "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
+      "default": "./dist/index.js"
     }
   },
   "sideEffects": false,
@@ -28,24 +28,24 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsup src/index.ts --format esm,cjs --dts --clean",
+    "build": "tsup src/index.ts --format esm --dts --clean",
     "typecheck": "tsc --noEmit",
     "gen:prices": "tsx scripts/gen-prices.ts"
   },
   "dependencies": {
     "@eidentic/types": "workspace:*",
-    "ai": "^6.0.207"
+    "ai": "^7.0.2"
   },
   "peerDependencies": {
-    "ollama-ai-provider": ">=1.0.0"
+    "ai-sdk-ollama": "^4.0.0"
   },
   "peerDependenciesMeta": {
-    "ollama-ai-provider": {
+    "ai-sdk-ollama": {
       "optional": true
     }
   },
   "devDependencies": {
-    "@ai-sdk/anthropic": "^3.0.85",
+    "@ai-sdk/anthropic": "^4.0.0",
     "tsx": "^4.19.0"
   },
   "description": "Model and embedder wrappers for Eidentic — AIModel and AIEmbedder over AI SDK providers, with live price tables and Ollama support.",

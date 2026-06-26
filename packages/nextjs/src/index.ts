@@ -44,7 +44,7 @@ import {
 /**
  * Wire protocol for the route handler response.
  *
- * - `"ai-sdk-ui"` (default) — AI SDK v6 UI message-stream format.
+ * - `"ai-sdk-ui"` (default) — AI SDK v7 UI message-stream format.
  *   Compatible with `useChat` from `@ai-sdk/react`.  This is the recommended
  *   default: structured, typed, and compatible with the entire AI SDK
  *   ecosystem.
@@ -242,7 +242,7 @@ const DEFAULT_MAX_BODY_BYTES = 1_048_576;
  *
  * ### Protocol: `"ai-sdk-ui"` (default)
  *
- * The response uses the Vercel AI SDK v6 UI message-stream SSE format.
+ * The response uses the Vercel AI SDK v7 UI message-stream SSE format.
  * Wire it up with `useChat` from `@ai-sdk/react`:
  *
  * ```tsx

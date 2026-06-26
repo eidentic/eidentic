@@ -9,10 +9,11 @@ const restoreNodeProtocol = async () => {
 };
 
 export default defineConfig([
-  // Library bundle (index) — ESM + CJS + types
+  // Library bundle (index) — ESM + types. AI SDK v7 is ESM-only, so the
+  // umbrella package cannot safely expose a CommonJS entrypoint.
   {
     entry: { index: "src/index.ts" },
-    format: ["esm", "cjs"],
+    format: ["esm"],
     dts: true,
     clean: true,
     splitting: false,

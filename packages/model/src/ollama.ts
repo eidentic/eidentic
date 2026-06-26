@@ -1,4 +1,3 @@
-import { createRequire } from "node:module";
 import type { LanguageModel } from "ai";
 
 /**
@@ -11,16 +10,14 @@ export interface OllamaModelOptions {
    */
   baseURL?: string;
   /**
-   * Injectable provider factory for testing. When provided, the `ollama-ai-provider`
-   * peer dependency is NOT resolved — the factory is called directly. In production
-   * code, leave this unset.
+   * Injectable provider factory for testing and legacy adapters.
    * @internal
    */
   _factory?: OllamaProviderFactory;
 }
 
 /**
- * Minimal type describing what we need from `ollama-ai-provider`.
+ * Minimal type describing what we need from an Ollama AI SDK provider.
  * @internal
  */
 export interface OllamaProvider {
@@ -32,64 +29,35 @@ export interface OllamaProviderFactory {
   createOllama(opts?: { baseURL?: string }): OllamaProvider;
 }
 
-/** Lazy-require the optional peer dep. Throws a clear message if not installed. */
-function loadOllamaModule(): OllamaProviderFactory {
-  // In CJS builds `require` is available as a global; in ESM builds we derive it from
-  // import.meta.url. This is identical to the pattern in @eidentic/sqlite. The esbuild
-  // warning ("import.meta not available with cjs") is a false positive: at CJS runtime
-  // `typeof require === "function"` is true so the createRequire branch is never reached.
-  const req: NodeRequire =
-    typeof require === "function"
-      ? require
-      : createRequire(import.meta.url);
-  try {
-    return req("ollama-ai-provider") as OllamaProviderFactory;
-  } catch {
-    throw new Error(
-      "[eidentic/model] createOllamaModel requires the `ollama-ai-provider` package.\n" +
-        "Install it in your project:\n" +
-        "  npm install ollama-ai-provider\n" +
-        "  # or\n" +
-        "  pnpm add ollama-ai-provider",
-    );
-  }
-}
-
 /**
  * Create a Vercel AI SDK `LanguageModel` backed by a locally-running Ollama instance.
  *
- * `ollama-ai-provider` is an **optional peer dependency** — install it separately:
- * ```sh
- * npm install ollama-ai-provider
- * # or
- * pnpm add ollama-ai-provider
- * ```
+ * @deprecated AI SDK 7 provider packages are ESM-first. Import the v7-compatible
+ * `ai-sdk-ollama` provider directly instead:
  *
- * **Usage:**
  * ```ts
- * import { AIModel, createOllamaModel } from "@eidentic/model";
+ * import { AIModel } from "@eidentic/model";
+ * import { ollama } from "ai-sdk-ollama";
  *
- * // Default: connects to http://localhost:11434/api
- * const model = new AIModel(createOllamaModel("llama3.2"));
- *
- * // Multimodal (vision-capable) model:
- * const visionModel = new AIModel(createOllamaModel("llava"));
- *
- * // Custom server URL:
- * const remoteModel = new AIModel(
- *   createOllamaModel("mistral", { baseURL: "http://192.168.1.10:11434/api" }),
- * );
+ * const model = new AIModel(ollama("llama3.2"));
  * ```
- *
- * No API key required — works entirely offline.
  *
  * @param modelId - Ollama model identifier, e.g. `"llama3.2"`, `"mistral"`, `"llava"`.
  * @param opts    - Optional configuration (baseURL + optional test factory).
- * @returns A Vercel AI SDK `LanguageModel` that routes calls to the local Ollama server.
- * @throws Error if `ollama-ai-provider` is not installed and no `_factory` is provided.
+ * @returns A Vercel AI SDK `LanguageModel` when a factory is provided.
+ * @throws Error unless `_factory` is provided. Use `ai-sdk-ollama` directly for production code.
  */
 export function createOllamaModel(modelId: string, opts?: OllamaModelOptions): LanguageModel {
-  const mod = opts?._factory ?? loadOllamaModule();
+  if (!opts?._factory) {
+    throw new Error(
+      "[eidentic/model] createOllamaModel no longer auto-loads an Ollama provider in AI SDK 7.\n" +
+        "Install the v7-compatible provider and pass it directly to AIModel:\n" +
+        '  import { ollama } from "ai-sdk-ollama";\n' +
+        '  const model = new AIModel(ollama("llama3.2"));\n' +
+        "For custom base URLs, use createOllama from ai-sdk-ollama.",
+    );
+  }
+  const mod = opts._factory;
   const provider = mod.createOllama(opts?.baseURL ? { baseURL: opts.baseURL } : undefined);
   return provider(modelId);
 }

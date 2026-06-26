@@ -1,7 +1,7 @@
 /**
  * AI SDK UI message-stream bridge (§ feat/ai-sdk-ui-stream).
  *
- * Converts Eidentic's `StreamEvent` async iterable into the Vercel AI SDK v6
+ * Converts Eidentic's `StreamEvent` async iterable into the Vercel AI SDK v7
  * UI message-stream protocol so that a Next.js `app/api/chat/route.ts` can
  * call `return toUIMessageStreamResponse(agent.query(input, { sessionId }))`
  * and a `useChat` (or CopilotKit) frontend just works.
@@ -70,7 +70,7 @@ export interface ToUIMessageStreamOptions {
 
 /**
  * Converts a Eidentic `StreamEvent` async iterable into a
- * `ReadableStream<UIMessageChunk>` compatible with the Vercel AI SDK v6
+ * `ReadableStream<UIMessageChunk>` compatible with the Vercel AI SDK v7
  * UI message-stream protocol.
  *
  * Use `toUIMessageStreamResponse` for the common case of returning a `Response`

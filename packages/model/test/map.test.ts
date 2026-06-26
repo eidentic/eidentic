@@ -4,7 +4,7 @@ import { encodeMultimodalInput } from "@eidentic/types";
 import { mapMessages, buildTools, mapResult } from "../src/map.js";
 
 describe("mapMessages", () => {
-  it("extracts system messages into the system option and maps the rest", () => {
+  it("extracts system messages into the instructions option and maps the rest", () => {
     const input: KMsg[] = [
       { role: "system", content: "you are helpful" },
       { role: "user", content: "hi" },
@@ -17,8 +17,8 @@ describe("mapMessages", () => {
       },
       { role: "tool", callId: "c0", toolName: "search", content: JSON.stringify({ ok: true }) },
     ];
-    const { system, messages } = mapMessages(input);
-    expect(system).toBe("you are helpful");
+    const { instructions, messages } = mapMessages(input);
+    expect(instructions).toBe("you are helpful");
     expect(messages[0]).toEqual({ role: "user", content: "hi" });
     expect(messages[1]).toEqual({
       role: "assistant",
@@ -34,12 +34,12 @@ describe("mapMessages", () => {
   });
 
   it("concatenates multiple system messages and supports string user content", () => {
-    const { system, messages } = mapMessages([
+    const { instructions, messages } = mapMessages([
       { role: "system", content: "a" },
       { role: "system", content: "b" },
       { role: "user", content: "q" },
     ]);
-    expect(system).toBe("a\n\nb");
+    expect(instructions).toBe("a\n\nb");
     expect(messages).toEqual([{ role: "user", content: "q" }]);
   });
 
@@ -102,11 +102,11 @@ describe("mapMessages — cacheControl", () => {
   ];
 
   it("cacheControl: true → returns a SystemModelMessage with Anthropic ephemeral breakpoint", () => {
-    const { system, messages } = mapMessages(msgs, { cacheControl: true });
-    expect(typeof system).toBe("object");
-    expect((system as any).role).toBe("system");
-    expect((system as any).content).toBe("be helpful");
-    expect((system as any).providerOptions).toEqual({
+    const { instructions, messages } = mapMessages(msgs, { cacheControl: true });
+    expect(typeof instructions).toBe("object");
+    expect((instructions as any).role).toBe("system");
+    expect((instructions as any).content).toBe("be helpful");
+    expect((instructions as any).providerOptions).toEqual({
       anthropic: { cacheControl: { type: "ephemeral" } },
     });
     expect(messages).toHaveLength(1);
@@ -114,28 +114,28 @@ describe("mapMessages — cacheControl", () => {
   });
 
   it("cacheControl: false → returns a plain string (back-compat)", () => {
-    const { system } = mapMessages(msgs, { cacheControl: false });
-    expect(system).toBe("be helpful");
+    const { instructions } = mapMessages(msgs, { cacheControl: false });
+    expect(instructions).toBe("be helpful");
   });
 
   it("no opts → returns a plain string (back-compat)", () => {
-    const { system } = mapMessages(msgs);
-    expect(system).toBe("be helpful");
+    const { instructions } = mapMessages(msgs);
+    expect(instructions).toBe("be helpful");
   });
 
-  it("cacheControl: true with no system messages → system is undefined (no marker injected)", () => {
-    const { system } = mapMessages([{ role: "user", content: "hi" }], { cacheControl: true });
-    expect(system).toBeUndefined();
+  it("cacheControl: true with no system messages → instructions is undefined (no marker injected)", () => {
+    const { instructions } = mapMessages([{ role: "user", content: "hi" }], { cacheControl: true });
+    expect(instructions).toBeUndefined();
   });
 
   it("cacheControl: true with multiple system messages → concatenated text in SystemModelMessage", () => {
-    const { system } = mapMessages(
+    const { instructions } = mapMessages(
       [{ role: "system", content: "a" }, { role: "system", content: "b" }, { role: "user", content: "q" }],
       { cacheControl: true },
     );
-    expect(typeof system).toBe("object");
-    expect((system as any).content).toBe("a\n\nb");
-    expect((system as any).providerOptions?.anthropic?.cacheControl?.type).toBe("ephemeral");
+    expect(typeof instructions).toBe("object");
+    expect((instructions as any).content).toBe("a\n\nb");
+    expect((instructions as any).providerOptions?.anthropic?.cacheControl?.type).toBe("ephemeral");
   });
 });
 

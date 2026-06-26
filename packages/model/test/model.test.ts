@@ -1,18 +1,23 @@
 import { describe, it, expect } from "vitest";
-import { MockLanguageModelV3, simulateReadableStream } from "ai/test";
+import { MockLanguageModelV4, simulateReadableStream } from "ai/test";
 import type { ModelMessage, ModelStreamPart } from "@eidentic/types";
 import { AIModel } from "../src/model.js";
 
+const usage = (inputTokens: number, outputTokens: number, cacheRead?: number) => ({
+  inputTokens: { total: inputTokens, noCache: cacheRead === undefined ? inputTokens : inputTokens - cacheRead, cacheRead, cacheWrite: undefined },
+  outputTokens: { total: outputTokens, text: outputTokens, reasoning: undefined },
+});
+
 function mockReturning(
   content: any[],
-  usage = { inputTokens: { total: 80 }, outputTokens: { total: 30 } },
+  tokenUsage = usage(80, 30),
   finishReason: any = { unified: "stop", raw: "end" },
 ) {
   let received: any = null;
-  const model = new MockLanguageModelV3({
+  const model = new MockLanguageModelV4({
     doGenerate: async (options: any) => {
       received = options;
-      return { content, finishReason, usage, warnings: [] };
+      return { content, finishReason, usage: tokenUsage, warnings: [] };
     },
   });
   return { model, getReceived: () => received };
@@ -124,7 +129,7 @@ describe("AIModel", () => {
     const port = new AIModel(model);
     await port.complete({ messages, tools: [], cacheControl: true });
     const sent = getReceived();
-    // The AI SDK maps the system option into a prompt entry with role:"system".
+    // The AI SDK maps the instructions option into a prompt entry with role:"system".
     const systemMsg = (sent.prompt as any[]).find((m: any) => m.role === "system");
     expect(systemMsg).toBeDefined();
     expect(systemMsg.providerOptions).toEqual({ anthropic: { cacheControl: { type: "ephemeral" } } });
@@ -142,7 +147,7 @@ describe("AIModel", () => {
 
 describe("AIModel.stream", () => {
   it("yields text deltas then a final assembled response with tool call + usage", async () => {
-    const model = new MockLanguageModelV3({
+    const model = new MockLanguageModelV4({
       doStream: async () => ({
         stream: simulateReadableStream({
           chunks: [
@@ -151,7 +156,7 @@ describe("AIModel.stream", () => {
             { type: "text-delta", id: "t1", delta: ", world" },
             { type: "text-end", id: "t1" },
             { type: "tool-call", toolCallId: "c1", toolName: "get_weather", input: '{"city":"Paris"}' },
-            { type: "finish", finishReason: { unified: "tool-calls", raw: "tool_calls" }, usage: { inputTokens: { total: 10 }, outputTokens: { total: 20 } } },
+            { type: "finish", finishReason: { unified: "tool-calls", raw: "tool_calls" }, usage: usage(10, 20) },
           ],
           initialDelayInMs: 0,
           chunkDelayInMs: 0,
@@ -180,6 +185,37 @@ describe("AIModel.stream", () => {
       },
     });
   });
+
+  it("surfaces structured output from the AI SDK v7 stream result on terminal turns", async () => {
+    const model = new MockLanguageModelV4({
+      doStream: async () => ({
+        stream: simulateReadableStream({
+          chunks: [
+            { type: "text-start", id: "t1" },
+            { type: "text-delta", id: "t1", delta: '{"answer":' },
+            { type: "text-delta", id: "t1", delta: "42}" },
+            { type: "text-end", id: "t1" },
+            { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage: usage(12, 6) },
+          ],
+          initialDelayInMs: 0,
+          chunkDelayInMs: 0,
+        }),
+      }),
+    });
+    const port = new AIModel(model);
+    const parts: ModelStreamPart[] = [];
+    for await (const p of port.stream!({
+      messages: [{ role: "user", content: "answer as JSON" }],
+      tools: [],
+      outputSchema: { type: "object", properties: { answer: { type: "number" } }, required: ["answer"] },
+    })) parts.push(p);
+
+    const final = parts.at(-1);
+    expect(final?.type).toBe("final");
+    if (final?.type !== "final") return;
+    expect(final.response.object).toEqual({ answer: 42 });
+    expect(final.response.usage).toEqual({ inputTokens: 12, outputTokens: 6 });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -190,14 +226,14 @@ describe("M17 fix — AIModel.stream: aborted signal throws AbortError instead o
   it("throws a DOMException AbortError when the signal is already aborted before the stream ends", async () => {
     const controller = new AbortController();
 
-    const model = new MockLanguageModelV3({
+    const model = new MockLanguageModelV4({
       doStream: async () => ({
         stream: simulateReadableStream({
           chunks: [
             { type: "text-start", id: "t1" },
             { type: "text-delta", id: "t1", delta: "partial" },
             { type: "text-end", id: "t1" },
-            { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage: { inputTokens: { total: 5 }, outputTokens: { total: 3 } } },
+            { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage: usage(5, 3) },
           ],
           initialDelayInMs: 0,
           chunkDelayInMs: 0,
@@ -234,14 +270,14 @@ describe("M17 fix — AIModel.stream: aborted signal throws AbortError instead o
     const controller = new AbortController();
     // Do NOT abort — normal run.
 
-    const model = new MockLanguageModelV3({
+    const model = new MockLanguageModelV4({
       doStream: async () => ({
         stream: simulateReadableStream({
           chunks: [
             { type: "text-start", id: "t1" },
             { type: "text-delta", id: "t1", delta: "ok" },
             { type: "text-end", id: "t1" },
-            { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage: { inputTokens: { total: 2 }, outputTokens: { total: 1 } } },
+            { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage: usage(2, 1) },
           ],
           initialDelayInMs: 0,
           chunkDelayInMs: 0,
