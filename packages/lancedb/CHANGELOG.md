@@ -1,5 +1,12 @@
 # @eidentic/lancedb
 
+## 0.2.4
+
+### Patch Changes
+
+- Updated dependencies [4cf1e3b]
+  - @eidentic/types@0.5.0
+
 ## 0.2.3
 
 ### Patch Changes

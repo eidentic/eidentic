@@ -1,5 +1,13 @@
 # @eidentic/mcp
 
+## 0.2.2
+
+### Patch Changes
+
+- Updated dependencies [4cf1e3b]
+  - @eidentic/core@0.4.0
+  - @eidentic/types@0.5.0
+
 ## 0.2.1
 
 ### Patch Changes

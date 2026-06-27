@@ -1,5 +1,13 @@
 # @eidentic/rag
 
+## 0.1.8
+
+### Patch Changes
+
+- Updated dependencies [4cf1e3b]
+  - @eidentic/types@0.5.0
+  - @eidentic/tools@0.1.8
+
 ## 0.1.7
 
 ### Patch Changes

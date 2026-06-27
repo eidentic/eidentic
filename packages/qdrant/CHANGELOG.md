@@ -1,5 +1,12 @@
 # @eidentic/qdrant
 
+## 0.2.6
+
+### Patch Changes
+
+- Updated dependencies [4cf1e3b]
+  - @eidentic/types@0.5.0
+
 ## 0.2.5
 
 ### Patch Changes
