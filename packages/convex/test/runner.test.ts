@@ -4,6 +4,7 @@ import {
   convexActionRunner,
   defaultStoreFns,
   defaultVectorFns,
+  fromActionCtx,
   storeFnsFrom,
   vectorFnsFrom,
   type ConvexActionCtxLike,
@@ -62,6 +63,34 @@ describe("Convex in-process runner helpers", () => {
     await expect(store.getBlocks({ kind: "agent", agentId: "agent1" })).resolves.toEqual([]);
     expect(calls).toEqual([
       { fn: "component/functions:getBlocks", args: { scopeKey: "agent:agent1" } },
+    ]);
+  });
+
+  it("builds component stores from an action context", async () => {
+    const calls: Array<{ kind: string; fn: unknown; args: Record<string, unknown> }> = [];
+    const ctx: ConvexActionCtxLike = {
+      runQuery: async (fn, args) => {
+        calls.push({ kind: "query", fn, args });
+        return [];
+      },
+      runMutation: async (fn, args) => {
+        calls.push({ kind: "mutation", fn, args });
+        return null;
+      },
+    };
+
+    const { store, vectors } = fromActionCtx(ctx, {
+      functions: {
+        ...defaultStoreFns("component/functions"),
+        ...defaultVectorFns("component/functions"),
+      },
+    });
+
+    await expect(store.getBlocks({ kind: "agent", agentId: "agent1" })).resolves.toEqual([]);
+    await expect(vectors.list("agent:agent1")).resolves.toEqual([]);
+    expect(calls).toEqual([
+      { kind: "query", fn: "component/functions:getBlocks", args: { scopeKey: "agent:agent1" } },
+      { kind: "query", fn: "component/functions:vectorList", args: { scopeKey: "agent:agent1" } },
     ]);
   });
 });

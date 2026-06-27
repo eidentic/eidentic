@@ -35,6 +35,7 @@ import {
   type IdempotencyMetadata,
   type SuspendDecision,
 } from "@eidentic/types";
+import type { FunctionReference, FunctionReturnType, OptionalRestArgs } from "convex/server";
 
 // Re-export the authorization hook + secure factory so apps can import them from "@eidentic/convex".
 // (The handler functions themselves live at "@eidentic/convex/server" and are re-exported from the
@@ -191,11 +192,56 @@ export function convexHttpRunner(client: ConvexHttpClientLike): ConvexRunner {
   };
 }
 
-/** Minimal structural view of Convex's `ActionCtx` / mutation ctx runner methods. */
+/** Minimal normalized view of Convex runner methods. Useful for tests and custom bridges. */
 export interface ConvexActionCtxLike {
   runQuery(fn: unknown, args: Record<string, unknown>): Promise<unknown>;
   runMutation(fn: unknown, args: Record<string, unknown>): Promise<unknown>;
   runAction?: (fn: unknown, args: Record<string, unknown>) => Promise<unknown>;
+}
+
+type QueryFunctionReference = FunctionReference<"query", "public" | "internal">;
+type MutationFunctionReference = FunctionReference<"mutation", "public" | "internal">;
+type ActionFunctionReference = FunctionReference<"action", "public" | "internal">;
+
+/**
+ * Structural view of Convex's generated action/mutation contexts.
+ *
+ * Convex types `ctx.runQuery`, `ctx.runMutation`, and `ctx.runAction` with generic
+ * `FunctionReference` parameters. The SDK normalizes that stricter signature internally so host
+ * apps can pass their generated `ActionCtx` or `MutationCtx` directly without writing an
+ * `unknown` bridge.
+ */
+export interface ConvexFunctionRefCtxLike {
+  runQuery<Query extends QueryFunctionReference>(
+    query: Query,
+    ...args: OptionalRestArgs<Query>
+  ): Promise<FunctionReturnType<Query>>;
+  runMutation<Mutation extends MutationFunctionReference>(
+    mutation: Mutation,
+    ...args: OptionalRestArgs<Mutation>
+  ): Promise<FunctionReturnType<Mutation>>;
+  runAction?<Action extends ActionFunctionReference>(
+    action: Action,
+    ...args: OptionalRestArgs<Action>
+  ): Promise<FunctionReturnType<Action>>;
+}
+
+/** Accepted Convex action context shapes for in-process component calls. */
+export type ConvexActionCtxInput = ConvexActionCtxLike | ConvexFunctionRefCtxLike;
+
+function normalizeActionCtx(ctx: ConvexActionCtxInput): ConvexActionCtxLike {
+  const runQuery = ctx.runQuery as unknown as ConvexActionCtxLike["runQuery"];
+  const runMutation = ctx.runMutation as unknown as ConvexActionCtxLike["runMutation"];
+  const runAction =
+    "runAction" in ctx && ctx.runAction
+      ? (ctx.runAction as unknown as NonNullable<ConvexActionCtxLike["runAction"]>)
+      : undefined;
+
+  return {
+    runQuery: (fn, args) => runQuery.call(ctx, fn, args),
+    runMutation: (fn, args) => runMutation.call(ctx, fn, args),
+    ...(runAction ? { runAction: (fn, args) => runAction.call(ctx, fn, args) } : {}),
+  };
 }
 
 /**
@@ -203,13 +249,14 @@ export interface ConvexActionCtxLike {
  * host actions authenticate and assemble business context, then call Eidentic component functions
  * through `ctx.runQuery` / `ctx.runMutation`.
  */
-export function convexActionRunner(ctx: ConvexActionCtxLike): ConvexRunner {
+export function convexActionRunner(ctx: ConvexActionCtxInput): ConvexRunner {
+  const actionCtx = normalizeActionCtx(ctx);
   return {
-    query: (fn, args) => ctx.runQuery(fn, args),
-    mutation: (fn, args) => ctx.runMutation(fn, args),
+    query: (fn, args) => actionCtx.runQuery(fn, args),
+    mutation: (fn, args) => actionCtx.runMutation(fn, args),
     action: (fn, args) => {
-      if (!ctx.runAction) throw new Error("ctx.runAction is not available on this Convex context");
-      return ctx.runAction(fn, args);
+      if (!actionCtx.runAction) throw new Error("ctx.runAction is not available on this Convex context");
+      return actionCtx.runAction(fn, args);
     },
   };
 }
@@ -499,7 +546,7 @@ export interface EidenticComponentStoreOptions extends Omit<ConvexStoreOptions, 
 }
 
 export class EidenticComponentStore extends ConvexStore {
-  constructor(ctx: ConvexActionCtxLike, component: unknown, opts: EidenticComponentStoreOptions = {}) {
+  constructor(ctx: ConvexActionCtxInput, component: unknown, opts: EidenticComponentStoreOptions = {}) {
     const { fns, ...storeOpts } = opts;
     super(convexActionRunner(ctx), { ...storeOpts, fns: fns ?? storeFnsFrom(component) });
   }
@@ -553,8 +600,37 @@ export interface EidenticComponentVectorStoreOptions extends Omit<ConvexVectorSt
 }
 
 export class EidenticComponentVectorStore extends ConvexVectorStore {
-  constructor(ctx: ConvexActionCtxLike, component: unknown, opts: EidenticComponentVectorStoreOptions = {}) {
+  constructor(ctx: ConvexActionCtxInput, component: unknown, opts: EidenticComponentVectorStoreOptions = {}) {
     const { fns } = opts;
     super(convexActionRunner(ctx), { fns: fns ?? vectorFnsFrom(component) });
   }
+}
+
+export interface EidenticFromActionCtxOptions {
+  /** Options for the durable store. */
+  store?: EidenticComponentStoreOptions;
+  /** Options for the vector store. */
+  vectors?: EidenticComponentVectorStoreOptions;
+}
+
+export interface EidenticFromActionCtxResult {
+  store: EidenticComponentStore;
+  vectors: EidenticComponentVectorStore;
+}
+
+/**
+ * Build Eidentic component stores directly from a Convex action context.
+ *
+ * This is the ergonomic component entry point for host apps using generated Convex `ActionCtx`
+ * types. It keeps the unavoidable opaque function-reference normalization inside the SDK.
+ */
+export function fromActionCtx(
+  ctx: ConvexActionCtxInput,
+  component: unknown,
+  opts: EidenticFromActionCtxOptions = {},
+): EidenticFromActionCtxResult {
+  return {
+    store: new EidenticComponentStore(ctx, component, opts.store),
+    vectors: new EidenticComponentVectorStore(ctx, component, opts.vectors),
+  };
 }
