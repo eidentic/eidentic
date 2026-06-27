@@ -1,6 +1,6 @@
 {
   "name": "@eidentic/convex",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "type": "module",
   "license": "Apache-2.0",
   "publishConfig": {
