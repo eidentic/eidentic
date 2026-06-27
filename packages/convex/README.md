@@ -45,13 +45,12 @@ resolved workspace/org/business context:
 ```ts
 import { components } from "./_generated/api";
 import { action } from "./_generated/server";
-import { EidenticComponentStore, EidenticComponentVectorStore } from "@eidentic/convex/component";
+import { fromActionCtx } from "@eidentic/convex/component";
 
 export const runAgent = action({
   args: {},
   handler: async (ctx) => {
-    const store = new EidenticComponentStore(ctx, components.eidentic);
-    const vectors = new EidenticComponentVectorStore(ctx, components.eidentic);
+    const { store, vectors } = fromActionCtx(ctx, components.eidentic);
 
     await store.upsertBlock(
       { kind: "agent", agentId: "support-bot" },
@@ -62,6 +61,11 @@ export const runAgent = action({
   },
 });
 ```
+
+`fromActionCtx` accepts Convex's generated `ActionCtx` directly and normalizes the stricter
+`FunctionReference` runner signatures inside the SDK. Host apps no longer need a local
+`unknown -> FunctionReference` bridge. If you prefer manual construction, `EidenticComponentStore`
+and `EidenticComponentVectorStore` also accept the generated action context directly.
 
 Component tables use singular snake_case names internally:
 

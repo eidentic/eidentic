@@ -65,7 +65,7 @@
   ],
   "scripts": {
     "build": "tsup src/index.ts src/schema.ts src/server.ts src/component.ts src/component/convex.config.ts src/component/schema.ts src/component/functions.ts src/app-functions/index.ts src/app-functions/schema.ts src/app-functions/server.ts --format esm,cjs --dts --clean",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
     "test": "vitest run"
   },
   "dependencies": {
