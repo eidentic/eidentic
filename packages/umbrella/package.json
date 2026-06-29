@@ -41,7 +41,7 @@
     "ai": "^7.0.0"
   },
   "devDependencies": {
-    "ai": "^7.0.2"
+    "ai": "^7.0.4"
   },
   "description": "The open-source TypeScript SDK for AI agents with self-improving memory and production fundamentals built in.",
   "keywords": [
