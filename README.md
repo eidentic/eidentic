@@ -68,6 +68,37 @@ Eidentic is a **library first**. You don't have to run a separate service — yo
 straight into your own backend and call `agent.query()`. Running it as a standalone HTTP
 service is an *optional* second mode for when you want agents-as-a-service.
 
+### No-key install smoke
+
+Before wiring a real provider, verify a fresh install with the API-key-free testing subpath:
+
+```bash
+npm init -y
+npm install eidentic
+```
+
+```ts
+import { Agent, textBlock } from "eidentic";
+import { InMemoryStore, MockModel } from "eidentic/testing";
+
+const store = new InMemoryStore();
+await store.migrate();
+
+const agent = new Agent({
+  id: "smoke",
+  instructions: "Reply once.",
+  model: new MockModel([{ content: [textBlock("ok")], usage: { inputTokens: 1, outputTokens: 1 } }]),
+  store,
+});
+
+for await (const ev of agent.query("hello", { sessionId: "s1" })) {
+  if (ev.type === "result") console.log(ev.output);
+}
+```
+
+`eidentic/testing` is for local smoke tests and adapter conformance; production code should use
+a real model and persistent store.
+
 ### 1. Embedded — drop it into your app (the common path)
 
 One install, then construct an agent and stream it from any request handler. The agent runs
@@ -283,6 +314,9 @@ A few defaults are safe for local development but need attention before going pu
 - [Benchmarks](docs/BENCHMARKS.md) — methodology and reproducible numbers
 - [Runtime support matrix](docs/RUNTIMES.md) — Node / Bun / Deno / edge
 - [Feature tour](docs/TESTING.md) — run every feature locally
+- [Production patterns](docs/PRODUCTION-PATTERNS.md) — gateway, custom store, HITL, auth, tenancy, audit
+- [Launch feedback triage](docs/LAUNCH-FEEDBACK.md) — v1 feedback loop, priorities, release closeout
+- [Dependency migration notes](docs/DEPENDENCY-MIGRATIONS.md) — v1 major-upgrade and audit-patch decisions
 - [Design spec](docs/design/master-design.md) — the full architecture
 - [Stability policy](STABILITY.md) — versioning contract, stability tiers, conformance-suite promise
 - [Full docs](https://docs.eidentic.dev) — guides, API reference, and examples ([source](https://github.com/eidentic/docs))

@@ -17,7 +17,7 @@ Honest, reproducible performance numbers. As of **June 2026**, on a single machi
   per-request time.
 - **Cold start (import the built SDK): 12–31 ms** across Node / Bun / Deno — cheap enough for
   serverless and edge.
-- **Tiny install footprint:** `@eidentic/core` is **22.5 KB gzipped**; the `eidentic` umbrella
+- **Tiny install footprint:** `@eidentic/core` is **34.9 KB gzipped**; the `eidentic` umbrella
   entry is **0.6 KB**.
 - **Verified on Node, Bun, and Deno** — the same numbers, same code, no per-runtime forks.
 
@@ -68,17 +68,30 @@ counts against an edge bundle budget:
 
 | Package | Raw | Gzipped |
 |---|---:|---:|
-| `@eidentic/core` | 93.7 KB | **22.5 KB** |
-| `@eidentic/model` | 52.2 KB | 6.7 KB |
-| `@eidentic/tools` | 25.7 KB | 6.5 KB |
-| `@eidentic/memory` | 24.2 KB | 7.2 KB |
-| `@eidentic/sqlite` | 18.6 KB | 4.6 KB |
-| `@eidentic/server` | 11.7 KB | 2.9 KB |
-| `@eidentic/types` | 1.7 KB | 0.7 KB |
+| `@eidentic/core` | 145.7 KB | **34.9 KB** |
+| `@eidentic/model` | 62.2 KB | 9.5 KB |
+| `@eidentic/tools` | 28.7 KB | 7.2 KB |
+| `@eidentic/memory` | 53.2 KB | 15.9 KB |
+| `@eidentic/sqlite` | 23.3 KB | 5.7 KB |
+| `@eidentic/server` | 56.9 KB | 14.0 KB |
+| `@eidentic/types` | 4.3 KB | 1.7 KB |
 | `eidentic` (umbrella entry) | 1.8 KB | 0.6 KB |
+| `eidentic/testing` | 0.5 KB | 0.2 KB |
+| `@eidentic/studio` UI entry chunk | 230.1 KB | 69.4 KB |
 
 You only pay for the adapters you import — the ports-and-adapters layout means a Postgres
 deployment never bundles SQLite, an edge deployment never bundles native addons, etc.
+
+The release budget check is deterministic and can run after a build:
+
+```bash
+pnpm -r build
+pnpm run perf:budget
+```
+
+It fails if core package gzip sizes or the Studio UI entry chunk exceed the committed budgets.
+Use this as the cheap regression guard; use the overhead benchmark below when you need runtime
+latency numbers.
 
 ## Cross-runtime
 
