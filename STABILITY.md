@@ -1,19 +1,20 @@
 # Stability Policy
 
-Eidentic is pre-1.0, moving toward a stable v1. Stability is a differentiator, not a
-footnote. This document states exactly what you can rely on, at what version boundary
-breaking changes may occur, and which parts of the API are still being refined.
+Eidentic's coordinated repository release is v1.0. npm packages in this monorepo are
+independently versioned, so some package versions may still be below 1.0; the stability
+tiers below define what you can rely on, at what boundary breaking changes may occur,
+and which parts of the API are still being refined.
 
 ---
 
 ## Versioning contract
 
-### Pre-1.0 (current: 0.x)
+### From the v1 release line
 
 | Change type | Allowed in |
 | ----------- | ---------- |
-| Breaking changes to **Stable** APIs | **MINOR** releases only (e.g. 0.5 → 0.6) |
-| Breaking changes to **Stabilizing** APIs | MINOR releases |
+| Breaking changes to **Stable** APIs | Explicit coordinated breaking release only, with migration notes |
+| Breaking changes to **Stabilizing** APIs | MINOR releases, with migration notes |
 | Breaking changes to **Experimental** APIs | Any release (MINOR or PATCH) |
 | New features (non-breaking) | MINOR or PATCH |
 | Bug fixes | PATCH |
@@ -21,18 +22,9 @@ breaking changes may occur, and which parts of the API are still being refined.
 
 **PATCH releases never contain breaking changes to Stable or Stabilizing APIs.**
 
-Every MINOR release that contains a breaking change ships a changelog entry with migration
-notes that describe exactly what changed and how to update call sites. We aim for mechanical,
+Every release that contains a breaking change ships a changelog entry with migration notes
+that describe exactly what changed and how to update call sites. We aim for mechanical,
 find-and-replace migrations wherever possible.
-
-### From 1.0
-
-| Change type | Allowed in |
-| ----------- | ---------- |
-| Breaking changes | **MAJOR** releases only |
-| Deprecations | MINOR (with runtime warning in the next MINOR or PATCH where feasible) |
-| New features | MINOR |
-| Bug fixes / security | PATCH |
 
 Deprecations are announced at least **2 MINOR versions before removal** and, where the
 runtime shape allows it, ship a `console.warn` deprecation notice so call sites are visible
@@ -45,7 +37,7 @@ in logs without requiring a code audit.
 ### Stable
 
 The contracts below are the most load-bearing parts of the framework. They will not change
-without a MINOR-version breaking-change notice and migration guide.
+without an explicit breaking-change notice and migration guide.
 
 | Area | Key symbols / packages |
 | ---- | ---------------------- |
@@ -104,7 +96,7 @@ for (const c of storeConformanceCases) {
 
 Any adapter that passes the conformance suite is guaranteed to work correctly as a drop-in
 replacement for the built-in stores. We will not change the conformance cases in a way that
-invalidates passing adapters without a MINOR-version bump and migration notes.
+invalidates passing adapters without an explicit migration release and migration notes.
 
 ---
 
@@ -112,6 +104,6 @@ invalidates passing adapters without a MINOR-version bump and migration notes.
 
 - **Changelog:** breaking changes and migration notes are generated from changesets at each
   release. See [GitHub releases](https://github.com/eidentic/eidentic/releases) for the
-  history once v1.0 ships.
+  history from v1.0 onward.
 - **Questions:** open a discussion or file an issue on GitHub — stability concerns are
   treated as high-priority.
