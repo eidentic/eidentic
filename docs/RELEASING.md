@@ -47,13 +47,18 @@ Do not tag `v1.0.0` until these checks are true:
 - CI is green for Node 22 and Node 24.
 - Cross-runtime smoke is green for Node, Bun, and Deno.
 - `pnpm audit --audit-level low` reports no known vulnerabilities.
+- `pnpm run perf:budget` passes after `pnpm -r build`.
 - README and package README examples match the current public API.
 - Fresh install quickstarts work from outside the monorepo.
+- Launch feedback is triaged using [LAUNCH-FEEDBACK.md](LAUNCH-FEEDBACK.md); every open `p1`
+  has an owner and explicit release decision.
 - npm Trusted Publishing is the only normal publish path.
 - Public API stability is documented for core packages and experimental surfaces are named explicitly.
 - Release notes call out breaking changes, migration notes, security changes, and known limitations.
 
 For v1, major dependency migrations must be handled as explicit migration PRs, not automatic grouped dependency updates.
+See [DEPENDENCY-MIGRATIONS.md](DEPENDENCY-MIGRATIONS.md) for the current TypeScript, Vite,
+pglite, and release-tooling decisions.
 
 ## Release Flow
 

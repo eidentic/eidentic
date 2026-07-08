@@ -44,6 +44,15 @@ import {
   regexPiiGuardrail,
   topicGuardrail,
 } from "eidentic";
+import {
+  FakeEmbedder,
+  EchoSandbox,
+  InMemoryStore,
+  InMemoryTracer,
+  InMemoryVectorStore,
+  MockModel,
+  StreamMockModel,
+} from "eidentic/testing";
 import type {
   Scope,
   ModelPort,
@@ -245,6 +254,26 @@ describe("eidentic umbrella smoke test", () => {
 
   it("exports topicGuardrail", () => {
     expect(topicGuardrail).toBeDefined();
+  });
+
+  it("exports no-key testing fakes from eidentic/testing", async () => {
+    expect(MockModel).toBeDefined();
+    expect(StreamMockModel).toBeDefined();
+    expect(InMemoryStore).toBeDefined();
+    expect(InMemoryVectorStore).toBeDefined();
+    expect(FakeEmbedder).toBeDefined();
+    expect(InMemoryTracer).toBeDefined();
+    expect(EchoSandbox).toBeDefined();
+
+    const store = new InMemoryStore();
+    await store.migrate();
+    const model = new MockModel([{ content: [textBlock("hello from mock")], usage: { inputTokens: 1, outputTokens: 1 } }]);
+    const agent = new Agent({ id: "testing-smoke", instructions: "Reply once.", model, store });
+    const events = [];
+    for await (const ev of agent.query("hello", { sessionId: "testing-smoke-s1" })) {
+      events.push(ev);
+    }
+    expect(events.at(-1)).toMatchObject({ type: "result", subtype: "success", output: "hello from mock" });
   });
 
   it("type imports resolve (Scope, ModelPort, StorePort, MemoryPort, AgentConfig, Tool)", () => {

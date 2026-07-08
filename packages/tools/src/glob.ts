@@ -1,5 +1,5 @@
 import { readdir } from "node:fs/promises";
-import { join, relative, sep } from "node:path";
+import { join, sep } from "node:path";
 
 /** Hard cap on pattern and path lengths to prevent algorithmic DoS. */
 const MAX_PATTERN_LEN = 1024;
@@ -124,4 +124,4 @@ export async function matchGlob(root: string, pattern: string): Promise<string[]
     .sort();
 }
 
-export { relative };
+export { relative } from "node:path";

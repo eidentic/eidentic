@@ -34,6 +34,7 @@ export default defineConfig({
       "@eidentic/cli": src("./packages/cli/src/commands.ts"),
       "@eidentic/langfuse": src("./packages/langfuse/src/index.ts"),
       "@eidentic/workflow": src("./packages/workflow/src/index.ts"),
+      "eidentic/testing": src("./packages/umbrella/src/testing.ts"),
       eidentic: src("./packages/umbrella/src/index.ts"),
     },
   },

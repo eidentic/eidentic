@@ -12,7 +12,7 @@ export default defineConfig([
   // Library bundle (index) — ESM + types. AI SDK v7 is ESM-only, so the
   // umbrella package cannot safely expose a CommonJS entrypoint.
   {
-    entry: { index: "src/index.ts" },
+    entry: { index: "src/index.ts", testing: "src/testing.ts" },
     format: ["esm"],
     dts: true,
     clean: true,

@@ -20,6 +20,29 @@ ESM `import`, not CommonJS `require()`.
 
 ## Quickstart
 
+No API key needed:
+
+```ts
+import { Agent, textBlock } from "eidentic";
+import { InMemoryStore, MockModel } from "eidentic/testing";
+
+const store = new InMemoryStore();
+await store.migrate();
+
+const agent = new Agent({
+  id: "smoke",
+  instructions: "Reply once.",
+  model: new MockModel([{ content: [textBlock("ok")], usage: { inputTokens: 1, outputTokens: 1 } }]),
+  store,
+});
+
+for await (const ev of agent.query("hello", { sessionId: "s1" })) {
+  if (ev.type === "result") console.log(ev.output);
+}
+```
+
+Real provider:
+
 ```ts
 import { Agent, AIModel, SqliteStore } from "eidentic";
 import { anthropic } from "@ai-sdk/anthropic";

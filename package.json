@@ -12,6 +12,7 @@
     "test:watch": "vitest",
     "typecheck": "turbo run typecheck",
     "check:readme": "node scripts/check-readme-examples.mjs",
+    "perf:budget": "node scripts/perf-budget.mjs",
     "changeset": "changeset",
     "version": "changeset version",
     "release:check": "node scripts/release.mjs check",
@@ -21,7 +22,7 @@
     "release": "pnpm run release:publish"
   },
   "devDependencies": {
-    "@changesets/cli": "^2.27.0",
+    "@changesets/cli": "^2.31.0",
     "turbo": "^2.9.18",
     "typescript": "^5.9.0",
     "tsup": "^8.3.0",
