@@ -3,7 +3,7 @@
 Honest, reproducible performance numbers. As of **June 2026**, on a single machine
 (Apple Silicon, arm64, 12 cores, Node v24.13.1).
 
-> **What these are — and aren't.** Eidentic is pre-1.0. The numbers below are *framework
+> **What these are — and aren't.** The numbers below are *framework
 > overhead, cold-start, bundle size, and cross-runtime* measurements — the "production
 > fundamentals" we claim. They are fully reproducible from this repo. The *memory-accuracy*
 > numbers (LongMemEval / LoCoMo answer accuracy) require the licensed datasets and a real model

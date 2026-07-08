@@ -13,7 +13,7 @@ Runs on **Node, Bun, Deno, and the edge**.
 
 [![Featured on Product Hunt](https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1169568&theme=dark)](https://www.producthunt.com/products/eidentic?utm_source=badge-featured&utm_medium=badge)
 
-> **Status: 0.x — APIs stabilizing toward v1; see [STABILITY](STABILITY.md).**
+> **Status: v1 release line — stable API tiers and independently versioned packages are documented in [STABILITY](STABILITY.md).**
 > We'd rather over-disclose gaps than oversell — see the
 > [benchmarks](docs/BENCHMARKS.md) for honest, reproducible numbers.
 

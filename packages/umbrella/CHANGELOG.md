@@ -1,5 +1,13 @@
 # eidentic
 
+## 0.4.0
+
+### Minor Changes
+
+- 3987d37: Add the `eidentic/testing` subpath for no-key fresh-install smoke tests and adapter conformance helpers.
+
+  Clean up the tools glob helper re-export so release builds stay quieter.
+
 ## 0.3.0
 
 ### Minor Changes
