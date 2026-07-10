@@ -49,12 +49,12 @@ export async function resumeWorkflow<I, O>(
   opts: ResumeOptions,
 ): Promise<ResumeResult<O>> {
   const { registry, decision } = opts;
-  const prev = registry.get(runId);
-  if (prev === undefined) {
+  const initial = registry.get(runId);
+  if (initial === undefined) {
     throw new Error(`resumeWorkflow: unknown run id "${runId}"`);
   }
-  if (prev.runStatus !== "suspended" || prev.suspension === undefined) {
-    throw new Error(`resumeWorkflow: run "${runId}" is not suspended (status: ${prev.runStatus ?? prev.status})`);
+  if (initial.suspension === undefined) {
+    throw new Error(`resumeWorkflow: run "${runId}" is not suspended (status: ${initial.runStatus ?? initial.status})`);
   }
 
   const body = getWorkflowBody<I, O>(workflow);
@@ -64,7 +64,8 @@ export async function resumeWorkflow<I, O>(
     );
   }
 
-  const { token, cache, input } = prev.suspension;
+  const { record: prev, claimId } = await registry.claimResume(runId, initial.suspension.token);
+  const { token, cache, input } = prev.suspension!;
   // Seed the pending gate's decision so replay resolves it instead of suspending.
   const seededCache = {
     steps: { ...cache.steps },
@@ -91,7 +92,7 @@ export async function resumeWorkflow<I, O>(
       suspension: undefined,
     };
     delete errRec.suspension;
-    const record = registry.update(runId, errRec);
+    const record = await registry.finishResume(runId, claimId, errRec);
     return { kind: "error", record, error: exec.err };
   }
 
@@ -111,7 +112,7 @@ export async function resumeWorkflow<I, O>(
       },
       ...(meta?.version !== undefined ? { version: meta.version } : {}),
     };
-    const record = registry.update(runId, nextRec);
+    const record = await registry.finishResume(runId, claimId, nextRec);
     return { kind: "suspended", record, token: exec.signal.token, payload: exec.signal.payload };
   }
 
@@ -132,6 +133,6 @@ export async function resumeWorkflow<I, O>(
     suspension: undefined,
   };
   delete completedRec.suspension;
-  const record = registry.update(runId, completedRec);
+  const record = await registry.finishResume(runId, claimId, completedRec);
   return { kind: "completed", record, output: exec.output, trace };
 }
