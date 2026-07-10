@@ -202,14 +202,13 @@ describe("resume() ownership check (§M2)", () => {
     }).rejects.toThrow(/ownership mismatch/i);
   });
 
-  it("no caller identity + session has owner → no check, succeeds (legacy path)", async () => {
+  it("no caller identity + session has owner → rejects fail-closed", async () => {
     const store = new InMemoryStore();
     await store.migrate();
     await store.createSession({ id: "sess-owned-nocheck", agentId: "owner-agent", createdAt: "t", userId: "charlie" });
     const agent = makeAgent(store);
-    // No identity passed → back-compat: skip check
-    const events: unknown[] = [];
-    for await (const e of agent.resume("sess-owned-nocheck")) events.push(e);
-    expect(events.length).toBeGreaterThan(0);
+    await expect(async () => {
+      for await (const _ of agent.resume("sess-owned-nocheck")) { /* */ }
+    }).rejects.toThrow(/ownership mismatch/i);
   });
 });

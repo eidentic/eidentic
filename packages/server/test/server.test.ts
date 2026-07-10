@@ -639,17 +639,59 @@ describe("session ownership (Fix 3a IDOR)", () => {
     expect(Array.isArray(body.events)).toBe(true);
   });
 
-  it("events: no-owner session (legacy) is accessible by any authenticated principal", async () => {
+  it("events: no-owner legacy session is denied when authentication is configured", async () => {
     // Create a session directly in the store without a userId (simulates a pre-Fix-1 legacy session)
     const { app, store } = makeOwnershipApp([]);
     await store.migrate();
     await store.createSession({ id: "legacy-sess", agentId: "demo", createdAt: new Date().toISOString() });
 
-    // Bob reads the legacy session → 200 (back-compat: no owner = allow)
+    // Authenticated multi-tenant mode must fail closed for ownerless legacy data.
     const eventsRes = await app.request("/v1/agents/demo/sessions/legacy-sess/events", {
       headers: { authorization: "Bearer key-bob" },
     });
+    expect(eventsRes.status).toBe(403);
+  });
+
+  it("events: ownerless legacy access requires an explicit compatibility opt-in", async () => {
+    const { agent, store } = makeAgent([]);
+    const app = createServer({
+      agents: { demo: agent },
+      auth: ApiKeyAuth({ "key-bob": { userId: "bob" } }),
+      exposeEvents: true,
+      allowLegacyUnownedRecords: true,
+    });
+    await store.migrate();
+    await store.createSession({ id: "legacy-opt-in", agentId: "demo", createdAt: new Date().toISOString() });
+
+    const eventsRes = await app.request("/v1/agents/demo/sessions/legacy-opt-in/events", {
+      headers: { authorization: "Bearer key-bob" },
+    });
     expect(eventsRes.status).toBe(200);
+  });
+
+  it("events: matching org does not authorize a different user-owned session", async () => {
+    const { agent } = makeAgent([textResponse("hello")]);
+    const app = createServer({
+      agents: { demo: agent },
+      auth: ApiKeyAuth({
+        "key-alice": { userId: "alice", orgId: "acme" },
+        "key-bob": { userId: "bob", orgId: "acme" },
+      }),
+      exposeEvents: true,
+    });
+
+    const queryRes = await app.request("/v1/agents/demo/query", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer key-alice" },
+      body: JSON.stringify({ input: "hi", sessionId: "same-org-user-owned" }),
+    });
+    expect(queryRes.status).toBe(200);
+    await readResponseText(queryRes);
+
+    const eventsRes = await app.request("/v1/agents/demo/sessions/same-org-user-owned/events", {
+      headers: { authorization: "Bearer key-bob" },
+    });
+    expect(eventsRes.status).toBe(403);
   });
 
   // Finding #1 — IDOR on /query: cross-session read via client-supplied sessionId

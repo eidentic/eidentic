@@ -15,6 +15,23 @@ export interface SessionDeps {
   apiKey?: string;
 }
 
+type SessionOwner = { userId?: string; orgId?: string; apiKey?: string };
+
+/**
+ * Match a caller to the canonical owner recorded on a session.
+ *
+ * Ownership uses the most specific recorded identifier. A user-owned session
+ * cannot be opened merely because the caller belongs to the same organisation;
+ * org ownership is consulted only when no user owner was recorded. API-key
+ * ownership is the legacy fallback when neither user nor org identity exists.
+ */
+export function matchesSessionOwner(owner: SessionOwner, caller: SessionOwner): boolean {
+  if (owner.userId !== undefined) return caller.userId === owner.userId;
+  if (owner.orgId !== undefined) return caller.orgId === owner.orgId;
+  if (owner.apiKey !== undefined) return caller.apiKey === owner.apiKey;
+  return true;
+}
+
 export class Session {
   private constructor(
     private readonly store: StorePort,
@@ -40,41 +57,20 @@ export class Session {
         `session ${deps.sessionId} belongs to a different agent (owner: ${session.agentId}, requester: ${deps.agentId})`,
       );
     } else {
-      // Defense-in-depth for Finding #1 (IDOR): if the stored session has an owner identity
-      // and the caller's identity is set but does NOT match, reject the open.
+      // Defense-in-depth for Finding #1 (IDOR): if the stored session has an owner identity,
+      // the caller MUST provide the matching canonical identity. Identity omission is not a
+      // trusted bypass: it would let any caller with a guessed session id replay another user.
       // This covers core/nextjs/A2A/MCP entry points that bypass the HTTP server ownership check.
       //
       // Rules:
       //  - If the session has no recorded userId/orgId/apiKey (legacy/NoAuth), always allow (back-compat).
-      //  - If the caller supplies a userId and the session has a userId → they must match.
-      //  - If the caller supplies an orgId and the session has an orgId → they must match.
-      //  - If the caller supplies an apiKey and the session has an apiKey → they must match.
-      //  - A mismatch on any set pair is a conflict.
+      //  - userId is canonical when present; orgId cannot override a user mismatch.
+      //  - otherwise orgId is canonical, then apiKey as the legacy fallback.
       const sessionOwned = session.userId !== undefined || session.orgId !== undefined || session.apiKey !== undefined;
-      if (sessionOwned) {
-        const userIdMismatch =
-          deps.userId !== undefined &&
-          session.userId !== undefined &&
-          deps.userId !== session.userId;
-        const orgIdMismatch =
-          deps.orgId !== undefined &&
-          session.orgId !== undefined &&
-          deps.orgId !== session.orgId;
-        const apiKeyMismatch =
-          deps.apiKey !== undefined &&
-          session.apiKey !== undefined &&
-          deps.apiKey !== session.apiKey;
-        const callerHasIdentity =
-          deps.userId !== undefined || deps.orgId !== undefined || deps.apiKey !== undefined;
-        const anyMatch =
-          (deps.userId !== undefined && session.userId === deps.userId) ||
-          (deps.orgId !== undefined && session.orgId === deps.orgId) ||
-          (deps.apiKey !== undefined && session.apiKey === deps.apiKey);
-        if (userIdMismatch || orgIdMismatch || apiKeyMismatch || (callerHasIdentity && !anyMatch)) {
-          throw new StoreConflictError(
-            `session ${deps.sessionId} is owned by a different principal`,
-          );
-        }
+      if (sessionOwned && !matchesSessionOwner(session, deps)) {
+        throw new StoreConflictError(
+          `session ${deps.sessionId} is owned by a different principal`,
+        );
       }
     }
     const raw = await store.readEvents(deps.sessionId);

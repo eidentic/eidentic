@@ -365,7 +365,7 @@ describe("H1: apiKey-only session ownership", () => {
     expect(body.events.length).toBeGreaterThan(0);
   });
 
-  it("legacy ownerless session (no userId/orgId/apiKey) is still accessible (back-compat)", async () => {
+  it("legacy ownerless session is denied by default when auth is configured", async () => {
     const store = new InMemoryStore();
     const { agent } = makeAgent([], store);
     const app = createServer({
@@ -379,11 +379,11 @@ describe("H1: apiKey-only session ownership", () => {
     await store.migrate();
     await store.createSession({ id: "ownerless-legacy", agentId: "test-agent", createdAt: new Date().toISOString() });
 
-    // Any authenticated principal can read it → 200 (back-compat)
+    // Authenticated multi-tenant mode fails closed for ownerless legacy data.
     const evRes = await app.request("/v1/agents/demo/sessions/ownerless-legacy/events", {
       headers: { authorization: "Bearer any-key" },
     });
-    expect(evRes.status).toBe(200);
+    expect(evRes.status).toBe(403);
   });
 
   it("apiKey tenant B cannot query into apiKey tenant A's session", async () => {

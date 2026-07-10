@@ -32,7 +32,7 @@ import { addUsage, encodeMultimodalInput, extractTextFromBlocks, canonicalJson, 
 import { envLogger } from "./logger.js";
 import { NoopSandbox } from "./sandbox.js";
 import { ToolRegistry, createTool, type Tool } from "./tool.js";
-import { Session } from "./session.js";
+import { Session, matchesSessionOwner } from "./session.js";
 import { runTurn, resumeTurn, type StructuredOutputSpec } from "./loop.js";
 import { isEditableMemory, memoryTools } from "./memory-tools.js";
 import { hasGraph, graphTools } from "./graph-tools.js";
@@ -1039,12 +1039,11 @@ export class Agent {
    * human-in-the-loop suspension: the decision is recorded (keyed by the pending suspension's
    * callId) BEFORE replay, so the re-dispatched tool's `ctx.suspend` returns it (§9.4).
    *
-   * **Ownership check**: when the caller passes any identity field (`userId`, `orgId`, or
-   * `apiKey`) AND the session record has a recorded owner (set at `query()` time by Fix 1),
-   * the two identities must match on all provided fields or `resume` throws `"session ownership
-   * mismatch"`. When neither the caller nor the session has a recorded identity the check is
-   * skipped (back-compat — legacy / NoAuth sessions continue to work). This prevents a caller
-   * who guesses a `sessionId` from resuming a session that belongs to a different principal.
+   * **Ownership check**: when the session record has an owner, the caller must provide its
+   * matching canonical identity or `resume` throws `"session ownership mismatch"`. User
+   * ownership takes precedence over org/API-key metadata, so a shared org cannot override a
+   * different user owner. Ownerless legacy / NoAuth sessions retain their compatibility path.
+   * This prevents a caller who guesses a `sessionId` from replaying another user's session.
    *
    * Structured output: pass `outputSchema` (a Zod schema, same convention as `query`) to constrain
    * the resumed run's FINAL (tool-less) turn to emit a matching object, surfaced as `result.object`
@@ -1058,23 +1057,15 @@ export class Agent {
     if (!durable) throw new Error("Agent.resume requires `durable: true` and a DurablePort store.");
     const principal = this.principalFor(opts);
 
-    // Ownership check: when any identity is provided, verify it matches the session's recorded owner.
-    const callerIdentity = principal.userId !== undefined || principal.orgId !== undefined || principal.apiKey !== undefined;
-    if (callerIdentity) {
-      const rec = await this.config.store.getSession(sessionId);
-      if (rec !== null) {
-        const sessionHasOwner = rec.userId !== undefined || rec.orgId !== undefined || rec.apiKey !== undefined;
-        if (sessionHasOwner) {
-          const userMatch = principal.userId === undefined || principal.userId === rec.userId;
-          const orgMatch = principal.orgId === undefined || principal.orgId === rec.orgId;
-          const apiKeyMatch = principal.apiKey === undefined || principal.apiKey === rec.apiKey;
-          if (!userMatch || !orgMatch || !apiKeyMatch) {
-            throw new Error(
-              `Agent.resume: session ownership mismatch for session "${sessionId}". ` +
-              `The caller identity does not match the session's recorded owner.`,
-            );
-          }
-        }
+    // Ownership is fail-closed for an owned session, including when the caller omits identity.
+    const rec = await this.config.store.getSession(sessionId);
+    if (rec !== null) {
+      const sessionHasOwner = rec.userId !== undefined || rec.orgId !== undefined || rec.apiKey !== undefined;
+      if (sessionHasOwner && !matchesSessionOwner(rec, principal)) {
+        throw new Error(
+          `Agent.resume: session ownership mismatch for session "${sessionId}". ` +
+          `The caller identity does not match the session's recorded owner.`,
+        );
       }
     }
 
@@ -1089,6 +1080,9 @@ export class Agent {
         now,
         newId,
         ...(this.config.upcasters ? { upcasters: this.config.upcasters } : {}),
+        ...(principal.userId !== undefined ? { userId: principal.userId } : {}),
+        ...(principal.orgId !== undefined ? { orgId: principal.orgId } : {}),
+        ...(principal.apiKey !== undefined ? { apiKey: principal.apiKey } : {}),
       });
       const pending = [...suspSession.events()].reverse().find((e) => e.kind === "suspension");
       if (!pending) throw new Error("Agent.resume: a decision was provided but the session has no pending suspension.");

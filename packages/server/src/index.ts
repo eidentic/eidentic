@@ -268,13 +268,17 @@ export interface ServerOptions {
    * Expose the `GET /v1/agents/:agentId/sessions/:sessionId/events` audit
    * endpoint. Defaults to **false** (secure-by-default).
    *
-   * The endpoint enforces per-principal session ownership: a principal may only
-   * read events for sessions it owns (matching `userId`/`orgId`/`apiKey`). Sessions
-   * with no recorded owner (legacy / `NoAuth`) remain readable for back-compat, so in
-   * multi-tenant deployments ensure sessions are created through an authenticated
-   * principal so they carry an owner.
+   * The endpoint enforces canonical per-principal session ownership. Ownerless legacy
+   * records fail closed when authentication is configured; temporary compatibility
+   * access requires `allowLegacyUnownedRecords: true`. `NoAuth` remains single-tenant.
    */
   exposeEvents?: boolean;
+  /**
+   * Allow authenticated callers to access legacy session/workflow records that have no owner.
+   * Defaults to `false` whenever a real auth adapter is configured, and `true` in `NoAuth`
+   * single-tenant mode. Enable only temporarily while migrating legacy records.
+   */
+  allowLegacyUnownedRecords?: boolean;
   /**
    * Token-bucket rate limiter (§20.3). When set, every POST /query and /resume
    * request is checked AFTER auth resolves and BEFORE agent work begins.
@@ -945,6 +949,8 @@ export function createServer(opts: ServerOptions): EidenticServer {
   const resolve = makeResolver(opts.agents);
   const auth = opts.auth ?? NoAuth;
   assertNoAuthAllowed(auth);
+  const noAuthMode = auth === NoAuth;
+  const allowLegacyUnownedRecords = opts.allowLegacyUnownedRecords ?? noAuthMode;
   const defaultKey = (p: AuthPrincipal, _agentId: string) => p.apiKey ?? p.userId ?? p.orgId ?? "anonymous";
   const getRateLimitKey = opts.rateLimitKey ?? defaultKey;
   const getQuotaKey = opts.quotaKey ?? defaultKey;
@@ -1062,24 +1068,16 @@ export function createServer(opts: ServerOptions): EidenticServer {
   // Ownership check helper (Fix #1 / Fix 3a — IDOR prevention)
   // ---------------------------------------------------------------------------
 
-  /**
-   * Returns true if `principal` is allowed to access `session`.
-   * - If the session has no recorded owner (legacy / NoAuth), access is allowed for back-compat.
-   * - If the session has a userId, orgId, or apiKey, the principal must match at least one of them.
-   *
-   * H1 fix: apiKey is now included so apiKey-only principals own their sessions correctly.
-   */
+  /** Match the canonical resource owner. User ownership takes precedence over org/apiKey. */
   function checkOwnership(
     session: { userId?: string; orgId?: string; apiKey?: string },
     principal: AuthPrincipal,
   ): boolean {
-    const sessionOwned =
-      session.userId !== undefined || session.orgId !== undefined || session.apiKey !== undefined;
-    if (!sessionOwned) return true; // legacy / no-owner — allow (back-compat)
-    if (session.userId !== undefined && principal.userId === session.userId) return true;
-    if (session.orgId !== undefined && principal.orgId === session.orgId) return true;
-    if (session.apiKey !== undefined && principal.apiKey === session.apiKey) return true;
-    return false;
+    if (noAuthMode) return true;
+    if (session.userId !== undefined) return principal.userId === session.userId;
+    if (session.orgId !== undefined) return principal.orgId === session.orgId;
+    if (session.apiKey !== undefined) return principal.apiKey === session.apiKey;
+    return allowLegacyUnownedRecords;
   }
 
   // ---------------------------------------------------------------------------
@@ -1692,12 +1690,7 @@ export function createServer(opts: ServerOptions): EidenticServer {
     }
 
     // Ownership enforcement: only the starting principal may poll.
-    const ownerMatches =
-      (entry.owner.userId !== undefined && entry.owner.userId === principal.userId) ||
-      (entry.owner.orgId !== undefined && entry.owner.orgId === principal.orgId) ||
-      (entry.owner.apiKey !== undefined && entry.owner.apiKey === principal.apiKey) ||
-      // NoAuth / anonymous: allow if owner has no identifying fields set
-      (entry.owner.userId === undefined && entry.owner.orgId === undefined && entry.owner.apiKey === undefined);
+    const ownerMatches = checkOwnership(entry.owner, principal);
 
     if (!ownerMatches) {
       return c.json({ error: "Forbidden" }, 403);
@@ -1764,22 +1757,10 @@ export function createServer(opts: ServerOptions): EidenticServer {
   // Programmatic ingestion is via `handle.recordWorkflow(name, result)` (below).
   // ---------------------------------------------------------------------------
 
-  /**
-   * Returns true if `principal` may read this workflow run record.
-   * Mirrors the exact semantics of the async-run ownership check above:
-   *  - ownerless records (no userId/orgId/apiKey) are accessible to any
-   *    authenticated principal (back-compat / NoAuth single-tenant mode).
-   *  - owned records require at least one identifier to match.
-   */
+  /** Match workflow ownership using the same canonical rules as sessions and async runs. */
   function checkWorkflowOwnership(rec: { owner?: { userId?: string; orgId?: string; apiKey?: string } }, principal: AuthPrincipal): boolean {
     const owner = rec.owner;
-    if (owner === undefined) return true; // ownerless — back-compat
-    const hasAnyOwner = owner.userId !== undefined || owner.orgId !== undefined || owner.apiKey !== undefined;
-    if (!hasAnyOwner) return true; // owner object present but no fields set — treat as ownerless
-    if (owner.userId !== undefined && principal.userId === owner.userId) return true;
-    if (owner.orgId !== undefined && principal.orgId === owner.orgId) return true;
-    if (owner.apiKey !== undefined && principal.apiKey === owner.apiKey) return true;
-    return false;
+    return checkOwnership(owner ?? {}, principal);
   }
 
   r.get("/v1/workflows", async (c) => {

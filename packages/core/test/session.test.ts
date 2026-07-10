@@ -135,6 +135,53 @@ describe("Session", () => {
     expect(reloaded.events().length).toBe(1);
   });
 
+  it("rejects opening an owned session when the caller provides no identity", async () => {
+    const store = new InMemoryStore();
+    await store.migrate();
+
+    await Session.open(store, {
+      sessionId: "owned-without-caller",
+      agentId: "a1",
+      now: () => "t0",
+      newId: () => "id0",
+      userId: "alice",
+    });
+
+    await expect(
+      Session.open(store, {
+        sessionId: "owned-without-caller",
+        agentId: "a1",
+        now: () => "t1",
+        newId: () => "id1",
+      }),
+    ).rejects.toThrow(/owned by a different principal/);
+  });
+
+  it("does not let an org match override a mismatched user owner", async () => {
+    const store = new InMemoryStore();
+    await store.migrate();
+
+    await Session.open(store, {
+      sessionId: "user-and-org-owned",
+      agentId: "a1",
+      now: () => "t0",
+      newId: () => "id0",
+      userId: "alice",
+      orgId: "acme",
+    });
+
+    await expect(
+      Session.open(store, {
+        sessionId: "user-and-org-owned",
+        agentId: "a1",
+        now: () => "t1",
+        newId: () => "id1",
+        userId: "bob",
+        orgId: "acme",
+      }),
+    ).rejects.toThrow(/owned by a different principal/);
+  });
+
   it("H1 — throws StoreConflictError when a different apiKey opens an existing owned session", async () => {
     const store = new InMemoryStore();
     await store.migrate();
