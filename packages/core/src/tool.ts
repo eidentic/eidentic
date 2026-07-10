@@ -227,7 +227,28 @@ export class ToolRegistry {
   }
 
   private async resolvePermission(tool: Tool, input: unknown): Promise<"allow" | "deny"> {
-    // Step 1: onPreToolUse — explicit override wins immediately (checked before policy).
+    // Step 1: policy evaluation. Static and argument-scoped denies are absolute: a hook may
+    // impose an additional denial or approve an "ask", but can never bypass a deny rule.
+    const dec = evaluatePermission(this.permissions, tool);
+
+    // Step 1b: arg-scoped deny patterns — evaluated after bare-name deny check, BEFORE hooks.
+    // These fire even under mode:"bypass" (§10.4: deny beats mode over modes, not over pre-hooks).
+    // Only fires when no bare-name deny already denied (dec !== "deny"), because bare denies
+    // are already terminal; arg-scoped denies are a separate conditional guard.
+    if (dec !== "deny" && this.permissions) {
+      const serialized = JSON.stringify(input) ?? "undefined";
+      if (argScopedDenies(this.permissions, tool.id, serialized)) {
+        this.logger.log("debug", "eidentic:permission", "decision", { tool: tool.id, decision: "deny", reason: "arg-scoped-deny" });
+        return "deny";
+      }
+    }
+
+    if (dec === "deny") {
+      this.logger.log("debug", "eidentic:permission", "decision", { tool: tool.id, decision: "deny", reason: "policy" });
+      return "deny";
+    }
+
+    // Step 2: pre-tool hook can further restrict, or explicitly approve an ask/default decision.
     if (this.onPreToolUse) {
       const pre = await this.onPreToolUse(tool.id, input);
       if (pre === "deny") {
@@ -237,22 +258,6 @@ export class ToolRegistry {
       if (pre === "allow") {
         this.logger.log("debug", "eidentic:permission", "decision", { tool: tool.id, decision: "allow", reason: "onPreToolUse" });
         return "allow";
-      }
-      // void / "ask" → fall through to policy
-    }
-
-    // Step 2: policy evaluation (bare-name deny + mode checks).
-    const dec = evaluatePermission(this.permissions, tool);
-
-    // Step 2b: arg-scoped deny patterns — evaluated after bare-name deny check, BEFORE mode logic.
-    // These fire even under mode:"bypass" (§10.4: deny beats mode over modes, not over pre-hooks).
-    // Only fires when no bare-name deny already denied (dec !== "deny"), because bare denies
-    // are already terminal; arg-scoped denies are a separate conditional guard.
-    if (dec !== "deny" && this.permissions) {
-      const serialized = JSON.stringify(input) ?? "undefined";
-      if (argScopedDenies(this.permissions, tool.id, serialized)) {
-        this.logger.log("debug", "eidentic:permission", "decision", { tool: tool.id, decision: "deny", reason: "arg-scoped-deny" });
-        return "deny";
       }
     }
 
@@ -268,9 +273,8 @@ export class ToolRegistry {
       return finalDec;
     }
 
-    const result = dec === "deny" ? "deny" : "allow";
-    this.logger.log("debug", "eidentic:permission", "decision", { tool: tool.id, decision: result, reason: "policy" });
-    return result;
+    this.logger.log("debug", "eidentic:permission", "decision", { tool: tool.id, decision: "allow", reason: "policy" });
+    return "allow";
   }
 
   private async runOne(call: ToolCall): Promise<ToolResult> {

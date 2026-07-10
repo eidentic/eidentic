@@ -479,8 +479,8 @@ export class Agent {
           "warn",
           "eidentic:permission",
           `Agent '${config.id}' has no permissions policy but registers dangerous tools: [${names}]. ` +
-            "Without a policy, ALL tool calls are permitted. Pass `permissions` to restrict access " +
-            "(e.g. { mode: 'auto' } or { deny: ['bash', 'write_file'] }).",
+            "Mutating calls are denied unless onPreToolUse/onPermissionRequest approves them. " +
+            "Pass an explicit permissions policy (or mode:'bypass' for a trusted compatibility path).",
         );
       }
     }
@@ -781,7 +781,10 @@ export class Agent {
     permissionsOverride?: PermissionPolicy,
   ): ToolRegistry {
     // Use the MUTABLE effective policy so that setPermissionMode() takes effect on the next query.
-    const permissions = permissionsOverride ?? this._effectivePermissions;
+    // Agent is the untrusted model boundary: without caller configuration, read-only tools run
+    // and mutating tools resolve to `ask` (then deny when no approval hook is present).
+    // A bare ToolRegistry remains a trusted low-level primitive for backwards compatibility.
+    const permissions = permissionsOverride ?? this._effectivePermissions ?? {};
     const { secrets, onPreToolUse, onPermissionRequest, onPostToolUse, onAuditEvent } = this.config;
     const hasSecurityConfig = permissions !== undefined || secrets !== undefined ||
       onPreToolUse !== undefined || onPermissionRequest !== undefined;

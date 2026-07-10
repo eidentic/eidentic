@@ -77,7 +77,7 @@ describe("audit: tool.call", () => {
 
   it("emits tool.call with isError=true when the tool throws", async () => {
     const events: AuditEvent[] = [];
-    const reg = new ToolRegistry([boom], { scope, onAuditEvent: (e) => events.push(e) });
+    const reg = new ToolRegistry([boom], { scope, permissions: { mode: "bypass" }, onAuditEvent: (e) => events.push(e) });
     await reg.dispatch([{ callId: "c1", name: "boom", input: {} }]);
 
     const calls = events.filter((e) => e.type === "tool.call");

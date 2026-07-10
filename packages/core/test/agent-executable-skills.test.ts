@@ -83,6 +83,7 @@ describe("Agent executableSkills — skill_run wiring (Fix 1)", () => {
       { content: [textBlock("ok")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
     const agent = new Agent({
+      permissions: { mode: "bypass" },
       id: "a",
       instructions: "",
       model,
@@ -120,6 +121,7 @@ describe("Agent executableSkills — skill_run wiring (Fix 1)", () => {
       { content: [textBlock("ok")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
     const agent = new Agent({
+      permissions: { mode: "bypass" },
       id: "a2", instructions: "", model, store, executableSkills: bank2,
       now: () => "t", newId: ((n) => () => `e${n++}`)(0),
     });
@@ -164,6 +166,7 @@ describe("Agent executableSkills — skill_run wiring (Fix 1)", () => {
       { content: [textBlock("skill ran")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
     const agent = new Agent({
+      permissions: { mode: "bypass" },
       id: "a3", instructions: "", model, store, tools: [echoTool],
       executableSkills: bank, now: () => "t", newId: ((n) => () => `e${n++}`)(0),
     });
@@ -212,6 +215,7 @@ describe("Agent executableSkills — skill_run wiring (Fix 1)", () => {
       { content: [textBlock("done")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
     const agent = new Agent({
+      permissions: { mode: "bypass" },
       id: "a4", instructions: "", model, store, tools: [allowedTool, forbiddenTool],
       executableSkills: bankWithStub, now: () => "t", newId: ((n) => () => `e${n++}`)(0),
     });
@@ -246,6 +250,7 @@ describe("Agent executableSkills — skill_run wiring (Fix 1)", () => {
       { content: [textBlock("done")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
     const agent = new Agent({
+      permissions: { mode: "bypass" },
       id: "a5", instructions: "", model, store,
       executableSkills: bank, now: () => "t", newId: ((n) => () => `e${n++}`)(0),
     });
@@ -269,6 +274,7 @@ describe("Agent executableSkills — skill_run wiring (Fix 1)", () => {
       { content: [textBlock("done")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
     const agent = new Agent({
+      permissions: { mode: "bypass" },
       id: "a6", instructions: "", model, store,
       executableSkills: bank, now: () => "t", newId: ((n) => () => `e${n++}`)(0),
     });
@@ -288,6 +294,7 @@ describe("Agent executableSkills — skill_run wiring (Fix 1)", () => {
       { content: [textBlock("ok")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
     const agent = new Agent({
+      permissions: { mode: "bypass" },
       id: "a7", instructions: "", model, store,
       now: () => "t", newId: ((n) => () => `e${n++}`)(0),
     });
@@ -359,6 +366,7 @@ describe("skill_run bridge — recursion guard and fan-out cap", () => {
     ]);
 
     const agent = new Agent({
+      permissions: { mode: "bypass" },
       id: "guard-recursion", instructions: "", model, store,
       executableSkills: bank, now: () => "t", newId: ((n) => () => `e${n++}`)(0),
     });
@@ -433,6 +441,7 @@ describe("skill_run bridge — recursion guard and fan-out cap", () => {
     ]);
 
     const agent = new Agent({
+      permissions: { mode: "bypass" },
       id: "guard-fanout", instructions: "", model, store,
       tools: [noopTool],
       executableSkills: bank, now: () => "t", newId: ((n) => () => `e${n++}`)(0),
@@ -496,6 +505,7 @@ describe("skill_run bridge — recursion guard and fan-out cap", () => {
     ]);
 
     const agent = new Agent({
+      permissions: { mode: "bypass" },
       id: "guard-counter-reset", instructions: "", model, store,
       tools: [noopTool],
       executableSkills: bank, now: () => "t", newId: ((n) => () => `e${n++}`)(0),

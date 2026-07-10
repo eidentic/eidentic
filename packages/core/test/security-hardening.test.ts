@@ -122,8 +122,8 @@ describe("A7 — cross-session idempotency isolation", () => {
       { content: [textBlock("sent B")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
 
-    const agentA = new Agent({ id: "ag", instructions: "", model: modelA, store, tools: [emailTool], durable: true, now: () => "t", newId: ((n) => () => `eA${n++}`)(0) });
-    const agentB = new Agent({ id: "ag", instructions: "", model: modelB, store, tools: [emailTool], durable: true, now: () => "t", newId: ((n) => () => `eB${n++}`)(0) });
+    const agentA = new Agent({ id: "ag", instructions: "", model: modelA, store, tools: [emailTool], permissions: { mode: "bypass" }, durable: true, now: () => "t", newId: ((n) => () => `eA${n++}`)(0) });
+    const agentB = new Agent({ id: "ag", instructions: "", model: modelB, store, tools: [emailTool], permissions: { mode: "bypass" }, durable: true, now: () => "t", newId: ((n) => () => `eB${n++}`)(0) });
 
     // Session A runs first and sends the email.
     await drain(agentA, "send to x@test.com", "sess-A");

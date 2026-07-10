@@ -37,7 +37,7 @@ describe("durable terminal errors", () => {
       [{ content: [toolUseBlock("c1", "send_email", { to: "a@b.com" })], usage: { inputTokens: 1, outputTokens: 1 } }],
       2,
     );
-    const agentCrash = new Agent({ id: "a", instructions: "", model: crashing, store, tools: [sendEmail], durable: true, now: () => "t", newId: ((n) => () => `e${n++}`)(0) });
+    const agentCrash = new Agent({ permissions: { mode: "bypass" }, id: "a", instructions: "", model: crashing, store, tools: [sendEmail], durable: true, now: () => "t", newId: ((n) => () => `e${n++}`)(0) });
 
     const firstEvents = [];
     for await (const e of agentCrash.query("email a@b.com", { sessionId: "s" })) firstEvents.push(e);
@@ -53,7 +53,7 @@ describe("durable terminal errors", () => {
       { content: [toolUseBlock("c1", "send_email", { to: "a@b.com" })], usage: { inputTokens: 1, outputTokens: 1 } },
       { content: [textBlock("email sent")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
-    const agentResume = new Agent({ id: "a", instructions: "", model: resumeModel, store, tools: [sendEmail], durable: true, now: () => "t", newId: ((n) => () => `r${n++}`)(0) });
+    const agentResume = new Agent({ permissions: { mode: "bypass" }, id: "a", instructions: "", model: resumeModel, store, tools: [sendEmail], durable: true, now: () => "t", newId: ((n) => () => `r${n++}`)(0) });
 
     const resumed = [];
     for await (const e of agentResume.resume("s")) resumed.push(e);
@@ -83,7 +83,7 @@ describe("durable terminal errors", () => {
       [{ content: [toolUseBlock("c1", "charge", { amount: 10 })], usage: { inputTokens: 1, outputTokens: 1 } }],
       2, // crash on call 2, after the tool's intent-only record is in the ledger
     );
-    const agent = new Agent({ id: "a", instructions: "", model: crashModel, store, tools: [flaky], durable: true, now: () => "t", newId: ((n) => () => `e${n++}`)(0) });
+    const agent = new Agent({ permissions: { mode: "bypass" }, id: "a", instructions: "", model: crashModel, store, tools: [flaky], durable: true, now: () => "t", newId: ((n) => () => `e${n++}`)(0) });
     for await (const _ of agent.query("charge 10", { sessionId: "s" })) { /* drain */ }
     expect(counter).toBe(1);
     // A7: the effective stored key is now ${sessionId}:${tool.idempotencyKey(input)}.
@@ -95,7 +95,7 @@ describe("durable terminal errors", () => {
       { content: [toolUseBlock("c1", "charge", { amount: 10 })], usage: { inputTokens: 1, outputTokens: 1 } },
       { content: [textBlock("charged on retry")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
-    const agent2 = new Agent({ id: "a", instructions: "", model: model2, store, tools: [flaky], durable: true, now: () => "t", newId: ((n) => () => `r${n++}`)(0) });
+    const agent2 = new Agent({ permissions: { mode: "bypass" }, id: "a", instructions: "", model: model2, store, tools: [flaky], durable: true, now: () => "t", newId: ((n) => () => `r${n++}`)(0) });
     for await (const _ of agent2.resume("s")) { /* drain */ }
     expect(model2.calls).toHaveLength(0);
     expect(counter).toBe(1);

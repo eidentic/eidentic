@@ -3,7 +3,7 @@ import type { Scope } from "./ports.js";
 /**
  * Controls how the permission system evaluates tool access for a session.
  *
- * - `"default"` — allow unless denied by a `deny` glob. Equivalent to allow-unless-denied.
+ * - `"default"` — read-only tools are allowed; mutating tools require approval unless explicitly allowed.
  * - `"plan"` — read-only tools only; all non-`"read-only"` side-effect tools are denied at both
  *   schema and dispatch layers (the model never sees them and cannot call them).
  * - `"ask"` — every tool that is not pre-approved by an `allow` glob requires dynamic resolution
@@ -24,7 +24,7 @@ export interface PermissionPolicy {
   allow?: string[];        // tool-id globs pre-approved
   ask?: string[];          // tool-id globs that require dynamic approval
   deny?: string[];         // tool-id globs denied (bare-name deny ⇒ removed from schema)
-  /** Fall-through decision when no allow/ask/deny/mode rule matches. Defaults to "allow" for back-compat. */
+  /** Fall-through decision. Defaults to `allow` for read-only tools and `ask` for mutating tools. */
   default?: PermissionDecision;
 }
 

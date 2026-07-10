@@ -45,6 +45,7 @@ describe("lazy resume determinism (§5.4, invariant b)", () => {
       { content: [toolUseBlock("c2", "needs_approval", {})], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
     const agent1 = new Agent({
+      permissions: { mode: "bypass" },
       id: "a", instructions: "x", model: model1, store,
       tools: [...tools, approval], durable: true, lazyTools: { threshold: 20 },
       now: () => "t", newId: ((n) => () => `e${n++}`)(0),
@@ -74,6 +75,7 @@ describe("lazy resume determinism (§5.4, invariant b)", () => {
       { content: [textBlock("finished")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
     const agent2 = new Agent({
+      permissions: { mode: "bypass" },
       id: "a", instructions: "x", model: model2, store,
       tools: [...tools, approval], durable: true, lazyTools: { threshold: 20 },
       now: () => "t", newId: ((n) => () => `r${n++}`)(0),

@@ -26,6 +26,19 @@ describe("ToolRegistry dispatch permission gate", () => {
     expect(r!.output).toEqual({ echoed: "hi" });
   });
 
+  it("an explicit secure-default policy denies mutating tools without an approval resolver", async () => {
+    let ran = false;
+    const t = createTool({
+      id: "send_money", description: "mutates", sideEffect: "destructive",
+      inputSchema: z.object({}),
+      execute: async () => { ran = true; return { ok: true }; },
+    });
+    const reg = new ToolRegistry([t], { permissions: {} });
+    const [r] = await reg.dispatch([{ callId: "c1", name: "send_money", input: {} }]);
+    expect(ran).toBe(false);
+    expect(r?.meta?.permissionDenied).toBe(true);
+  });
+
   it("deny policy: tool does NOT execute, returns permission-denied error", async () => {
     let ran = false;
     const dangerous = createTool({
@@ -134,7 +147,7 @@ describe("ToolRegistry dispatch permission gate", () => {
     expect(r!.meta?.permissionDenied).toBe(true);
   });
 
-  it("onPreToolUse returning allow: skips policy evaluation, tool executes", async () => {
+  it("onPreToolUse returning allow cannot override an absolute deny", async () => {
     let ran = false;
     const t = createTool({
       id: "anything", description: "x", sideEffect: "destructive",
@@ -146,8 +159,9 @@ describe("ToolRegistry dispatch permission gate", () => {
     const onPreToolUse = (_id: string, _input: unknown): PermissionDecision => "allow";
     const reg = new ToolRegistry([t], { permissions: policy, onPreToolUse });
     const [r] = await reg.dispatch([{ callId: "c1", name: "anything", input: {} }]);
-    expect(ran).toBe(true);
-    expect(r!.isError).toBe(false);
+    expect(ran).toBe(false);
+    expect(r!.isError).toBe(true);
+    expect(r!.meta?.permissionDenied).toBe(true);
   });
 
   it("onPreToolUse returning void: continues to policy evaluation", async () => {
@@ -241,7 +255,7 @@ describe("Fix 2 — argument-scoped deny patterns", () => {
       execute: async () => { ran = true; return { ok: true }; },
     });
     // Only deny when the JSON-stringified input contains "9999"
-    const policy: PermissionPolicy = { deny: ["refund_order(*9999*)"] };
+    const policy: PermissionPolicy = { allow: ["refund_order"], deny: ["refund_order(*9999*)"] };
     const reg = new ToolRegistry([refund], { permissions: policy });
 
     // Input that matches the argGlob → denied

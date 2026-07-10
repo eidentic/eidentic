@@ -46,12 +46,14 @@ describe("globMatch", () => {
 // ─── evaluatePermission truth table ───────────────────────────────────────────
 
 describe("evaluatePermission", () => {
-  it("no policy → allow (back-compat)", () => {
-    expect(evaluatePermission(undefined, { id: "any_tool", sideEffect: "destructive" })).toBe("allow");
+  it("bare registry policy evaluation keeps its low-level compatibility behavior", () => {
+    expect(evaluatePermission(undefined, { id: "read_tool", sideEffect: "read-only" })).toBe("allow");
+    expect(evaluatePermission(undefined, { id: "write_tool", sideEffect: "idempotent" })).toBe("allow");
+    expect(evaluatePermission(undefined, { id: "danger_tool", sideEffect: "destructive" })).toBe("allow");
   });
 
-  it("empty policy → allow", () => {
-    expect(evaluatePermission({}, { id: "any_tool", sideEffect: "destructive" })).toBe("allow");
+  it("empty policy keeps the secure side-effect default", () => {
+    expect(evaluatePermission({}, { id: "any_tool", sideEffect: "destructive" })).toBe("ask");
   });
 
   it("deny glob matches → deny (overrides everything)", () => {
@@ -95,9 +97,9 @@ describe("evaluatePermission", () => {
     expect(evaluatePermission(policy, { id: "safe_op", sideEffect: "destructive" })).toBe("allow");
   });
 
-  it("default mode, no deny/allow → allow", () => {
+  it("default mode, no deny/allow → asks for mutating tools", () => {
     const policy: PermissionPolicy = { mode: "default" };
-    expect(evaluatePermission(policy, { id: "any_tool", sideEffect: "destructive" })).toBe("allow");
+    expect(evaluatePermission(policy, { id: "any_tool", sideEffect: "destructive" })).toBe("ask");
   });
 
   it("bypass mode → allow (falls through)", () => {

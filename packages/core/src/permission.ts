@@ -89,18 +89,20 @@ export function argScopedDenies(
  * Evaluate the permission for a single tool invocation.
  *
  * Order (design §10.4):
- * 1. No policy → allow (back-compat).
+ * 1. No policy on a bare registry → allow (Agent always supplies a secure default policy).
  * 2. BARE deny glob matches → deny. (Arg-scoped denies require input, evaluated at dispatch.)
  * 3. plan mode + non-read-only → deny.
  * 4. allow glob matches → allow.
  * 5. ask glob matches → ask.
  * 6. ask mode → ask.
- * 7. Explicit default fall-through, else allow.
+ * 7. Explicit default fall-through; otherwise read-only allow / mutating ask.
  */
 export function evaluatePermission(
   policy: PermissionPolicy | undefined,
   tool: { id: string; sideEffect: SideEffect },
 ): PermissionDecision {
+  // A bare ToolRegistry is a low-level trusted primitive. Agent supplies an explicit secure
+  // default policy, while direct registry consumers retain their historical behavior.
   if (!policy) return "allow";
 
   // 2. Bare deny globs win over everything else.
@@ -119,9 +121,9 @@ export function evaluatePermission(
   // 6. Ask mode → ask (dynamic resolution at dispatch time).
   if (policy.mode === "ask") return "ask";
 
-  // 7. All other modes (default, bypass, acceptEdits) fall through to the explicit default
-  //    when present, or allow for back-compat.
-  return policy.default ?? "allow";
+  // 7. Explicit escape hatches remain available for trusted single-tenant deployments.
+  if (policy.mode === "bypass" || policy.mode === "acceptEdits") return "allow";
+  return policy.default ?? (tool.sideEffect === "read-only" ? "allow" : "ask");
 }
 
 /**
@@ -131,7 +133,6 @@ export function evaluatePermission(
  * the deny is conditional on the arguments seen at dispatch time.
  */
 export function filterToolsForSchema(tools: Tool[], policy?: PermissionPolicy): Tool[] {
-  if (!policy) return tools;
   return tools.filter((t) => evaluatePermission(policy, t) !== "deny");
 }
 
