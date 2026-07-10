@@ -30,6 +30,16 @@ import { Memory } from "@eidentic/memory";
 const memory = new Memory({ store, vector, embedder });
 ```
 
+## Live conformance test
+
+Set `EIDENTIC_TEST_PINECONE_API_KEY` to run the real-service vector conformance suite. Without
+`EIDENTIC_TEST_PINECONE_INDEX`, the suite creates a disposable dimension-4 cosine serverless index,
+waits until it is ready, and deletes it in teardown. An explicitly supplied index is preserved and
+only random test namespaces are deleted. Never target a production index.
+
+The disposable index defaults to AWS `us-east-1`; override with
+`EIDENTIC_TEST_PINECONE_CLOUD` and `EIDENTIC_TEST_PINECONE_REGION` when required by the project.
+
 ## Links
 
 - [GitHub](https://github.com/eidentic/eidentic)
