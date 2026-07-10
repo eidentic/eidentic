@@ -234,12 +234,11 @@ describe("Fix 4 — ctx.signal threading", () => {
 // ─── EnvSecrets ───────────────────────────────────────────────────────────────
 
 describe("EnvSecrets", () => {
-  it("reads from process.env", async () => {
+  it("reads only explicitly allowed environment refs", async () => {
     const { EnvSecrets } = await import("../src/index.js");
-    const env = new EnvSecrets();
-    process.env["TEST_SECRET_XYZ"] = "hello-env";
+    const env = new EnvSecrets(["TEST_SECRET_XYZ"], { TEST_SECRET_XYZ: "hello-env", OTHER: "hidden" });
     expect(await env.get("TEST_SECRET_XYZ")).toBe("hello-env");
-    expect(await env.get("DEFINITELY_NOT_SET_ABCDEF")).toBeUndefined();
-    delete process.env["TEST_SECRET_XYZ"];
+    await expect(env.get("OTHER")).rejects.toThrow(/not allowed/i);
+    await expect(env.get("../INVALID")).rejects.toThrow(/invalid secret ref/i);
   });
 });

@@ -379,6 +379,7 @@ describe("ToolContext injection", () => {
     let capturedCtx: ToolContext | undefined;
     const t = createTool({
       id: "api_call", description: "uses secrets", sideEffect: "read-only",
+      requiredSecrets: ["API_KEY"],
       inputSchema: z.object({}),
       execute: async ({ ctx }) => {
         capturedCtx = ctx;
@@ -391,7 +392,31 @@ describe("ToolContext injection", () => {
     const [r] = await reg.dispatch([{ callId: "c1", name: "api_call", input: {} }]);
     expect(r!.isError).toBe(false);
     expect((r!.output as { key: string }).key).toBe("sk-123");
-    expect(capturedCtx?.secrets).toBe(secrets);
+    expect(capturedCtx?.secrets).toBeDefined();
+    expect(capturedCtx?.secrets).not.toBe(secrets);
+  });
+
+  it("tool secret capabilities deny undeclared refs and omit ambient access", async () => {
+    const secrets = new MapSecrets({ API_KEY: "allowed", OTHER_KEY: "forbidden" });
+    const scoped = createTool({
+      id: "scoped_secret", description: "uses one secret", sideEffect: "read-only",
+      requiredSecrets: ["API_KEY"],
+      inputSchema: z.object({}),
+      execute: async ({ ctx }) => ({ other: await ctx?.secrets?.get("OTHER_KEY") }),
+    });
+    const ambient = createTool({
+      id: "ambient_secret", description: "declares nothing", sideEffect: "read-only",
+      inputSchema: z.object({}),
+      execute: async ({ ctx }) => ({ hasSecrets: ctx?.secrets !== undefined }),
+    });
+    const reg = new ToolRegistry([scoped, ambient], { secrets });
+    const [denied, omitted] = await reg.dispatch([
+      { callId: "c1", name: "scoped_secret", input: {} },
+      { callId: "c2", name: "ambient_secret", input: {} },
+    ]);
+    expect(denied?.isError).toBe(true);
+    expect(JSON.stringify(denied?.output)).toMatch(/secret capability denied/i);
+    expect(omitted?.output).toEqual({ hasSecrets: false });
   });
 
   it("ctx.scope is the configured scope", async () => {

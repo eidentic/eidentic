@@ -63,6 +63,8 @@ export interface ToolDef<I = unknown, O = unknown> {
   description: string;
   inputSchema: z.ZodType<I>;
   sideEffect?: SideEffect;
+  /** Secret refs this tool may read from `ctx.secrets`. Omitted/empty means no secret access. */
+  requiredSecrets?: readonly string[];
   /**
    * Stable key for exactly-once dispatch (§9.3). Computed from input; required-in-practice for
    * destructive tools under durable runs.
@@ -90,6 +92,8 @@ export interface Tool {
   id: string;
   description: string;
   sideEffect: SideEffect;
+  /** Immutable least-privilege secret capability set. Never included in the model tool schema. */
+  requiredSecrets: readonly string[];
   jsonSchema: Record<string, unknown>;
   idempotencyKey?: (input: unknown) => string | Promise<string>;
   parse: (input: unknown) => { ok: true; value: unknown } | { ok: false; error: string };
@@ -112,10 +116,12 @@ export interface ToolResult {
 }
 
 export function createTool<I, O>(def: ToolDef<I, O>): Tool {
+  const requiredSecrets = Object.freeze([...(def.requiredSecrets ?? [])]);
   return {
     id: def.id,
     description: def.description,
     sideEffect: def.sideEffect ?? "read-only",
+    requiredSecrets,
     jsonSchema: z.toJSONSchema(def.inputSchema) as Record<string, unknown>,
     ...(def.idempotencyKey ? { idempotencyKey: (input: unknown) => def.idempotencyKey!(input as I) } : {}),
     parse: (input) => {
@@ -327,9 +333,10 @@ export class ToolRegistry {
     const durable = this.durable;
     const sessionId = this.sessionId;
     const callId = call.callId;
+    const scopedSecrets = this.secretCapabilitiesFor(tool);
     const ctx: ToolContext = {
       ...(this.scope !== undefined ? { scope: this.scope } : {}),
-      ...(this.secrets !== undefined ? { secrets: this.secrets } : {}),
+      ...(scopedSecrets !== undefined ? { secrets: scopedSecrets } : {}),
       ...(this.signal !== undefined ? { signal: this.signal } : {}),
       suspend: async (request: SuspendRequest): Promise<SuspendDecision> => {
         if (!durable || sessionId === undefined) {
@@ -411,6 +418,24 @@ export class ToolRegistry {
     this.logger.log("debug", "eidentic:tool", "result", { tool: call.name, ok: !result.isError });
     await this.firePostHook(tool.id, parsed.value, result, dispatchStart);
     return result;
+  }
+
+  /** Expose only refs declared by this tool; never pass the ambient vault object through. */
+  private secretCapabilitiesFor(tool: Tool): SecretsPort | undefined {
+    if (!this.secrets || tool.requiredSecrets.length === 0) return undefined;
+    const source = this.secrets;
+    const allowed = new Set(tool.requiredSecrets);
+    return {
+      get: async (ref: string): Promise<string | undefined> => {
+        if (!allowed.has(ref)) {
+          this.logger.log("warn", "eidentic:secrets", "access denied", { tool: tool.id, ref });
+          throw new Error(`secret capability denied: tool '${tool.id}' did not declare '${ref}'`);
+        }
+        const value = await source.get(ref);
+        this.logger.log("debug", "eidentic:secrets", "access", { tool: tool.id, ref, found: value !== undefined });
+        return value;
+      },
+    };
   }
 
   /**
