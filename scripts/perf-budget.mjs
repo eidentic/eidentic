@@ -21,6 +21,10 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // blanket excuse for unrelated growth.
 const CORE_BASELINE_GZIP_KIB = 40;
 const CORE_SECURITY_HEADROOM_GZIP_KIB = 4;
+const CORE_PUBLISH_BASELINE_KIB = 512;
+// Dual ESM/CJS declarations repeat the public security types byte-for-byte. Give those declarations
+// a narrow 8 KiB allowance while keeping the runtime and tree-shaken consumer limits unchanged.
+const CORE_PUBLISH_SECURITY_HEADROOM_KIB = 8;
 
 const artifactBudgets = [
   {
@@ -199,13 +203,15 @@ for (const [index, budget] of consumerBudgets.entries()) {
 }
 
 // The complete published core install (both runtimes, both declaration formats, docs, license,
-// and manifest) gets a separate 512 KiB ceiling. Unlike tarball compression, this byte count is
+// and manifest) gets a separate baseline plus a bounded declaration-security allowance. Unlike
+// tarball compression, this byte count is
 // stable across clocks/platforms and cannot hide growth behind improved compression ratios.
 const corePublish = measurePublishFootprint("packages/core");
 if (!addRow(rows, {
   name: `@eidentic/core publish footprint (${corePublish.files} files)`,
   actualKib: bytesToKib(corePublish.bytes),
-  budgetKib: 512,
+  budgetKib: CORE_PUBLISH_BASELINE_KIB + CORE_PUBLISH_SECURITY_HEADROOM_KIB,
+  budgetLabel: `${CORE_PUBLISH_BASELINE_KIB} + ${CORE_PUBLISH_SECURITY_HEADROOM_KIB} security`,
 })) failed = true;
 
 const studioAssets = join(root, "packages/studio/ui/dist/assets");
