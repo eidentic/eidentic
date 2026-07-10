@@ -1,6 +1,9 @@
 import {
   addUsage,
   canonicalJson,
+  decodeMultimodalInput,
+  encodeMultimodalInput,
+  extractTextFromBlocks,
   isText,
   isToolUse,
   scopeKey,
@@ -296,11 +299,30 @@ async function runGuardrails(
 }
 
 function applyGuardrailRedaction(input: string, checkedText: string, redactedText: string): string {
+  if (checkedText === redactedText) return input;
   if (input === checkedText) return redactedText;
+
+  const multimodal = decodeMultimodalInput(input);
+  if (multimodal) {
+    const extractedText = extractTextFromBlocks(multimodal);
+    if (checkedText === extractedText) {
+      return encodeMultimodalInput(replaceTextBlocks(multimodal, redactedText));
+    }
+    if (checkedText.length > 0 && extractedText.includes(checkedText)) {
+      const sanitizedText = extractedText.split(checkedText).join(redactedText);
+      return encodeMultimodalInput(replaceTextBlocks(multimodal, sanitizedText));
+    }
+    // A redaction that cannot be mapped back to the original envelope must fail closed:
+    // retain non-text blocks, but discard all unchecked text rather than persisting it.
+    return encodeMultimodalInput(replaceTextBlocks(multimodal, redactedText));
+  }
+
   if (checkedText.length > 0 && input.includes(checkedText)) {
     return input.split(checkedText).join(redactedText);
   }
-  return input;
+  // The caller supplied a separately assembled guardrail segment that cannot be located in
+  // the prompt. Persisting the unchecked prompt would defeat the guardrail contract.
+  return redactedText;
 }
 
 function replaceTextBlocks(content: ContentBlock[], text: string): ContentBlock[] {
@@ -1389,22 +1411,9 @@ export async function* runTurn(args: RunTurnArgs): AsyncIterable<StreamEvent> {
     ...(args.greeting !== undefined ? { greeting: args.greeting } : {}),
   };
 
-  let userEvent: StoredEvent | null = null;
-  {
-    const gen = safeAppend(args.session, "user", args.input, undefined, { inputTokens: 0, outputTokens: 0 }, 0);
-    let step = await gen.next();
-    while (!step.done) {
-      yield step.value as StreamEvent;
-      step = await gen.next();
-    }
-    userEvent = step.value as StoredEvent | null;
-  }
-  if (userEvent === null) return;
-
-  // --- D7: input guardrails — run on the original user text BEFORE the first model call ---
-  // The raw input is persisted to the event log above (for audit). If a guardrail blocks, the
-  // run terminates immediately without calling the model. If a guardrail redacts, the redacted
-  // text is used for memory retrieval and the initial model messages instead of the original.
+  // --- D7: input guardrails — enforce before crossing any persistence boundary. ---
+  // Blocked input is never stored. Redacted input is stored only in its sanitized form, which
+  // also prevents later turns and resume/replay paths from reconstructing the original secret.
   let effectiveInput = args.input;
   if (args.guardrails && args.guardrails.length > 0) {
     const checkedText = args.guardrailInput?.text ?? args.input;
@@ -1436,30 +1445,39 @@ export async function* runTurn(args: RunTurnArgs): AsyncIterable<StreamEvent> {
     effectiveInput = applyGuardrailRedaction(args.input, checkedText, gr.text);
   }
 
+  let userEvent: StoredEvent | null = null;
+  {
+    const gen = safeAppend(args.session, "user", effectiveInput, undefined, { inputTokens: 0, outputTokens: 0 }, 0);
+    let step = await gen.next();
+    while (!step.done) {
+      yield step.value as StreamEvent;
+      step = await gen.next();
+    }
+    userEvent = step.value as StoredEvent | null;
+  }
+  if (userEvent === null) return;
+
+  // Images remain in the event log/model envelope, but memory is text-only. This avoids
+  // duplicating base64 payloads or remote image URLs into vector stores and recall indexes.
+  const multimodalInput = decodeMultimodalInput(effectiveInput);
+  const memoryInput = multimodalInput ? extractTextFromBlocks(multimodalInput) : effectiveInput;
+
   const blocks = args.memory ? await args.memory.getAlwaysInContext(args.scope) : await args.store.getBlocks(args.scope);
   let recall: { text: string; metadata?: { source?: string; page?: number; [k: string]: unknown } }[] = [];
   if (args.memory) {
     // --- OTel memory.retrieve span (§11.1) ---
     const retrieveSpan = args.tracer?.startSpan("memory.retrieve", { "eidentic.scope": scopeKey(args.scope) });
-    recall = (await args.memory.retrieve({ text: effectiveInput, scope: args.scope })).snippets;
+    recall = (await args.memory.retrieve({ text: memoryInput, scope: args.scope })).snippets;
     retrieveSpan?.setStatus("ok");
     retrieveSpan?.end();
     (args.logger ?? NoopLogger).log("debug", "eidentic:memory", "retrieve", { hits: recall.length });
   }
   // Build initial messages from the event log.
   const messages = buildInitialMessages(args, blocks, recall);
-  // If a guardrail redacted the input, patch the last user message in the built array so the
-  // model sees the redacted text. The event log retains the original for audit purposes.
-  if (effectiveInput !== args.input) {
-    const lastUserIdx = messages.map((m) => m.role).lastIndexOf("user");
-    if (lastUserIdx !== -1) {
-      messages[lastUserIdx] = { role: "user", content: effectiveInput };
-    }
-  }
   if (args.memory) {
     // --- OTel memory.ingest span for user input (§11.1) ---
     const ingestSpan = args.tracer?.startSpan("memory.ingest", { "eidentic.scope": scopeKey(args.scope) });
-    await args.memory.ingest([{ id: userEvent.id, scope: args.scope, text: effectiveInput }]);
+    await args.memory.ingest([{ id: userEvent.id, scope: args.scope, text: memoryInput }]);
     ingestSpan?.setStatus("ok");
     ingestSpan?.end();
   }
