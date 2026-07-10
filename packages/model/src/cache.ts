@@ -186,7 +186,7 @@ export function cachedModel(
     }
   }
 
-  const port = {
+  const port: ModelPort & { stats(): CacheStats } = {
     get modelId() {
       return model.modelId;
     },
@@ -202,7 +202,10 @@ export function cachedModel(
       }
 
       misses++;
-      const result = await model.complete(request);
+      const rawResult = await model.complete(request);
+      const result = rawResult.resolvedModelId !== undefined || model.modelId === undefined
+        ? rawResult
+        : { ...rawResult, resolvedModelId: model.modelId };
 
       if (shouldCache(request, result)) {
         await setInCache(key, result);
@@ -211,18 +214,21 @@ export function cachedModel(
       return result;
     },
 
-    async *stream(request: ModelRequest): AsyncIterable<ModelStreamPart> {
-      // Streaming responses are never cached — pass through unconditionally.
-      if (!model.stream) {
-        throw new Error("cachedModel: wrapped model does not implement stream()");
-      }
-      yield* model.stream(request);
-    },
-
     stats(): CacheStats {
       return { hits, misses, size: lru.size };
     },
   };
+
+  if (model.stream) {
+    port.stream = async function* stream(request: ModelRequest): AsyncIterable<ModelStreamPart> {
+      // Streaming responses are never cached — pass through unconditionally.
+      for await (const part of model.stream!(request)) {
+        yield part.type === "final" && part.response.resolvedModelId === undefined && model.modelId !== undefined
+          ? { ...part, response: { ...part.response, resolvedModelId: model.modelId } }
+          : part;
+      }
+    };
+  }
 
   return port;
 }

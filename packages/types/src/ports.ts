@@ -94,6 +94,19 @@ export interface ModelResponse {
   content: ContentBlock[];
   usage: Usage;
   /**
+   * Identity of the concrete model that produced this response. Routing/fallback wrappers MUST
+   * set this when it differs from their public/default model id so cost and telemetry cannot be
+   * attributed to a cheaper route. Direct adapters should set it whenever the provider exposes it.
+   */
+  resolvedModelId?: string;
+  /** Concrete provider identity, when known (for example `openai` or `anthropic`). */
+  provider?: string;
+  /**
+   * Provider-authoritative billable cost for this call in USD. When absent, core derives cost
+   * from `resolvedModelId`, `usage`, and the configured price table.
+   */
+  costUsd?: number;
+  /**
    * The structured object the model produced when `ModelRequest.outputSchema` was set and the
    * turn emitted a structured final answer (no pending tool calls). Undefined otherwise — e.g.
    * the model chose to call a tool this turn, or the request carried no `outputSchema`.
@@ -288,9 +301,12 @@ export interface StorePort {
    */
   searchMemory(scope: Scope, query: string, topK: number): Promise<MemorySnippet[]>;
   /**
-   * Hard-delete ALL data for `scope` (GDPR right-to-erasure, §15): sessions, events, blocks,
-   * block_history, memories (lexical index), and facts (the temporal KG). Returns the count of
-   * rows removed. Irreversible. Scope-isolated — other scopes are untouched.
+   * Hard-delete ALL data for `scope` (GDPR right-to-erasure, §15): matching sessions and their
+   * events/checkpoints/idempotency records/suspension decisions, plus blocks, block_history,
+   * memories (lexical index), and facts (the temporal KG). Session matching is exact: agent erases
+   * every session for that agent; user/org match both agentId and owner; thread matches agentId and
+   * sessionId; shared erases no sessions. Returns the count of rows removed. Irreversible.
+   * Scope-isolated — other scopes are untouched.
    */
   eraseScope(scope: Scope): Promise<{ deleted: number }>;
   /**

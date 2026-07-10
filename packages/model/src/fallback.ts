@@ -28,6 +28,11 @@ function shouldTryNext(err: unknown, opts?: WithFallbackOptions): boolean {
   return true;
 }
 
+function withResolvedIdentity(response: ModelResponse, model: ModelPort): ModelResponse {
+  if (response.resolvedModelId !== undefined || model.modelId === undefined) return response;
+  return { ...response, resolvedModelId: model.modelId };
+}
+
 /**
  * Wraps a primary `ModelPort` with one or more fallback models.
  *
@@ -60,8 +65,7 @@ export function withFallback(
   opts?: WithFallbackOptions,
 ): ModelPort {
   const chain = [primary, ...fallbacks];
-
-  return {
+  const port: ModelPort = {
     // Expose the primary's modelId so AgentConfig can read it.
     get modelId() {
       return primary.modelId;
@@ -71,7 +75,8 @@ export function withFallback(
       let lastErr: unknown;
       for (let i = 0; i < chain.length; i++) {
         try {
-          return await chain[i]!.complete(request);
+          const model = chain[i]!;
+          return withResolvedIdentity(await model.complete(request), model);
         } catch (err) {
           lastErr = err;
           if (i < chain.length - 1 && shouldTryNext(err, opts)) {
@@ -84,7 +89,12 @@ export function withFallback(
       throw lastErr;
     },
 
-    async *stream(request: ModelRequest): AsyncIterable<ModelStreamPart> {
+  };
+
+  // A complete-only primary must remain complete-only. Advertising stream() would make Agent
+  // bypass the primary complete path entirely. Require the whole chain to share the capability.
+  if (chain.every((model) => model.stream !== undefined)) {
+    port.stream = async function* stream(request: ModelRequest): AsyncIterable<ModelStreamPart> {
       let lastErr: unknown;
       for (let i = 0; i < chain.length; i++) {
         const model = chain[i]!;
@@ -104,7 +114,9 @@ export function withFallback(
         try {
           for await (const part of streamFn(request)) {
             if (part.type === "delta") deltasSeen++;
-            yield part;
+            yield part.type === "final"
+              ? { ...part, response: withResolvedIdentity(part.response, model) }
+              : part;
           }
           return; // success
         } catch (err) {
@@ -119,6 +131,8 @@ export function withFallback(
         }
       }
       throw lastErr;
-    },
-  };
+    };
+  }
+
+  return port;
 }

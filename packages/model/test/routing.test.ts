@@ -58,6 +58,19 @@ describe("withFallback – complete()", () => {
     expect(result.content[0]).toMatchObject({ type: "text", text: "fallback-result" });
   });
 
+  it("annotates responses with the model that actually answered", async () => {
+    const primary = Object.assign(failModel(new Error("down")), { modelId: "primary" });
+    const fallback = Object.assign(new MockModel([resp("fallback")]), { modelId: "fallback" });
+    const result = await withFallback(primary, [fallback]).complete(req);
+    expect(result.resolvedModelId).toBe("fallback");
+  });
+
+  it("does not advertise streaming when the primary is complete-only", () => {
+    const primary = new MockModel([resp("primary")]);
+    const fallback = new StreamMockModel([{ deltas: ["x"], response: resp("x") }]);
+    expect(withFallback(primary, [fallback]).stream).toBeUndefined();
+  });
+
   it("tries all fallbacks in order", async () => {
     const model = withFallback(
       failModel(new Error("e1")),
@@ -192,6 +205,14 @@ describe("routeModel", () => {
     expect(large.calls).toHaveLength(0);
   });
 
+  it("annotates the selected model identity and only exposes shared stream capability", async () => {
+    const small = Object.assign(new MockModel([resp("small")]), { modelId: "small-model" });
+    const large = new StreamMockModel([{ deltas: ["large"], response: resp("large") }]);
+    const model = routeModel(() => "small", { small, large });
+    expect((await model.complete(req)).resolvedModelId).toBe("small-model");
+    expect(model.stream).toBeUndefined();
+  });
+
   it("routes different requests to different tiers", async () => {
     const cheap = new MockModel([resp("cheap"), resp("cheap2")]);
     const premium = new MockModel([resp("premium")]);
@@ -293,6 +314,10 @@ describe("cachedModel – complete()", () => {
     expect(r1.content[0]).toMatchObject({ type: "text", text: "first" });
     expect(r2.content[0]).toMatchObject({ type: "text", text: "first" }); // cached
     expect(callCount).toBe(1);
+  });
+
+  it("does not advertise streaming for a complete-only wrapped model", () => {
+    expect(cachedModel(new MockModel([resp("x")])).stream).toBeUndefined();
   });
 
   it("misses on a different request", async () => {

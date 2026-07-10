@@ -97,24 +97,31 @@ export function routeModel(
     return model;
   }
 
-  return {
+  const port: ModelPort = {
     get modelId() {
       // modelId is request-specific; cannot be determined statically.
       return undefined;
     },
 
     async complete(request: ModelRequest): Promise<ModelResponse> {
-      return resolve(request).complete(request);
-    },
-
-    async *stream(request: ModelRequest): AsyncIterable<ModelStreamPart> {
       const model = resolve(request);
-      if (!model.stream) {
-        throw new Error(
-          `routeModel: resolved model for tier does not implement stream()`,
-        );
-      }
-      yield* model.stream(request);
+      const response = await model.complete(request);
+      return response.resolvedModelId !== undefined || model.modelId === undefined
+        ? response
+        : { ...response, resolvedModelId: model.modelId };
     },
   };
+
+  if (Object.values(tiers).every((model) => model.stream !== undefined)) {
+    port.stream = async function* stream(request: ModelRequest): AsyncIterable<ModelStreamPart> {
+      const model = resolve(request);
+      for await (const part of model.stream!(request)) {
+        yield part.type === "final" && part.response.resolvedModelId === undefined && model.modelId !== undefined
+          ? { ...part, response: { ...part.response, resolvedModelId: model.modelId } }
+          : part;
+      }
+    };
+  }
+
+  return port;
 }

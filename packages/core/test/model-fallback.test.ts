@@ -100,6 +100,44 @@ describe("Feature 1 — model fallback: primary fails → first fallback used", 
     // Second fallback never called (first one succeeded).
     expect(fallback2Calls).toHaveLength(0);
   });
+
+  it("prices the resolved fallback model and enforces maxCostUsd against its real cost", async () => {
+    const store = await freshStore();
+    const primary: ModelPort = {
+      modelId: "cheap",
+      async complete(): Promise<ModelResponse> { throw new Error("primary unavailable"); },
+    };
+    const fallback: ModelPort = {
+      modelId: "expensive",
+      async complete(): Promise<ModelResponse> {
+        return {
+          content: [textBlock("expensive answer")],
+          usage: { inputTokens: 1_000_000, outputTokens: 0 },
+        };
+      },
+    };
+    const agent = new Agent({
+      id: "cost-aware-fallback",
+      instructions: "",
+      model: primary,
+      modelId: "cheap",
+      modelFallback: [fallback],
+      prices: {
+        cheap: { inputPerMTok: 1, outputPerMTok: 1 },
+        expensive: { inputPerMTok: 100, outputPerMTok: 100 },
+      },
+      policy: { maxCostUsd: 50 },
+      store,
+      now: () => "t",
+      newId: ((n) => () => `cost-${n++}`)(0),
+    });
+
+    const result = terminal(await collect(agent.query("hi", { sessionId: "resolved-cost" })));
+    expect(result.subtype).toBe("max_cost");
+    expect(result.cost?.usd).toBe(100);
+    const assistant = (await store.readEvents("resolved-cost")).find((event) => event.kind === "assistant");
+    expect(assistant?.meta).toMatchObject({ resolvedModelId: "expensive", costUsd: 100 });
+  });
 });
 
 // ---------------------------------------------------------------------------

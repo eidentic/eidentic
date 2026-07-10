@@ -356,9 +356,10 @@ function breakdownFor(
   prices: PriceTable | undefined,
   modelId: string | undefined,
   budget?: TreeBudget,
+  foregroundUsd?: number,
 ): CostBreakdown {
   // Tree-aware USD: this run's foreground priced at its own model, PLUS children's already-priced usd.
-  const ownUsd = usdFor(usage, prices, modelId);
+  const ownUsd = foregroundUsd ?? usdFor(usage, prices, modelId);
   const childrenUsd = budget?.usd ?? 0;
   const usd = ownUsd !== undefined ? ownUsd + childrenUsd : (childrenUsd > 0 ? childrenUsd : undefined);
   return {
@@ -658,6 +659,7 @@ async function* emitAborted(
   turn: number,
   rollingHash: string,
   endRoot: (u: Usage, status?: "ok" | "error", message?: string) => void,
+  foregroundUsd?: number,
 ): AsyncGenerator<StreamEvent, void> {
   if (args.durable) {
     await writeCheckpointWith(args, rollingHash);
@@ -668,7 +670,7 @@ async function* emitAborted(
     usage,
     numTurns: turn,
     sessionId: args.session.id,
-    cost: breakdownFor(usage, args.prices, args.modelId, args.budget),
+    cost: breakdownFor(usage, args.prices, args.modelId, args.budget, foregroundUsd),
     details: buildDetails("aborted"),
   };
   endRoot(usage, "error", "aborted");
@@ -695,13 +697,14 @@ function treeSpend(
   prices: PriceTable | undefined,
   modelId: string | undefined,
   budget: TreeBudget | undefined,
+  foregroundUsd?: number,
 ): { usage: Usage; usd: number | undefined } {
   const childUsage = budget?.usage ?? ZERO_USAGE;
   const combined: Usage = {
     inputTokens: usage.inputTokens + childUsage.inputTokens,
     outputTokens: usage.outputTokens + childUsage.outputTokens,
   };
-  const ownUsd = usdFor(usage, prices, modelId);
+  const ownUsd = foregroundUsd ?? usdFor(usage, prices, modelId);
   const childUsd = budget?.usd ?? 0;
   const usd = ownUsd !== undefined ? ownUsd + childUsd : (childUsd > 0 ? childUsd : undefined);
   return { usage: combined, usd };
@@ -726,6 +729,7 @@ async function* runLoop(
   startTurn: number,
   startRollingHash = "",
   pendingCalls: ToolCall[] = [],
+  startForegroundUsd?: number,
 ): AsyncGenerator<StreamEvent, void> {
   // Plan 19 (§5.4): full permission-filtered catalog (stable for the run); lazy mode prunes it per turn.
   const fullSchemas = args.registry.schemas();
@@ -764,6 +768,9 @@ async function* runLoop(
 
   let usage = startUsage;
   let turn = startTurn;
+  // Track money per response/model, independently from aggregate tokens. Pricing aggregate
+  // tokens at the public primary id is incorrect as soon as routing or fallback is involved.
+  let foregroundUsd = startForegroundUsd ?? usdFor(startUsage, args.prices, args.modelId);
 
   // Unify the legacy `maxTurns` arg under the policy: policy.maxTurns wins; else legacy; else 16.
   const policy: CostPolicy = { ...args.policy };
@@ -793,7 +800,7 @@ async function* runLoop(
     if (cached > 0) rootSpan.setAttribute("gen_ai.usage.cached_input_tokens", cached);
     const hitRate = final.inputTokens > 0 ? cached / final.inputTokens : 0;
     rootSpan.setAttribute("eidentic.kv_cache_hit_rate", hitRate);
-    const usd = usdFor(final, args.prices, args.modelId);
+    const usd = foregroundUsd ?? usdFor(final, args.prices, args.modelId);
     if (usd !== undefined) rootSpan.setAttribute("eidentic.cost_usd", usd);
     rootSpan.setStatus(status, message);
     rootSpan.end();
@@ -826,7 +833,7 @@ async function* runLoop(
           usage,
           numTurns: turn,
           sessionId: args.session.id,
-          cost: breakdownFor(usage, args.prices, args.modelId, args.budget),
+          cost: breakdownFor(usage, args.prices, args.modelId, args.budget, foregroundUsd),
           details: buildDetails("suspended", { callId: e.callId, toolName: pendingSuspToolName }),
         };
         endRoot(usage);
@@ -874,7 +881,7 @@ async function* runLoop(
     // --- §16.4 abort boundary: top of turn, BEFORE compaction + model call ---
     if (args.signal?.aborted) {
       logger.log("debug", "eidentic:loop", "abort signal received at turn start", { turn });
-      yield* emitAborted(args, usage, turn, rollingHash, endRoot);
+      yield* emitAborted(args, usage, turn, rollingHash, endRoot, foregroundUsd);
       return;
     }
 
@@ -935,7 +942,7 @@ async function* runLoop(
     }
 
     // --- Cost governor preflight (§11.2 + §8.6 tree budget): enforce BEFORE the next model call ---
-    const tree = treeSpend(usage, args.prices, args.modelId, args.budget);
+    const tree = treeSpend(usage, args.prices, args.modelId, args.budget, foregroundUsd);
     const abort = preflightAbort(policy, tree.usage, turn, monotonicNow() - startMs, tree.usd);
     if (abort) {
       logger.log("debug", "eidentic:cost", "preflight abort", { subtype: abort, turn, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens });
@@ -946,7 +953,7 @@ async function* runLoop(
         usage,
         numTurns: turn,
         sessionId: args.session.id,
-        cost: breakdownFor(usage, args.prices, args.modelId, args.budget),
+        cost: breakdownFor(usage, args.prices, args.modelId, args.budget, foregroundUsd),
         details: buildDetails(abort, {
           usdSpent: tree.usd,
           usdLimit: policy.maxCostUsd,
@@ -965,7 +972,7 @@ async function* runLoop(
     // Soft cap (§11.2): fire onCostThreshold once when softCostUsd is first crossed. Does NOT abort.
     if (!softFired && policy.softCostUsd !== undefined && tree.usd !== undefined && tree.usd >= policy.softCostUsd) {
       softFired = true;
-      args.onCostThreshold?.({ usd: tree.usd, cost: breakdownFor(usage, args.prices, args.modelId, args.budget), numTurns: turn });
+      args.onCostThreshold?.({ usd: tree.usd, cost: breakdownFor(usage, args.prices, args.modelId, args.budget, foregroundUsd), numTurns: turn });
     }
 
     // --- OTel chat span: one per model call (§11.1) ---
@@ -991,6 +998,7 @@ async function* runLoop(
     let response: ModelResponse;
     let modelError: unknown;
     let resolved = false;
+    let resolvedModel: ModelPort | undefined;
 
     // Streaming path uses a separate generator so we can track whether any delta
     // was emitted BEFORE a failure. Once a delta is yielded to the consumer, we
@@ -1025,7 +1033,7 @@ async function* runLoop(
 
         // Abort: propagate immediately — never fall back.
         if (args.signal?.aborted) {
-          yield* emitAborted(args, usage, turn, rollingHash, endRoot);
+          yield* emitAborted(args, usage, turn, rollingHash, endRoot, foregroundUsd);
           chatSpan?.setStatus("ok");
           chatSpan?.end();
           return;
@@ -1034,7 +1042,7 @@ async function* runLoop(
         if (streamError !== null && streamError !== undefined) {
           // AbortError: propagate immediately.
           if (streamError instanceof Error && streamError.name === "AbortError") {
-            yield* emitAborted(args, usage, turn, rollingHash, endRoot);
+            yield* emitAborted(args, usage, turn, rollingHash, endRoot, foregroundUsd);
             chatSpan?.setStatus("ok");
             chatSpan?.end();
             return;
@@ -1068,6 +1076,7 @@ async function* runLoop(
 
         // Success: stream completed with a final response.
         response = localFinal;
+        resolvedModel = candidate;
         resolved = true;
         break;
       } else {
@@ -1084,7 +1093,7 @@ async function* runLoop(
         for (let attempt = 0; attempt < maxAttempts; attempt++) {
           // AbortError: never retry — propagate immediately.
           if (args.signal?.aborted) {
-            yield* emitAborted(args, usage, turn, rollingHash, endRoot);
+            yield* emitAborted(args, usage, turn, rollingHash, endRoot, foregroundUsd);
             chatSpan?.setStatus("ok");
             chatSpan?.end();
             return;
@@ -1092,7 +1101,7 @@ async function* runLoop(
           if (attempt > 0 && backoffMs > 0) {
             try { await sleepWithSignal(backoffMs, args.signal); }
             catch {
-              yield* emitAborted(args, usage, turn, rollingHash, endRoot);
+              yield* emitAborted(args, usage, turn, rollingHash, endRoot, foregroundUsd);
               chatSpan?.setStatus("ok");
               chatSpan?.end();
               return;
@@ -1100,12 +1109,13 @@ async function* runLoop(
           }
           try {
             response = await candidate.complete(req);
+            resolvedModel = candidate;
             candidateResolved = true;
             break;
           } catch (err) {
             // AbortError is never transient: propagate immediately.
             if (args.signal?.aborted || (err instanceof Error && err.name === "AbortError")) {
-              yield* emitAborted(args, usage, turn, rollingHash, endRoot);
+              yield* emitAborted(args, usage, turn, rollingHash, endRoot, foregroundUsd);
               chatSpan?.setStatus("ok");
               chatSpan?.end();
               return;
@@ -1139,7 +1149,7 @@ async function* runLoop(
         type: "result", subtype: "error",
         output: truncatedErr,
         usage, numTurns: turn, sessionId: args.session.id,
-        cost: breakdownFor(usage, args.prices, args.modelId, args.budget),
+        cost: breakdownFor(usage, args.prices, args.modelId, args.budget, foregroundUsd),
         details: buildDetails("error", { errorName: modelError instanceof Error ? modelError.name : undefined }),
       };
       endRoot(usage, "error", modelError instanceof Error ? modelError.name : "model error");
@@ -1147,6 +1157,21 @@ async function* runLoop(
     }
     // Suppress TS "used before assigned" — resolved === true guarantees response was assigned.
     response = response!;
+    const concreteModelId = response.resolvedModelId ?? resolvedModel?.modelId ?? args.modelId;
+    if (response.resolvedModelId === undefined && concreteModelId !== undefined) {
+      response = { ...response, resolvedModelId: concreteModelId };
+    }
+    const providerCost = response.costUsd;
+    const validProviderCost = typeof providerCost === "number" && Number.isFinite(providerCost) && providerCost >= 0
+      ? providerCost
+      : undefined;
+    const tableCost = usdFor(response.usage, args.prices, concreteModelId);
+    // A custom adapter must not lower a configured hard ceiling by under-reporting cost.
+    // When both sources exist, enforce the more conservative value.
+    const callUsd = validProviderCost !== undefined && tableCost !== undefined
+      ? Math.max(validProviderCost, tableCost)
+      : (validProviderCost ?? tableCost);
+    if (callUsd !== undefined) foregroundUsd = (foregroundUsd ?? 0) + callUsd;
 
     // Remove the ephemeral onTurnStart injection from the window immediately after the model call.
     // It was pushed as the last message before the call; pop it now so subsequent turns and the
@@ -1172,12 +1197,14 @@ async function* runLoop(
     // Record per-call usage on the chat span and close it.
     chatSpan?.setAttribute("gen_ai.usage.input_tokens", response.usage.inputTokens);
     chatSpan?.setAttribute("gen_ai.usage.output_tokens", response.usage.outputTokens);
+    if (concreteModelId !== undefined) chatSpan?.setAttribute("gen_ai.response.model", concreteModelId);
+    if (callUsd !== undefined) chatSpan?.setAttribute("eidentic.cost_usd", callUsd);
     chatSpan?.setStatus("ok");
     chatSpan?.end();
 
     // --- §16.4 abort boundary: after model call + usage accounting ---
     if (args.signal?.aborted) {
-      yield* emitAborted(args, usage, turn, rollingHash, endRoot);
+      yield* emitAborted(args, usage, turn, rollingHash, endRoot, foregroundUsd);
       return;
     }
 
@@ -1198,7 +1225,7 @@ async function* runLoop(
             usage,
             numTurns: turn,
             sessionId: args.session.id,
-            cost: breakdownFor(usage, args.prices, args.modelId, args.budget),
+            cost: breakdownFor(usage, args.prices, args.modelId, args.budget, foregroundUsd),
             details: buildDetails("guardrail", {
               guardrailReason: gr.blocked.reason,
               guardrailCode: gr.blocked.code,
@@ -1216,7 +1243,19 @@ async function* runLoop(
 
     let assistantEvent: StoredEvent | null = null;
     {
-      const gen = safeAppend(args.session, "assistant", { content: assistantContent }, { usage: response.usage }, usage, turn);
+      const gen = safeAppend(
+        args.session,
+        "assistant",
+        { content: assistantContent },
+        {
+          usage: response.usage,
+          ...(concreteModelId !== undefined ? { resolvedModelId: concreteModelId } : {}),
+          ...(response.provider !== undefined ? { provider: response.provider } : {}),
+          ...(callUsd !== undefined ? { costUsd: callUsd } : {}),
+        },
+        usage,
+        turn,
+      );
       let step = await gen.next();
       while (!step.done) { yield step.value as StreamEvent; step = await gen.next(); }
       assistantEvent = step.value as StoredEvent | null;
@@ -1238,7 +1277,7 @@ async function* runLoop(
     // checkpointed, so a durable resume correctly sees the event and does not re-issue the call.
     // This catches the case where the terminal response (no tool uses) itself exceeds a ceiling.
     {
-      const postTree = treeSpend(usage, args.prices, args.modelId, args.budget);
+      const postTree = treeSpend(usage, args.prices, args.modelId, args.budget, foregroundUsd);
       const postElapsedMs = monotonicNow() - startMs;
       const postAbort = preflightAbort(policy, postTree.usage, turn, postElapsedMs, postTree.usd);
       if (postAbort) {
@@ -1249,7 +1288,7 @@ async function* runLoop(
           usage,
           numTurns: turn,
           sessionId: args.session.id,
-          cost: breakdownFor(usage, args.prices, args.modelId, args.budget),
+          cost: breakdownFor(usage, args.prices, args.modelId, args.budget, foregroundUsd),
           details: buildDetails(postAbort, {
             usdSpent: postTree.usd,
             usdLimit: policy.maxCostUsd,
@@ -1267,7 +1306,7 @@ async function* runLoop(
       // Soft cap (post-call): fire if not yet fired and threshold newly crossed.
       if (!softFired && policy.softCostUsd !== undefined && postTree.usd !== undefined && postTree.usd >= policy.softCostUsd) {
         softFired = true;
-        args.onCostThreshold?.({ usd: postTree.usd, cost: breakdownFor(usage, args.prices, args.modelId, args.budget), numTurns: turn });
+        args.onCostThreshold?.({ usd: postTree.usd, cost: breakdownFor(usage, args.prices, args.modelId, args.budget, foregroundUsd), numTurns: turn });
       }
     }
 
@@ -1324,7 +1363,7 @@ async function* runLoop(
             type: "result", subtype: "error",
             output: `structured output requested but the model's final answer is not valid JSON: ${text.slice(0, 200)}`,
             usage, numTurns: turn, sessionId: args.session.id,
-            cost: breakdownFor(usage, args.prices, args.modelId, args.budget),
+            cost: breakdownFor(usage, args.prices, args.modelId, args.budget, foregroundUsd),
             details: buildDetails("error", {
               errorName: "SyntaxError",
               errorKind: "structured_output_parse",
@@ -1360,7 +1399,7 @@ async function* runLoop(
             type: "result", subtype: "error",
             output: `structured output failed schema validation: ${validated.error}`,
             usage, numTurns: turn, sessionId: args.session.id,
-            cost: breakdownFor(usage, args.prices, args.modelId, args.budget),
+            cost: breakdownFor(usage, args.prices, args.modelId, args.budget, foregroundUsd),
             details: buildDetails("error", {
               errorName: "ValidationError",
               errorKind: "structured_output_validation",
@@ -1375,7 +1414,7 @@ async function* runLoop(
         yield {
           type: "result", subtype: "success", output: text, object: validated.value,
           usage, numTurns: turn, sessionId: args.session.id,
-          cost: breakdownFor(usage, args.prices, args.modelId, args.budget),
+          cost: breakdownFor(usage, args.prices, args.modelId, args.budget, foregroundUsd),
           details: buildDetails("success"),
         };
         endRoot(usage);
@@ -1386,7 +1425,7 @@ async function* runLoop(
       yield {
         type: "result", subtype: "success", output: text,
         usage, numTurns: turn, sessionId: args.session.id,
-        cost: breakdownFor(usage, args.prices, args.modelId, args.budget),
+        cost: breakdownFor(usage, args.prices, args.modelId, args.budget, foregroundUsd),
         details: buildDetails("success"),
       };
       endRoot(usage);
@@ -1424,7 +1463,7 @@ async function* runLoop(
           usage,
           numTurns: turn,
           sessionId: args.session.id,
-          cost: breakdownFor(usage, args.prices, args.modelId, args.budget),
+          cost: breakdownFor(usage, args.prices, args.modelId, args.budget, foregroundUsd),
           details: buildDetails("suspended", { callId: e.callId, toolName: suspToolName }),
         };
         endRoot(usage);
@@ -1461,7 +1500,7 @@ async function* runLoop(
 
     // --- §16.4 abort boundary: after tool batch ---
     if (args.signal?.aborted) {
-      yield* emitAborted(args, usage, turn, rollingHash, endRoot);
+      yield* emitAborted(args, usage, turn, rollingHash, endRoot, foregroundUsd);
       return;
     }
   }
@@ -1701,6 +1740,25 @@ export async function* resumeTurn(args: RunTurnArgs): AsyncIterable<StreamEvent>
     }
     return acc;
   }, ZERO_USAGE);
+  let priorForegroundUsd = 0;
+  let hasPricedAssistant = false;
+  let allAssistantCostsKnown = true;
+  for (const event of events) {
+    if (event.kind !== "assistant" || !event.meta?.usage) continue;
+    const storedCost = event.meta.costUsd;
+    const storedModelId = typeof event.meta.resolvedModelId === "string" ? event.meta.resolvedModelId : args.modelId;
+    const eventCost = typeof storedCost === "number" && Number.isFinite(storedCost) && storedCost >= 0
+      ? storedCost
+      : usdFor(event.meta.usage as Usage, args.prices, storedModelId);
+    if (eventCost === undefined) allAssistantCostsKnown = false;
+    else {
+      hasPricedAssistant = true;
+      priorForegroundUsd += eventCost;
+    }
+  }
+  const resumedForegroundUsd = allAssistantCostsKnown && hasPricedAssistant
+    ? priorForegroundUsd
+    : usdFor(priorUsage, args.prices, args.modelId);
 
   // Compute pending tool calls: look at the LAST assistant event in the log (regardless of whether
   // subsequent audit-only events like `suspension` or `compaction` follow it). If that assistant
@@ -1750,7 +1808,7 @@ export async function* resumeTurn(args: RunTurnArgs): AsyncIterable<StreamEvent>
         usage: priorUsage,
         numTurns: 0,
         sessionId: args.session.id,
-        cost: breakdownFor(priorUsage, args.prices, args.modelId, args.budget),
+        cost: breakdownFor(priorUsage, args.prices, args.modelId, args.budget, resumedForegroundUsd),
         details: buildDetails("guardrail", {
           guardrailReason: gr.blocked.reason,
           guardrailCode: gr.blocked.code,
@@ -1777,7 +1835,7 @@ export async function* resumeTurn(args: RunTurnArgs): AsyncIterable<StreamEvent>
     messages = buildInitialMessages(args, blocks, recall);
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
-    const result: TerminalResultEvent = { type: "result", subtype: "error", output: errMsg, usage: priorUsage, numTurns: 0, sessionId: args.session.id, cost: breakdownFor(priorUsage, args.prices, args.modelId, args.budget) };
+    const result: TerminalResultEvent = { type: "result", subtype: "error", output: errMsg, usage: priorUsage, numTurns: 0, sessionId: args.session.id, cost: breakdownFor(priorUsage, args.prices, args.modelId, args.budget, resumedForegroundUsd) };
     yield* persistAndYieldTerminal(args, runId, result);
     return;
   }
@@ -1825,6 +1883,6 @@ export async function* resumeTurn(args: RunTurnArgs): AsyncIterable<StreamEvent>
   yield* persistLoopTerminal(
     args,
     runId,
-    runLoop(args, messages, priorUsage, 0, resumeRollingHash, pendingCalls),
+    runLoop(args, messages, priorUsage, 0, resumeRollingHash, pendingCalls, resumedForegroundUsd),
   );
 }
