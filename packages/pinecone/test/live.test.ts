@@ -13,6 +13,11 @@ const live = apiKey ? describe : describe.skip;
 const pc = apiKey ? new Pinecone({ apiKey }) : undefined;
 let createdIndex = false;
 const namespaces = new Set<string>();
+const consistencyDelayMs = Number(process.env.EIDENTIC_TEST_PINECONE_CONSISTENCY_DELAY_MS ?? 5_000);
+
+if (!Number.isFinite(consistencyDelayMs) || consistencyDelayMs < 0) {
+  throw new Error("EIDENTIC_TEST_PINECONE_CONSISTENCY_DELAY_MS must be a non-negative number");
+}
 
 beforeAll(async () => {
   if (!pc || indexName) return;
@@ -54,11 +59,14 @@ afterAll(async () => {
 }, 180_000);
 
 live("PineconeVectorStore conformance (live Pinecone)", () => {
-  for (const c of vectorConformanceCases(async () => {
-    if (!pc || !indexName) throw new Error("live Pinecone index is not initialized");
-    const namespace = `conf_${randomUUID().replaceAll("-", "")}`;
-    namespaces.add(namespace);
-    const index = pc.index(indexName).namespace(namespace);
-    return PineconeVectorStore.create({ index, dim: 4 });
-  })) it(c.name, c.run, 30_000);
+  for (const c of vectorConformanceCases(
+    async () => {
+      if (!pc || !indexName) throw new Error("live Pinecone index is not initialized");
+      const namespace = `conf_${randomUUID().replaceAll("-", "")}`;
+      namespaces.add(namespace);
+      const index = pc.index(indexName).namespace(namespace);
+      return PineconeVectorStore.create({ index, dim: 4 });
+    },
+    { settle: () => new Promise((resolve) => setTimeout(resolve, consistencyDelayMs)) },
+  )) it(c.name, c.run, 45_000);
 });

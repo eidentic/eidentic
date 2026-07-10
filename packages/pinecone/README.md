@@ -39,6 +39,9 @@ only random test namespaces are deleted. Never target a production index.
 
 The disposable index defaults to AWS `us-east-1`; override with
 `EIDENTIC_TEST_PINECONE_CLOUD` and `EIDENTIC_TEST_PINECONE_REGION` when required by the project.
+Because Pinecone is eventually consistent, the live suite waits 5 seconds between mutations and
+dependent reads. Override this only for provider-specific testing with
+`EIDENTIC_TEST_PINECONE_CONSISTENCY_DELAY_MS` (a non-negative millisecond value).
 
 ## Links
 

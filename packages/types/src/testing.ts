@@ -1145,7 +1145,10 @@ export class InMemoryVectorStore implements VectorPort {
 }
 
 /** Behavioral contract every VectorPort adapter must satisfy (uses tiny fixed vectors — no embedder needed). */
-export function vectorConformanceCases(makeStore: () => Promise<VectorPort> | VectorPort): ConformanceCase[] {
+export function vectorConformanceCases(
+  makeStore: () => Promise<VectorPort> | VectorPort,
+  opts: { settle?: () => Promise<void> } = {},
+): ConformanceCase[] {
   const k = "user:a:u1";
   const other = "user:a:u2";
   // 4-dim vectors where similarity is obvious
@@ -1154,11 +1157,13 @@ export function vectorConformanceCases(makeStore: () => Promise<VectorPort> | Ve
     const s = await makeStore();
     await fn(s);
   };
+  const settle = opts.settle ?? (async () => {});
   return [
     { name: "vector: ranks by similarity within scope, isolates scopes", run: withStore(async (s) => {
       await s.upsert(e("a", k, "A", [1, 0, 0, 0]));
       await s.upsert(e("b", k, "B", [0, 1, 0, 0]));
       await s.upsert(e("c", other, "C", [1, 0, 0, 0]));
+      await settle();
       const hits = await s.search([1, 0, 0, 0], k, 10);
       assertEqual(hits[0]?.id, "a", "closest first");
       assert(!hits.some((h) => h.id === "c"), "other scope excluded");
@@ -1166,6 +1171,7 @@ export function vectorConformanceCases(makeStore: () => Promise<VectorPort> | Ve
     { name: "vector: idempotent upsert by id", run: withStore(async (s) => {
       await s.upsert(e("x", k, "old", [1, 0, 0, 0]));
       await s.upsert(e("x", k, "new", [0, 0, 0, 1]));
+      await settle();
       const hits = await s.search([0, 0, 0, 1], k, 10);
       assertEqual(hits.filter((h) => h.id === "x").length, 1, "single row");
       assertEqual(hits[0]?.text, "new", "latest wins");
@@ -1173,6 +1179,7 @@ export function vectorConformanceCases(makeStore: () => Promise<VectorPort> | Ve
     { name: "vector: same logical id may exist independently in different scopes", run: withStore(async (s) => {
       await s.upsert(e("shared", k, "in A", [1, 0, 0, 0]));
       await s.upsert(e("shared", other, "in B", [0, 1, 0, 0]));
+      await settle();
       const hitsA = await s.search([1, 0, 0, 0], k, 10);
       const hitsB = await s.search([0, 1, 0, 0], other, 10);
       assertEqual(hitsA.find((h) => h.id === "shared")?.text, "in A", "scope A keeps its entry");
@@ -1180,14 +1187,18 @@ export function vectorConformanceCases(makeStore: () => Promise<VectorPort> | Ve
     }) },
     { name: "vector: delete removes by id within scope", run: withStore(async (s) => {
       await s.upsert(e("d", k, "D", [1, 0, 0, 0]));
+      await settle();
       await s.delete("d", k);
+      await settle();
       const hits = await s.search([1, 0, 0, 0], k, 10);
       assert(!hits.some((h) => h.id === "d"), "deleted");
     }) },
     { name: "vector: delete in scope A does not remove same id in scope B", run: withStore(async (s) => {
       await s.upsert(e("shared", k, "in A", [1, 0, 0, 0]));
       await s.upsert(e("shared", other, "in B", [1, 0, 0, 0]));
+      await settle();
       await s.delete("shared", k);
+      await settle();
       const hitsA = await s.search([1, 0, 0, 0], k, 10);
       assert(!hitsA.some((h) => h.id === "shared"), "removed from scope A");
       const hitsB = await s.search([1, 0, 0, 0], other, 10);
@@ -1196,6 +1207,7 @@ export function vectorConformanceCases(makeStore: () => Promise<VectorPort> | Ve
     { name: "vector: exact-match query returns top hit with score > 0.99", run: withStore(async (s) => {
       const vec: number[] = [1, 0, 0, 0];
       await s.upsert(e("exact", k, "E", vec));
+      await settle();
       const hits = await s.search(vec, k, 10);
       assert(hits.length > 0, "at least one hit");
       assert(hits[0]?.id === "exact", "exact match is top hit");
@@ -1208,6 +1220,7 @@ export function vectorConformanceCases(makeStore: () => Promise<VectorPort> | Ve
       await s.upsert(e("l1", k, "L1", [1, 0, 0, 0]));
       await s.upsert(e("l2", k, "L2", [0, 1, 0, 0]));
       await s.upsert(e("l3", other, "L3", [0, 0, 1, 0]));
+      await settle();
       const entries = await s.list(k);
       const ids = entries.map((x) => x.id).sort();
       assertEqual(ids, ["l1", "l2"], "list returns exactly the entries in scope k (other scope excluded)");
@@ -1222,12 +1235,14 @@ export function vectorConformanceCases(makeStore: () => Promise<VectorPort> | Ve
       await s.upsert(e("da1", k, "A1", [1, 0, 0, 0]));
       await s.upsert(e("da2", k, "A2", [0, 1, 0, 0]));
       await s.upsert(e("db1", other, "B1", [1, 0, 0, 0]));
+      await settle();
 
       // Verify A has entries before erasure
       assert((await s.search([1, 0, 0, 0], k, 10)).length > 0, "scope A has entries before eraseScope");
 
       const result = await s.eraseScope(k);
       assert(result.deleted > 0, "eraseScope returns deleted > 0");
+      await settle();
 
       // Scope A is empty
       assertEqual(await s.search([1, 0, 0, 0], k, 10), [], "scope A empty after eraseScope");
