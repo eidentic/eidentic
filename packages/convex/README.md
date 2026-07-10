@@ -208,6 +208,11 @@ For production semantic memory at scale, prefer an external `VectorPort` such as
 This package is covered by Convex store/vector/durable conformance tests via `convex-test`, plus
 tests for table-name factories, authorization metadata, and in-process runners.
 
+`test/live.test.ts` runs the same store, durable, vector, and fail-closed authorization checks
+against a real Convex backend when `EIDENTIC_TEST_CONVEX_URL` is set. The target must be a disposable
+test deployment that exposes a destructive test-only `reset:all` mutation; never point the live
+suite at shared development or production data.
+
 ## License
 
 Apache-2.0
