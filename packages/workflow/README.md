@@ -62,6 +62,12 @@ The file-backed run store writes `0600` snapshots through random `O_EXCL` tempor
 before and after atomic rename, serializes independent processes with an owner-only lock, and
 refuses caller-writable symlink leaves or parent components.
 
+Suspended-run replay uses a single-owner lease. The runner renews the lease while work is active
+and validates the claim immediately before every uncached `ctx.step` effect; expired or superseded
+claims fail closed. Keep external side effects inside `ctx.step`, make them idempotent, and pass a
+downstream fencing/idempotency token when the external system supports one: JavaScript cannot undo
+an effect from step code that ignores cancellation after its lease is lost.
+
 ## Links
 
 - [GitHub](https://github.com/eidentic/eidentic)

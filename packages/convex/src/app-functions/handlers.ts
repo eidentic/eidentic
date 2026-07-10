@@ -205,6 +205,20 @@ const getSession = defineQuery("getSession", {
   },
 });
 
+const replaceSessionApiKey = defineMutation("replaceSessionApiKey", {
+  args: { sessionId: v.string(), expected: v.string(), replacement: v.string() },
+  returns: v.boolean(),
+  handler: async (ctx: MCtx, { sessionId, expected, replacement }) => {
+    const row = await ctx.db
+      .query(tables.session)
+      .withIndex("by_session_id", (q: any) => q.eq("sessionId", sessionId))
+      .first();
+    if (!row || row.apiKey !== expected) return false;
+    await ctx.db.patch(row._id, { apiKey: replacement });
+    return true;
+  },
+});
+
 const listSessions = defineQuery("listSessions", {
   args: {
     agentId: v.optional(v.string()),
@@ -489,6 +503,42 @@ const searchMemory = defineQuery("searchMemory", {
       }
     }
     return scored.sort((a: any, b: any) => b.score - a.score).slice(0, topK);
+  },
+});
+
+const listMemory = defineQuery("listMemory", {
+  args: { scopeKey: v.string() },
+  handler: async (ctx: QCtx, { scopeKey }) => {
+    const rows = await ctx.db
+      .query(tables.memory)
+      .withIndex("by_scope", (q: any) => q.eq("scopeKey", scopeKey))
+      .collect();
+    return rows.sort((a: any, b: any) => a.extId.localeCompare(b.extId)).map((entry: any) => ({
+      id: entry.extId,
+      text: entry.text,
+      ...(entry.ingestedAt !== undefined ? { ingestedAt: entry.ingestedAt } : {}),
+      ...(entry.metadata !== undefined ? { metadata: entry.metadata } : {}),
+    }));
+  },
+});
+
+const deleteMemory = defineMutation("deleteMemory", {
+  args: { scopeKey: v.string(), ids: v.array(v.string()) },
+  returns: v.number(),
+  handler: async (ctx: MCtx, { scopeKey, ids }) => {
+    const targets = new Set(ids);
+    if (targets.size === 0) return 0;
+    const rows = await ctx.db
+      .query(tables.memory)
+      .withIndex("by_scope", (q: any) => q.eq("scopeKey", scopeKey))
+      .collect();
+    let deleted = 0;
+    for (const row of rows) {
+      if (!targets.has(row.extId)) continue;
+      await ctx.db.delete(row._id);
+      deleted++;
+    }
+    return deleted;
   },
 });
 
@@ -968,6 +1018,55 @@ const recordIntent = defineMutation("recordIntent", {
   },
 });
 
+const claimIntent = defineMutation("claimIntent", {
+  args: {
+    key: v.string(),
+    argsHash: v.string(),
+    now: v.string(),
+    scopeKey: v.optional(v.string()),
+    sessionId: v.optional(v.string()),
+    ownerKey: v.optional(v.string()),
+  },
+  returns: v.boolean(),
+  handler: async (ctx: MCtx, { key, argsHash, now, scopeKey, sessionId, ownerKey }) => {
+    const existing = await ctx.db
+      .query(tables.idempotency)
+      .withIndex("by_key", (q: any) => q.eq("key", key))
+      .first();
+    if (existing) return false;
+    await ctx.db.insert(tables.idempotency, {
+      key,
+      status: "intent",
+      argsHash,
+      createdAt: now,
+      ...(scopeKey !== undefined ? { scopeKey } : {}),
+      ...(sessionId !== undefined ? { sessionId } : {}),
+      ...(ownerKey !== undefined ? { ownerKey } : {}),
+    });
+    return true;
+  },
+});
+
+const releaseIntent = defineMutation("releaseIntent", {
+  args: {
+    key: v.string(),
+    argsHash: v.string(),
+    scopeKey: v.optional(v.string()),
+    sessionId: v.optional(v.string()),
+    ownerKey: v.optional(v.string()),
+  },
+  returns: v.boolean(),
+  handler: async (ctx: MCtx, { key, argsHash }) => {
+    const existing = await ctx.db
+      .query(tables.idempotency)
+      .withIndex("by_key", (q: any) => q.eq("key", key))
+      .first();
+    if (!existing || existing.status !== "intent" || existing.argsHash !== argsHash) return false;
+    await ctx.db.delete(existing._id);
+    return true;
+  },
+});
+
 const recordCompletion = defineMutation("recordCompletion", {
   args: {
     key: v.string(),
@@ -1074,6 +1173,7 @@ const getDecision = defineQuery("getDecision", {
     functions: {
       createSession,
       getSession,
+      replaceSessionApiKey,
       listSessions,
       appendEvents,
       readEvents,
@@ -1085,6 +1185,8 @@ const getDecision = defineQuery("getDecision", {
       listBlocks,
       indexMemory,
       searchMemory,
+      listMemory,
+      deleteMemory,
       assertFact,
       queryFacts,
       corroborate,
@@ -1099,6 +1201,8 @@ const getDecision = defineQuery("getDecision", {
       writeCheckpoint,
       lastCheckpoint,
       recordIntent,
+      claimIntent,
+      releaseIntent,
       recordCompletion,
       getIdempotency,
       recordDecision,

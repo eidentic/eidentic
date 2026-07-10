@@ -178,6 +178,31 @@ export function fileWorkflowRunStore(path: string): WorkflowRunStore {
         return finished;
       }));
     },
+
+    async renewResume(id: string, claimId: string, expiresAt: number): Promise<WorkflowRunRecord> {
+      return enqueue(() => withExclusiveFileLock(filePath, async () => {
+        const records = await diskSnapshot();
+        const index = records.findIndex((candidate) => candidate.id === id);
+        const current = index >= 0 ? records[index] : undefined;
+        const now = Date.now();
+        if (
+          !current ||
+          current.runStatus !== "resuming" ||
+          current.resumeClaim?.id !== claimId ||
+          current.resumeClaim.expiresAt <= now
+        ) {
+          throw new WorkflowResumeConflictError(id, "resume claim is expired or no longer owned");
+        }
+        const renewed: WorkflowRunRecord = {
+          ...current,
+          resumeClaim: { ...current.resumeClaim, expiresAt },
+        };
+        records[index] = renewed;
+        await atomicWritePrivateFile(filePath, JSON.stringify(records));
+        replaceMirror(records);
+        return renewed;
+      }));
+    },
   };
 }
 

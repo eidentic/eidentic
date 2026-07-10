@@ -143,7 +143,10 @@ function makeFakePoolProxiedToPglite(pg: PGlite): FakePool & { dedicatedClient: 
     calls,
     released: false,
     query: async (text: string, params?: unknown[]) => {
-      calls.push(text.trim().split(/\s+/)[0]!.toUpperCase()); // record first keyword
+      const normalized = text.trim().replace(/\s+/g, " ");
+      if (/^BEGIN/i.test(normalized)) calls.push(normalized.toUpperCase());
+      else if (/pg_advisory_xact_lock/i.test(normalized)) calls.push("ADVISORY_LOCK");
+      else calls.push(normalized.split(" ")[0]!.toUpperCase());
       return pg.query(text, params as unknown[]);
     },
     release: () => {
@@ -254,6 +257,28 @@ describe("PostgresStore — pool connection isolation", () => {
     await expect(poolStore.upsertBlock(scope, { label: "b", value: "v2" }, 5)).rejects.toThrow(/conflict/i);
 
     expect(pool.dedicatedClient.released).toBe(true);
+  });
+
+  it("assertFact uses a serializable transaction and tuple advisory lock", async () => {
+    const pg = new PGlite();
+    try {
+      const store = new PostgresStore(pg);
+      await store.migrate();
+      const pool = makeFakePoolProxiedToPglite(pg);
+      const poolStore = new PostgresStore(pool, { newId: () => "fact-1" });
+
+      await poolStore.assertFact(
+        { kind: "agent", agentId: "a1" },
+        { subject: "Agent", predicate: "status", object: "ready" },
+      );
+
+      expect(pool.dedicatedClient.calls).toContain("BEGIN ISOLATION LEVEL SERIALIZABLE");
+      expect(pool.dedicatedClient.calls).toContain("ADVISORY_LOCK");
+      expect(pool.dedicatedClient.calls).toContain("COMMIT");
+      expect(pool.dedicatedClient.released).toBe(true);
+    } finally {
+      await pg.close();
+    }
   });
 
   it("indexMemory([]) issues zero queries to the pool client", async () => {

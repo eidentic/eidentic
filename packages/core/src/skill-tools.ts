@@ -124,7 +124,10 @@ export function hasSkills(x: unknown): x is SkillPort {
  * All are read-only (run concurrently). They occupy the reserved `skill_*` namespace and
  * are appended after user + memory_* + graph_* tools.
  */
-export function skillTools(skills: SkillPort): Tool[] {
+export function skillTools(
+  skills: SkillPort,
+  onActivated?: (name: string, allowedTools: readonly string[]) => void,
+): Tool[] {
   const tools: Tool[] = [
     createTool({
       id: "skill_search",
@@ -152,6 +155,8 @@ export function skillTools(skills: SkillPort): Tool[] {
       execute: async ({ input }) => {
         const loaded = await skills.use(input.name);
         if (!loaded) return { error: `skill '${input.name}' not found` };
+        const allowedTools = Object.freeze([...(loaded.allowedTools ?? [])]);
+        onActivated?.(loaded.name, allowedTools);
         // H5: neutralize any `</skill_reference>` (or opening variant) sequences inside the body
         // before wrapping so a malicious skill cannot close the outer delimiter early and inject
         // instruction text into the model context. Angle brackets on just those sequences are
@@ -165,6 +170,7 @@ export function skillTools(skills: SkillPort): Tool[] {
         return {
           name: loaded.name,
           body: wrappedBody,
+          allowedTools,
           ...(loaded.memory !== undefined ? { memory: loaded.memory } : {}),
           ...(loaded.references !== undefined && loaded.references.length > 0
             ? { references: loaded.references }

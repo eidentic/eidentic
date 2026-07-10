@@ -1,4 +1,5 @@
 import { EVENT_SCHEMA_VERSION, StoreConflictError, upcastEvents, type EventKind, type StoredEvent, type StorePort, type Upcaster, type Usage } from "@eidentic/types";
+import { sha256Hex } from "./sha256.js";
 
 export interface SessionDeps {
   sessionId: string;
@@ -16,6 +17,17 @@ export interface SessionDeps {
 }
 
 type SessionOwner = { userId?: string; orgId?: string; apiKey?: string };
+
+const CREDENTIAL_FINGERPRINT_PREFIX = "eidentic.credential.sha256:";
+
+export async function credentialFingerprint(credential: string): Promise<string> {
+  return CREDENTIAL_FINGERPRINT_PREFIX + await sha256Hex(credential);
+}
+
+export async function fingerprintSessionOwner(owner: SessionOwner): Promise<SessionOwner> {
+  if (owner.apiKey === undefined || owner.apiKey.startsWith(CREDENTIAL_FINGERPRINT_PREFIX)) return owner;
+  return { ...owner, apiKey: await credentialFingerprint(owner.apiKey) };
+}
 
 /**
  * Match a caller to the canonical owner recorded on a session.
@@ -42,6 +54,7 @@ export class Session {
 
   static async open(store: StorePort, deps: SessionDeps): Promise<Session> {
     let session = await store.getSession(deps.sessionId);
+    const caller = await fingerprintSessionOwner(deps);
     if (!session) {
       session = {
         id: deps.sessionId,
@@ -49,7 +62,7 @@ export class Session {
         createdAt: deps.now(),
         ...(deps.userId !== undefined ? { userId: deps.userId } : {}),
         ...(deps.orgId !== undefined ? { orgId: deps.orgId } : {}),
-        ...(deps.apiKey !== undefined ? { apiKey: deps.apiKey } : {}),
+        ...(caller.apiKey !== undefined ? { apiKey: caller.apiKey } : {}),
       };
       await store.createSession(session);
     } else if (session.agentId !== deps.agentId) {
@@ -67,7 +80,14 @@ export class Session {
       //  - userId is canonical when present; orgId cannot override a user mismatch.
       //  - otherwise orgId is canonical, then apiKey as the legacy fallback.
       const sessionOwned = session.userId !== undefined || session.orgId !== undefined || session.apiKey !== undefined;
-      if (sessionOwned && !matchesSessionOwner(session, deps)) {
+      // A verified use of a legacy plaintext row upgrades it with compare-and-swap. New writes
+      // above always contain only the fingerprint.
+      if (session.apiKey !== undefined && deps.apiKey !== undefined && session.apiKey === deps.apiKey) {
+        const upgraded = await store.replaceSessionApiKey(session.id, session.apiKey, caller.apiKey!);
+        if (!upgraded) throw new StoreConflictError(`session ${deps.sessionId} credential migration conflicted`);
+        session = { ...session, apiKey: caller.apiKey };
+      }
+      if (sessionOwned && !matchesSessionOwner(session, caller)) {
         throw new StoreConflictError(
           `session ${deps.sessionId} is owned by a different principal`,
         );

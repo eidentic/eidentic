@@ -225,6 +225,39 @@ describe("suspend / resume (HITL via replay)", () => {
     expect(sideEffects).toBe(1);
   });
 
+  it("renews a short resume lease while a long step is still running", async () => {
+    const registry = createWorkflowRunRegistry({ resumeLeaseMs: 30 });
+    let sideEffects = 0;
+    const wf = workflow("renewed-resume", async (_n: number, { step, suspend }) => {
+      await suspend!<boolean>("approve");
+      return step!("slow-effect", async () => {
+        await new Promise<void>((resolve) => setTimeout(resolve, 90));
+        sideEffects += 1;
+        return sideEffects;
+      });
+    });
+    const suspended = await runCapturing(wf, 0, registry);
+
+    const first = resumeWorkflow(wf, suspended.id, { registry, decision: true });
+    await new Promise<void>((resolve) => setTimeout(resolve, 55));
+    await expect(
+      resumeWorkflow(wf, suspended.id, { registry, decision: false }),
+    ).rejects.toMatchObject({ name: "WorkflowResumeConflictError" });
+    await expect(first).resolves.toMatchObject({ kind: "completed", output: 1 });
+    expect(sideEffects).toBe(1);
+  });
+
+  it("rejects renewal after a resume claim has expired", async () => {
+    const registry = createWorkflowRunRegistry({ resumeLeaseMs: 5 });
+    const wf = workflow("expired-resume", async (_n: number, { suspend }) => suspend!("approve"));
+    const suspended = await runCapturing(wf, 0, registry);
+    const claim = await registry.claimResume(suspended.id, "approve");
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await expect(registry.renewResume(suspended.id, claim.claimId)).rejects.toMatchObject({
+      name: "WorkflowResumeConflictError",
+    });
+  });
+
   it("retry() does not swallow a suspend signal", async () => {
     const registry = createWorkflowRunRegistry();
     // A step whose body suspends — wrapped in retry. The suspend must escape,

@@ -30,6 +30,7 @@ const memStore = new SqliteStore(":memory:");
 
 const agent = new Agent({
   id: "assistant",
+  instructions: "You are a helpful assistant.",
   model: new AIModel(anthropic("claude-sonnet-4-5")),
   store,
 });

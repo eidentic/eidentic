@@ -123,6 +123,36 @@ export class SqliteStore implements StorePort, GraphPort, DurablePort {
     }));
   }
 
+  async listMemory(scope: Scope) {
+    const rows = this.db.prepare(
+      `SELECT memories.ext_id AS id, memories.text AS text, mm.ingested_at, mm.metadata
+       FROM memories
+       LEFT JOIN memory_meta mm ON mm.scope_key = memories.scope_key AND mm.ext_id = memories.ext_id
+       WHERE memories.scope_key = ? ORDER BY memories.ext_id`,
+    ).all(scopeKey(scope)) as Array<{ id: string; text: string; ingested_at: number | null; metadata: string | null }>;
+    return rows.map((row) => ({
+      id: row.id,
+      text: row.text,
+      ...(row.ingested_at !== null ? { ingestedAt: row.ingested_at } : {}),
+      ...(row.metadata !== null ? { metadata: JSON.parse(row.metadata) as Record<string, unknown> } : {}),
+    }));
+  }
+
+  async deleteMemory(scope: Scope, ids: string[]): Promise<number> {
+    if (ids.length === 0) return 0;
+    const sk = scopeKey(scope);
+    const delMemory = this.db.prepare(`DELETE FROM memories WHERE scope_key = ? AND ext_id = ?`);
+    const delMeta = this.db.prepare(`DELETE FROM memory_meta WHERE scope_key = ? AND ext_id = ?`);
+    return this.db.transaction((targets: string[]) => {
+      let deleted = 0;
+      for (const id of new Set(targets)) {
+        deleted += delMemory.run(sk, id).changes;
+        delMeta.run(sk, id);
+      }
+      return deleted;
+    })(ids);
+  }
+
   async close() {
     this.db.close();
   }
@@ -145,6 +175,10 @@ export class SqliteStore implements StorePort, GraphPort, DurablePort {
       ...(row.org_id !== null ? { orgId: row.org_id } : {}),
       ...(row.api_key !== null ? { apiKey: row.api_key } : {}),
     };
+  }
+  async replaceSessionApiKey(sessionId: string, expected: string, replacement: string): Promise<boolean> {
+    return this.db.prepare(`UPDATE sessions SET api_key = ? WHERE id = ? AND api_key = ?`)
+      .run(replacement, sessionId, expected).changes === 1;
   }
 
   async appendEvents(events: StoredEvent[]) {
@@ -529,6 +563,22 @@ export class SqliteStore implements StorePort, GraphPort, DurablePort {
         .run(metadata?.scopeKey ?? null, metadata?.sessionId ?? null, metadata?.ownerKey ?? null, key);
     });
     tx();
+  }
+
+  async claimIntent(key: string, argsHash: string, metadata?: IdempotencyMetadata): Promise<boolean> {
+    const result = this.db
+      .prepare(`INSERT OR IGNORE INTO idempotency_keys
+        (key, args_hash, status, result, created_at, scope_key, session_id, owner_key)
+        VALUES (?, ?, 'intent', NULL, ?, ?, ?, ?)`)
+      .run(key, argsHash, this.graphNow(), metadata?.scopeKey ?? null, metadata?.sessionId ?? null, metadata?.ownerKey ?? null);
+    return result.changes === 1;
+  }
+
+  async releaseIntent(key: string, argsHash: string): Promise<boolean> {
+    const result = this.db.prepare(
+      `DELETE FROM idempotency_keys WHERE key = ? AND args_hash = ? AND status = 'intent'`,
+    ).run(key, argsHash);
+    return result.changes === 1;
   }
 
   async recordCompletion(key: string, result: unknown, metadata?: IdempotencyMetadata): Promise<void> {

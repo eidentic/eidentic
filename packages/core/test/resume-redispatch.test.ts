@@ -10,7 +10,7 @@ import { z } from "zod";
 import { InMemoryStore } from "@eidentic/types/testing";
 import { textBlock, toolUseBlock, type ModelPort, type ModelRequest, type ModelResponse } from "@eidentic/types";
 import { Agent } from "../src/agent.js";
-import { createTool } from "../src/tool.js";
+import { createTool, idempotencyLedgerKey } from "../src/tool.js";
 
 /** Minimal scripted model; tracks calls so tests can assert model was NOT called for re-emit. */
 class ScriptModel implements ModelPort {
@@ -189,7 +189,7 @@ describe("resume re-dispatch — crash mid-tool-batch (persisted assistant with 
 
     // The idempotency ledger now has "applied" for the work key.
     // A7: key is prefixed with the sessionId ("crash-sess") by ToolRegistry.runOne.
-    const idem = await store.getIdempotency("crash-sess:work:build");
+    const idem = await store.getIdempotency(idempotencyLedgerKey("crash-sess", "work:build"));
     expect(idem?.status).toBe("applied");
   });
 
@@ -236,8 +236,8 @@ describe("resume re-dispatch — crash mid-tool-batch (persisted assistant with 
     ]);
     // Seed the idempotency for c4 as "applied" to reflect it completed.
     // A7: key must include the sessionId prefix ("batch-sess") to match what ToolRegistry.runOne stores.
-    await store.recordIntent("batch-sess:count:alpha");
-    await store.recordCompletion("batch-sess:count:alpha");
+    await store.recordIntent(idempotencyLedgerKey("batch-sess", "count:alpha"), "", { sessionId: "batch-sess" });
+    await store.recordCompletion(idempotencyLedgerKey("batch-sess", "count:alpha"), undefined, { sessionId: "batch-sess" });
 
     const resumeModel = new ScriptModel([
       { content: [textBlock("both done")], usage: { inputTokens: 1, outputTokens: 1 } },

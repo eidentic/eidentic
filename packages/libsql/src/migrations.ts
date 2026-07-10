@@ -185,6 +185,35 @@ export const MIGRATIONS: ReadonlyArray<{ version: number; sql: string[] }> = [
          )`,
     ],
   },
+  {
+    version: 14,
+    // Repair duplicate current facts left by the old read-then-batch implementation before
+    // adding the database invariant. Newest valid_from wins; id is a deterministic tie-breaker.
+    sql: [
+      `WITH ranked AS MATERIALIZED (
+         SELECT
+           id,
+           FIRST_VALUE(valid_from) OVER (
+             PARTITION BY scope_key, subject, predicate
+             ORDER BY valid_from DESC, id DESC
+           ) AS survivor_valid_from,
+           ROW_NUMBER() OVER (
+             PARTITION BY scope_key, subject, predicate
+             ORDER BY valid_from DESC, id DESC
+           ) AS position
+         FROM facts
+         WHERE valid_until IS NULL
+       )
+       UPDATE facts
+       SET valid_until = (
+         SELECT survivor_valid_from FROM ranked WHERE ranked.id = facts.id
+       )
+       WHERE id IN (SELECT id FROM ranked WHERE position > 1)`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_facts_one_current
+         ON facts (scope_key, subject, predicate)
+         WHERE valid_until IS NULL`,
+    ],
+  },
 ];
 
 export async function runMigrations(client: Client): Promise<void> {

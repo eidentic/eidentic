@@ -32,8 +32,8 @@ import { addUsage, encodeMultimodalInput, extractTextFromBlocks, canonicalJson, 
 import { envLogger } from "./logger.js";
 import { NoopSandbox } from "./sandbox.js";
 import { ToolRegistry, createTool, type Tool } from "./tool.js";
-import { Session, matchesSessionOwner } from "./session.js";
-import { runTurn, resumeTurn, type StructuredOutputSpec } from "./loop.js";
+import { Session, fingerprintSessionOwner, matchesSessionOwner } from "./session.js";
+import { enforceModelResponseLimits, runTurn, resumeTurn, type ModelResponseLimits, type StructuredOutputSpec } from "./loop.js";
 import { isEditableMemory, memoryTools } from "./memory-tools.js";
 import { hasGraph, graphTools } from "./graph-tools.js";
 import { hasSkills, skillTools, hasExecutableSkills, buildSkillRunTool, type ExecutableSkillRunner } from "./skill-tools.js";
@@ -94,6 +94,30 @@ function buildStructuredOutput(schema: z.ZodType): StructuredOutputSpec {
           };
     },
   };
+}
+
+export interface MultimodalPolicy {
+  /** Explicitly permit image input when this Agent exposes any tools. Default: false. */
+  allowWithTools?: boolean;
+  /** Maximum number of images in one query. Default: 4. */
+  maxImages?: number;
+  /** Maximum decoded bytes for one image. Default: 5 MiB. */
+  maxImageBytes?: number;
+  /** Maximum decoded bytes across all images. Default: 10 MiB. */
+  maxTotalImageBytes?: number;
+  /** Maximum width or height. Default: 8192. */
+  maxDimension?: number;
+  /** Maximum width × height. Default: 40 million pixels. */
+  maxPixels?: number;
+  /** Maximum UTF-8 bytes across user text blocks. Default: 1 MiB. */
+  maxTextBytes?: number;
+  /** Allowed decoded image media types. Default: PNG, JPEG, and GIF. */
+  allowedMediaTypes?: readonly string[];
+  /**
+   * Trusted remote-image resolver. Raw URLs are default-denied; the resolver must fetch through a
+   * hardened egress boundary and return bounded base64 data for local validation.
+   */
+  resolveRemoteImage?: (url: URL, opts: { signal?: AbortSignal }) => Promise<{ data: string; mediaType: string }>;
 }
 
 export interface AgentConfig {
@@ -352,6 +376,13 @@ export interface AgentConfig {
    * failing the whole run. Set `{ maxAttempts: 0 }` to restore previous behavior.
    */
   structuredOutputRetry?: { maxAttempts: number };
+  /**
+   * Hard per-call model output limits. Complete/final responses are rejected before persistence;
+   * streaming chunks are bounded before emission. Defaults to an 8 MiB byte ceiling.
+   */
+  modelResponseLimits?: ModelResponseLimits;
+  /** Strict image-input policy. Remote images and tool-enabled vision are fail-closed by default. */
+  multimodal?: MultimodalPolicy;
 }
 
 export interface QueryOptions {
@@ -426,8 +457,155 @@ interface InternalQueryOptions extends QueryOptions {
 
 const defaultNow = () => new Date().toISOString();
 
-/** Module-level monotone counter — shared across all Agent instances so defaultNewId never collides. */
+const BASE64_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+
+function decodeBase64Image(value: string, maxBytes: number): Uint8Array {
+  if (value.length === 0 || value.length % 4 !== 0 || !BASE64_RE.test(value)) {
+    throw new Error("multimodal image data must be strict padded base64");
+  }
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  const byteLength = (value.length / 4) * 3 - padding;
+  if (byteLength > maxBytes) throw new Error(`multimodal image exceeds ${maxBytes} decoded bytes`);
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  const out = new Uint8Array(byteLength);
+  let offset = 0;
+  for (let i = 0; i < value.length; i += 4) {
+    const a = alphabet.indexOf(value[i]!);
+    const b = alphabet.indexOf(value[i + 1]!);
+    const c = value[i + 2] === "=" ? 0 : alphabet.indexOf(value[i + 2]!);
+    const d = value[i + 3] === "=" ? 0 : alphabet.indexOf(value[i + 3]!);
+    const packed = (a << 18) | (b << 12) | (c << 6) | d;
+    if (offset < byteLength) out[offset++] = (packed >>> 16) & 0xff;
+    if (offset < byteLength) out[offset++] = (packed >>> 8) & 0xff;
+    if (offset < byteLength) out[offset++] = packed & 0xff;
+  }
+  return out;
+}
+
+function imageDimensions(bytes: Uint8Array, mediaType: string): { width: number; height: number } {
+  if (mediaType === "image/png") {
+    const signature = [137, 80, 78, 71, 13, 10, 26, 10];
+    if (bytes.length < 24 || !signature.every((value, index) => bytes[index] === value)) {
+      throw new Error("multimodal image has an invalid PNG header");
+    }
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    return { width: view.getUint32(16), height: view.getUint32(20) };
+  }
+  if (mediaType === "image/gif") {
+    const header = String.fromCharCode(...bytes.slice(0, 6));
+    if (bytes.length < 10 || (header !== "GIF87a" && header !== "GIF89a")) {
+      throw new Error("multimodal image has an invalid GIF header");
+    }
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    return { width: view.getUint16(6, true), height: view.getUint16(8, true) };
+  }
+  if (mediaType === "image/jpeg") {
+    if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) {
+      throw new Error("multimodal image has an invalid JPEG header");
+    }
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    let offset = 2;
+    while (offset + 3 < bytes.length) {
+      while (offset < bytes.length && bytes[offset] === 0xff) offset++;
+      const marker = bytes[offset++];
+      if (marker === undefined || marker === 0xd9 || marker === 0xda) break;
+      if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+      if (offset + 1 >= bytes.length) break;
+      const length = view.getUint16(offset);
+      if (length < 2 || offset + length > bytes.length) break;
+      const isSof = marker >= 0xc0 && marker <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(marker);
+      if (isSof) {
+        if (length < 7) break;
+        return { height: view.getUint16(offset + 3), width: view.getUint16(offset + 5) };
+      }
+      offset += length;
+    }
+    throw new Error("multimodal JPEG dimensions could not be validated");
+  }
+  throw new Error(`multimodal media type is not supported: ${mediaType}`);
+}
+
+function parseImageData(image: { data: string; mediaType?: string }, maxBytes: number): {
+  data: string;
+  mediaType: string;
+  bytes: Uint8Array;
+} {
+  const dataUrl = /^data:([^;,]+);base64,([A-Za-z0-9+/=]+)$/.exec(image.data);
+  const mediaType = (dataUrl?.[1] ?? image.mediaType)?.toLowerCase();
+  if (!mediaType) throw new Error("multimodal base64 image requires a mediaType");
+  if (image.mediaType && dataUrl && image.mediaType.toLowerCase() !== mediaType) {
+    throw new Error("multimodal data URL media type does not match image.mediaType");
+  }
+  const data = dataUrl?.[2] ?? image.data;
+  return { data, mediaType, bytes: decodeBase64Image(data, maxBytes) };
+}
+
+async function prepareMultimodalBlocks(
+  blocks: ContentBlock[],
+  policy: MultimodalPolicy | undefined,
+  toolEnabled: boolean,
+  signal?: AbortSignal,
+): Promise<ContentBlock[]> {
+  if (blocks.some((block) => block.type !== "text" && block.type !== "image")) {
+    throw new Error("Agent.query ContentBlock[] accepts only text and image blocks");
+  }
+  const images = blocks.filter((block): block is Extract<ContentBlock, { type: "image" }> => block.type === "image");
+  if (images.length === 0) return blocks;
+  if (toolEnabled && policy?.allowWithTools !== true) {
+    throw new Error("multimodal input on a tool-enabled Agent requires multimodal.allowWithTools=true");
+  }
+
+  const maxImages = policy?.maxImages ?? 4;
+  const maxImageBytes = policy?.maxImageBytes ?? 5 * 1024 * 1024;
+  const maxTotalImageBytes = policy?.maxTotalImageBytes ?? 10 * 1024 * 1024;
+  const maxDimension = policy?.maxDimension ?? 8192;
+  const maxPixels = policy?.maxPixels ?? 40_000_000;
+  const maxTextBytes = policy?.maxTextBytes ?? 1024 * 1024;
+  const allowedMediaTypes = new Set(policy?.allowedMediaTypes ?? ["image/png", "image/jpeg", "image/gif"]);
+  for (const [name, value] of Object.entries({ maxImages, maxImageBytes, maxTotalImageBytes, maxDimension, maxPixels, maxTextBytes })) {
+    if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`multimodal.${name} must be a positive safe integer`);
+  }
+  if (images.length > maxImages) throw new Error(`multimodal input exceeds ${maxImages} images`);
+  const textBytes = new TextEncoder().encode(extractTextFromBlocks(blocks)).byteLength;
+  if (textBytes > maxTextBytes) throw new Error(`multimodal text exceeds ${maxTextBytes} UTF-8 bytes`);
+
+  let totalBytes = 0;
+  const prepared: ContentBlock[] = [];
+  for (const block of blocks) {
+    if (block.type === "text") {
+      prepared.push(block);
+      continue;
+    }
+    if (block.type !== "image") throw new Error("Agent.query ContentBlock[] accepts only text and image blocks");
+    let raw: { data: string; mediaType?: string };
+    if ("url" in block.image && block.image.url !== undefined) {
+      if (!policy?.resolveRemoteImage) throw new Error("remote multimodal image URLs require multimodal.resolveRemoteImage");
+      const url = new URL(block.image.url);
+      if (url.protocol !== "https:" || url.username || url.password) {
+        throw new Error("remote multimodal images require credential-free HTTPS URLs");
+      }
+      raw = await policy.resolveRemoteImage(url, { ...(signal ? { signal } : {}) });
+    } else {
+      raw = { data: block.image.data, ...(block.image.mediaType ? { mediaType: block.image.mediaType } : {}) };
+    }
+    const parsed = parseImageData(raw, maxImageBytes);
+    if (!allowedMediaTypes.has(parsed.mediaType)) throw new Error(`multimodal media type is not allowed: ${parsed.mediaType}`);
+    const dimensions = imageDimensions(parsed.bytes, parsed.mediaType);
+    if (dimensions.width <= 0 || dimensions.height <= 0 ||
+        dimensions.width > maxDimension || dimensions.height > maxDimension ||
+        dimensions.width * dimensions.height > maxPixels) {
+      throw new Error(`multimodal image dimensions are not allowed: ${dimensions.width}x${dimensions.height}`);
+    }
+    totalBytes += parsed.bytes.byteLength;
+    if (totalBytes > maxTotalImageBytes) throw new Error(`multimodal images exceed ${maxTotalImageBytes} total decoded bytes`);
+    prepared.push({ type: "image", image: { data: parsed.data, mediaType: parsed.mediaType } });
+  }
+  return prepared;
+}
+
+/** Legacy fallback for runtimes that do not expose Web Crypto randomUUID. */
 let _globalIdSeq = 0;
+const STORE_SESSION_TAILS = new WeakMap<StorePort, Map<string, Promise<void>>>();
 
 /** Structural check: does the store also implement DurablePort? */
 function asDurable(store: StorePort): DurablePort | undefined {
@@ -435,8 +613,12 @@ function asDurable(store: StorePort): DurablePort | undefined {
   return typeof d.writeCheckpoint === "function" &&
     typeof d.lastCheckpoint === "function" &&
     typeof d.recordIntent === "function" &&
+    typeof d.claimIntent === "function" &&
+    typeof d.releaseIntent === "function" &&
     typeof d.recordCompletion === "function" &&
-    typeof d.getIdempotency === "function"
+    typeof d.getIdempotency === "function" &&
+    typeof d.recordDecision === "function" &&
+    typeof d.getDecision === "function"
     ? (store as unknown as DurablePort)
     : undefined;
 }
@@ -444,7 +626,9 @@ function asDurable(store: StorePort): DurablePort | undefined {
 export class Agent {
   private readonly baseTools: Tool[];
   private readonly registry: ToolRegistry;
-  private defaultNewId = () => `evt_${Date.now().toString(36)}_${(_globalIdSeq++).toString(36)}`;
+  private defaultNewId = () => globalThis.crypto?.randomUUID
+    ? `evt_${globalThis.crypto.randomUUID()}`
+    : `evt_${Date.now().toString(36)}_${(_globalIdSeq++).toString(36)}`;
   private readonly _sandbox: SandboxPort;
   /**
    * Mutable effective permission policy (design §10.4: "modes are changeable mid-session").
@@ -457,8 +641,33 @@ export class Agent {
   private _migrated?: Promise<void>;
   /** One-time guard for the "memory configured but no userId" warning. */
   private _warnedNoUserId = false;
+  private async acquireSession(sessionId: string): Promise<() => void> {
+    let sessionTails = STORE_SESSION_TAILS.get(this.config.store);
+    if (!sessionTails) {
+      sessionTails = new Map();
+      STORE_SESSION_TAILS.set(this.config.store, sessionTails);
+    }
+    const previous = sessionTails.get(sessionId) ?? Promise.resolve();
+    let releaseGate!: () => void;
+    const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+    const tail = previous.catch(() => undefined).then(() => gate);
+    sessionTails.set(sessionId, tail);
+    await previous.catch(() => undefined);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      releaseGate();
+      if (sessionTails!.get(sessionId) === tail) sessionTails!.delete(sessionId);
+    };
+  }
 
   constructor(private readonly config: AgentConfig) {
+    for (const [name, value] of Object.entries(config.modelResponseLimits ?? {})) {
+      if (!Number.isSafeInteger(value) || value <= 0) {
+        throw new Error(`modelResponseLimits.${name} must be a positive safe integer`);
+      }
+    }
     this.baseTools = config.tools ?? [];
     this.registry = new ToolRegistry(this.baseTools);
     this._sandbox = config.sandbox ?? new NoopSandbox();
@@ -738,6 +947,27 @@ export class Agent {
    * Returns the final tools array and the two late-bound registry cells that must be backfilled after
    * `buildRegistry` runs (so each closure captures the final permission-filtered registry).
    */
+  private restorePromptSkillPolicy(
+    events: ReturnType<Session["events"]>,
+    policy: { allowedTools: readonly string[] | null },
+  ): void {
+    for (let index = events.length - 1; index >= 0; index--) {
+      const event = events[index]!;
+      if (event.kind !== "tool_result" || typeof event.payload !== "object" || event.payload === null) continue;
+      const payload = event.payload as { toolName?: unknown; output?: unknown; isError?: unknown };
+      if (payload.toolName !== "skill_use" || payload.isError === true ||
+          typeof payload.output !== "object" || payload.output === null) continue;
+      const allowed = (payload.output as { allowedTools?: unknown }).allowedTools;
+      if (!Array.isArray(allowed) || allowed.length > 1_000 ||
+          !allowed.every((tool): tool is string => typeof tool === "string" && tool.length > 0 && tool.length <= 256)) {
+        policy.allowedTools = Object.freeze([]);
+        return;
+      }
+      policy.allowedTools = Object.freeze([...allowed]);
+      return;
+    }
+  }
+
   private buildToolsForRun(
     scope: Scope,
     spawnTool?: Tool | undefined,
@@ -746,6 +976,7 @@ export class Agent {
     tools: Tool[];
     execSkillRegRef: { registry: import("./tool.js").ToolRegistry | null };
     discoveryRegRef: { registry: import("./tool.js").ToolRegistry | null };
+    skillPolicy?: { allowedTools: readonly string[] | null };
   } {
     const tools = [...this.baseTools];
     if (this.config.memory && isEditableMemory(this.config.memory)) {
@@ -753,8 +984,13 @@ export class Agent {
       tools.push(...memoryTools(mem, scope));
       if (hasGraph(mem)) tools.push(...graphTools(mem, scope));
     }
-    if (this.config.skills && hasSkills(this.config.skills)) {
-      tools.push(...skillTools(this.config.skills));
+    const skillPolicy = this.config.skills && hasSkills(this.config.skills)
+      ? { allowedTools: null as readonly string[] | null }
+      : undefined;
+    if (this.config.skills && hasSkills(this.config.skills) && skillPolicy) {
+      tools.push(...skillTools(this.config.skills, (_name, allowedTools) => {
+        skillPolicy.allowedTools = Object.freeze([...allowedTools]);
+      }));
     }
     if (spawnTool) tools.push(spawnTool);
 
@@ -768,7 +1004,7 @@ export class Agent {
       tools.push(...lazyDiscoveryTools(() => discoveryRegRef.registry?.schemas() ?? [], { eager: lazyTools.eager, topK: lazyTools.topK }));
     }
 
-    return { tools, execSkillRegRef, discoveryRegRef };
+    return { tools, execSkillRegRef, discoveryRegRef, ...(skillPolicy ? { skillPolicy } : {}) };
   }
 
   private buildRegistry(
@@ -779,6 +1015,7 @@ export class Agent {
     sessionId?: string,
     logger?: import("@eidentic/types").LoggerPort,
     permissionsOverride?: PermissionPolicy,
+    activeSkillAllowedTools?: () => readonly string[] | null,
   ): ToolRegistry {
     // Use the MUTABLE effective policy so that setPermissionMode() takes effect on the next query.
     // Agent is the untrusted model boundary: without caller configuration, read-only tools run
@@ -796,7 +1033,7 @@ export class Agent {
     // sessionId only matters when durable is set, and a durable run is never the baseline
     // (durable truthy ⇒ isBaseline false). So baseline reuse stays correct.
     // A logger also invalidates the baseline (logger overrides NoopLogger in the base registry).
-    const isBaseline = filteredTools.length === this.baseTools.length && !durable && !hasSecurityConfig && !signal && !logger && !onPostToolUse && !onAuditEvent;
+    const isBaseline = filteredTools.length === this.baseTools.length && !durable && !hasSecurityConfig && !signal && !logger && !onPostToolUse && !onAuditEvent && !activeSkillAllowedTools;
     if (isBaseline) return this.registry;
 
     return new ToolRegistry(filteredTools, {
@@ -810,6 +1047,7 @@ export class Agent {
       ...(signal ? { signal } : {}),
       ...(sessionId !== undefined ? { sessionId } : {}),
       ...(logger ? { logger } : {}),
+      ...(activeSkillAllowedTools ? { activeSkillAllowedTools } : {}),
       scope,
     });
   }
@@ -866,6 +1104,8 @@ export class Agent {
     opts: QueryOptions,
     runtime?: { model?: ModelPort },
   ): AsyncIterable<StreamEvent> {
+    const releaseSession = await this.acquireSession(opts.sessionId);
+    try {
     const internal = opts as InternalQueryOptions;
     const depth = internal._depth ?? 0;
     // Root of the tree creates the shared budget; descendants reuse the same object by reference.
@@ -882,12 +1122,21 @@ export class Agent {
     // §16.4: pass the query signal so child agents abort with the parent (tree teardown).
     const spawnTool = this.buildSpawnTool(depth, budget, opts.signal);
     const lazyTools = this.resolveLazyTools();
-    const { tools, execSkillRegRef, discoveryRegRef } = this.buildToolsForRun(scope, spawnTool ?? undefined, lazyTools ?? undefined);
+    const { tools, execSkillRegRef, discoveryRegRef, skillPolicy } = this.buildToolsForRun(scope, spawnTool ?? undefined, lazyTools ?? undefined);
 
     // Resolve logger once per run: injected logger wins; else envLogger() (silent when DEBUG unset).
     const logger = this.config.logger ?? envLogger();
     const permissions = await this.permissionsFor(opts);
-    const registry = this.buildRegistry(tools, durable, scope, opts.signal, opts.sessionId, logger, permissions);
+    const registry = this.buildRegistry(
+      tools,
+      durable,
+      scope,
+      opts.signal,
+      opts.sessionId,
+      logger,
+      permissions,
+      skillPolicy ? () => skillPolicy.allowedTools : undefined,
+    );
     execSkillRegRef.registry = registry;
     discoveryRegRef.registry = registry; // search/load now see the final permission-filtered catalog
 
@@ -903,6 +1152,7 @@ export class Agent {
       // H1 fix: record apiKey when present so apiKey-only principals own their sessions.
       ...(principal.apiKey !== undefined ? { apiKey: principal.apiKey } : {}),
     });
+    if (skillPolicy) this.restorePromptSkillPolicy(session.events(), skillPolicy);
 
     // runtime.model overrides this.config.model for plan-execute executor sub-runs.
     const effectiveModel = runtime?.model ?? this.config.model;
@@ -942,8 +1192,12 @@ export class Agent {
       ...(this.config.modelRetry ? { modelRetry: this.config.modelRetry } : {}),
       ...(this.config.modelFallback && this.config.modelFallback.length > 0 ? { modelFallback: this.config.modelFallback } : {}),
       ...(this.config.structuredOutputRetry !== undefined ? { structuredOutputRetry: this.config.structuredOutputRetry } : {}),
+      ...(this.config.modelResponseLimits !== undefined ? { modelResponseLimits: this.config.modelResponseLimits } : {}),
       ...(this.config.onTurnStart ? { onTurnStart: this.config.onTurnStart } : {}),
     });
+    } finally {
+      releaseSession();
+    }
   }
 
   /**
@@ -961,8 +1215,8 @@ export class Agent {
         "warn",
         "eidentic:memory",
         "memory is configured but query()/resume() was called without `userId` or `orgId`. Cross-session " +
-          "memory (blocks, recall, facts) is scoped per user/org; without it, durable memory is not " +
-          "shared across sessions. Pass { userId } or { orgId } to enable it.",
+          "memory (blocks, recall, facts) will use the agent-global scope and is therefore shared " +
+          "across every identity on this Agent. Pass a verified { userId } or { orgId } to isolate it.",
       );
     }
   }
@@ -998,9 +1252,12 @@ export class Agent {
     let loopInput: string;
     let queryOpts = opts;
     if (Array.isArray(input)) {
-      const hasImages = input.some((b) => b.type === "image");
-      const extractedText = extractTextFromBlocks(input);
-      loopInput = hasImages ? encodeMultimodalInput(input) : extractedText;
+      const toolEnabled = this.baseTools.length > 0 || this.config.memory !== undefined ||
+        this.config.skills !== undefined || this.config.subAgents !== undefined;
+      const prepared = await prepareMultimodalBlocks(input, this.config.multimodal, toolEnabled, opts.signal);
+      const hasImages = prepared.some((b) => b.type === "image");
+      const extractedText = extractTextFromBlocks(prepared);
+      loopInput = hasImages ? encodeMultimodalInput(prepared) : extractedText;
       if (opts.guardrailInput === undefined) {
         queryOpts = { ...opts, guardrailInput: extractedText };
       }
@@ -1029,6 +1286,7 @@ export class Agent {
       input: loopInput,
       opts: queryOpts,
       model: this.config.model,
+      enforceModelResponseLimits: (response) => enforceModelResponseLimits(response, this.config.modelResponseLimits),
       _internalOpts: internalOpts,
       react: boundReact,
     };
@@ -1058,18 +1316,26 @@ export class Agent {
     await this.ensureReady(opts);
     const durable = this.resolveDurable();
     if (!durable) throw new Error("Agent.resume requires `durable: true` and a DurablePort store.");
+    const releaseSession = await this.acquireSession(sessionId);
+    try {
     const principal = this.principalFor(opts);
 
     // Ownership is fail-closed for an owned session, including when the caller omits identity.
     const rec = await this.config.store.getSession(sessionId);
-    if (rec !== null) {
-      const sessionHasOwner = rec.userId !== undefined || rec.orgId !== undefined || rec.apiKey !== undefined;
-      if (sessionHasOwner && !matchesSessionOwner(rec, principal)) {
-        throw new Error(
-          `Agent.resume: session ownership mismatch for session "${sessionId}". ` +
-          `The caller identity does not match the session's recorded owner.`,
-        );
-      }
+    if (rec === null) throw new Error(`Agent.resume: unknown session "${sessionId}".`);
+    const sessionHasOwner = rec.userId !== undefined || rec.orgId !== undefined || rec.apiKey !== undefined;
+    const fingerprintedPrincipal = await fingerprintSessionOwner(principal);
+    const legacyCredentialMatch = rec.apiKey !== undefined && principal.apiKey !== undefined && rec.apiKey === principal.apiKey;
+    if (legacyCredentialMatch) {
+      const migrated = await this.config.store.replaceSessionApiKey(sessionId, rec.apiKey!, fingerprintedPrincipal.apiKey!);
+      if (!migrated) throw new Error(`Agent.resume: session credential migration conflicted for "${sessionId}".`);
+      rec.apiKey = fingerprintedPrincipal.apiKey;
+    }
+    if (sessionHasOwner && !matchesSessionOwner(rec, fingerprintedPrincipal)) {
+      throw new Error(
+        `Agent.resume: session ownership mismatch for session "${sessionId}". ` +
+        `The caller identity does not match the session's recorded owner.`,
+      );
     }
 
     // §5.7/§9.4: if a decision was supplied, record it against the pending suspension's callId BEFORE
@@ -1099,7 +1365,7 @@ export class Agent {
 
     const resumeLazyTools = this.resolveLazyTools();
     // resume() does not add a spawnTool (resume is always the plain react path).
-    const { tools, execSkillRegRef: resumeExecSkillRegRef, discoveryRegRef: resumeDiscoveryRegRef } =
+    const { tools, execSkillRegRef: resumeExecSkillRegRef, discoveryRegRef: resumeDiscoveryRegRef, skillPolicy: resumeSkillPolicy } =
       this.buildToolsForRun(scope, undefined, resumeLazyTools ?? undefined);
 
     const resumeLogger2 = this.config.logger ?? envLogger();
@@ -1111,7 +1377,16 @@ export class Agent {
       ...(opts?.apiKey !== undefined ? { apiKey: opts.apiKey } : {}),
       ...(opts?.memoryScope !== undefined ? { memoryScope: opts.memoryScope } : {}),
     });
-    const registry = this.buildRegistry(tools, durable, scope, undefined, sessionId, resumeLogger2, permissions);
+    const registry = this.buildRegistry(
+      tools,
+      durable,
+      scope,
+      undefined,
+      sessionId,
+      resumeLogger2,
+      permissions,
+      resumeSkillPolicy ? () => resumeSkillPolicy.allowedTools : undefined,
+    );
     resumeExecSkillRegRef.registry = registry;
     resumeDiscoveryRegRef.registry = registry;
 
@@ -1126,6 +1401,7 @@ export class Agent {
       ...(principal.orgId !== undefined ? { orgId: principal.orgId } : {}),
       ...(principal.apiKey !== undefined ? { apiKey: principal.apiKey } : {}),
     });
+    if (resumeSkillPolicy) this.restorePromptSkillPolicy(session.events(), resumeSkillPolicy);
 
     yield* resumeTurn({
       agentId: this.config.id,
@@ -1157,8 +1433,12 @@ export class Agent {
       ...(this.config.modelRetry ? { modelRetry: this.config.modelRetry } : {}),
       ...(this.config.modelFallback && this.config.modelFallback.length > 0 ? { modelFallback: this.config.modelFallback } : {}),
       ...(this.config.structuredOutputRetry !== undefined ? { structuredOutputRetry: this.config.structuredOutputRetry } : {}),
+      ...(this.config.modelResponseLimits !== undefined ? { modelResponseLimits: this.config.modelResponseLimits } : {}),
       ...(this.config.onTurnStart ? { onTurnStart: this.config.onTurnStart } : {}),
     });
+    } finally {
+      releaseSession();
+    }
   }
 
   /**

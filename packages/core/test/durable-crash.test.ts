@@ -3,7 +3,7 @@ import { z } from "zod";
 import { InMemoryStore } from "@eidentic/types/testing";
 import { textBlock, toolUseBlock, type ModelPort, type ModelRequest, type ModelResponse } from "@eidentic/types";
 import { Agent } from "../src/agent.js";
-import { createTool } from "../src/tool.js";
+import { createTool, idempotencyLedgerKey } from "../src/tool.js";
 
 /** A model whose Nth `complete` call throws, simulating a crash mid-run. */
 class CrashingModel implements ModelPort {
@@ -45,7 +45,7 @@ describe("durable terminal errors", () => {
     expect(firstEvents.at(-1)).toMatchObject({ type: "result", subtype: "error" });
     expect(counter).toBe(1); // the tool ran exactly once
     // A7: the effective stored key is now ${sessionId}:${tool.idempotencyKey(input)}.
-    expect((await store.getIdempotency("s:send_email:a@b.com"))?.status).toBe("applied");
+    expect((await store.getIdempotency(idempotencyLedgerKey("s", "send_email:a@b.com")))?.status).toBe("applied");
 
     // A caught model error is not a process crash: it has an authoritative terminal_result.
     // A fresh model must therefore never be invoked by resume().
@@ -87,7 +87,7 @@ describe("durable terminal errors", () => {
     for await (const _ of agent.query("charge 10", { sessionId: "s" })) { /* drain */ }
     expect(counter).toBe(1);
     // A7: the effective stored key is now ${sessionId}:${tool.idempotencyKey(input)}.
-    expect((await store.getIdempotency("s:charge:10"))?.status).toBe("intent"); // intent only, no completion
+    expect((await store.getIdempotency(idempotencyLedgerKey("s", "charge:10")))?.status).toBe("intent");
 
     // Resume replays the persisted model error. Retrying an intent-only destructive operation
     // requires an explicit new run, never an implicit terminal-state reinterpretation.
@@ -99,7 +99,7 @@ describe("durable terminal errors", () => {
     for await (const _ of agent2.resume("s")) { /* drain */ }
     expect(model2.calls).toHaveLength(0);
     expect(counter).toBe(1);
-    expect((await store.getIdempotency("s:charge:10"))?.status).toBe("intent");
+    expect((await store.getIdempotency(idempotencyLedgerKey("s", "charge:10")))?.status).toBe("intent");
   });
 });
 

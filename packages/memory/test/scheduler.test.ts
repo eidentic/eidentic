@@ -141,6 +141,7 @@ describe("ConsolidationScheduler", () => {
     expect(result.swept).toBe(1);
     expect(result.merged).toBe(1);
     expect(result.usage).toEqual({ inputTokens: 130, outputTokens: 50 });
+    expect(result.dedupe).toMatchObject({ comparisons: 1, totalPairs: 1, truncated: false });
   });
 
   it("skips dedupe when not configured", async () => {
@@ -156,6 +157,7 @@ describe("ConsolidationScheduler", () => {
 
     expect(result.merged).toBe(0);
     expect(result.usage).toEqual({ inputTokens: 5, outputTokens: 2 });
+    expect(result.dedupe).toBeUndefined();
   });
 
   it("runs distinct scopes independently (per-scope isolation)", async () => {

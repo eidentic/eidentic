@@ -14,6 +14,27 @@ async function freshStore() {
 const scope = { kind: "agent" as const, agentId: "test-agent" };
 
 describe("Feature 3 — Memory citations: ingest stores metadata, retrieve returns it", () => {
+  it("keeps identical event ids isolated across scopes in hot caches", async () => {
+    const store = new InMemoryStore();
+    await store.migrate();
+    const mem = new Memory({ store, dedupeOnWrite: false });
+    const scopeA = { kind: "user" as const, agentId: "a", userId: "tenant-a" };
+    const scopeB = { kind: "user" as const, agentId: "a", userId: "tenant-b" };
+
+    await mem.ingest([
+      { id: "shared-id", scope: scopeA, text: "alpha private text", metadata: { source: "alpha" } },
+      { id: "shared-id", scope: scopeB, text: "beta private text", metadata: { source: "beta" } },
+    ]);
+
+    const [exportA, exportB] = await Promise.all([mem.exportScope(scopeA), mem.exportScope(scopeB)]);
+    expect(exportA.memories).toEqual([
+      expect.objectContaining({ id: "shared-id", text: "alpha private text", metadata: { source: "alpha" } }),
+    ]);
+    expect(exportB.memories).toEqual([
+      expect.objectContaining({ id: "shared-id", text: "beta private text", metadata: { source: "beta" } }),
+    ]);
+  });
+
   it("ingest with metadata → retrieve returns metadata on matching snippet (lexical path)", async () => {
     const store = await freshStore();
     const mem = new Memory({ store });

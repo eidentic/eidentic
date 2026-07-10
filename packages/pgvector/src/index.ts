@@ -31,6 +31,10 @@ function safeIdent(name: string): string {
   return name;
 }
 
+function quoteIdent(name: string): string {
+  return `"${name.replace(/"/g, '""')}"`;
+}
+
 export class PgVectorStore implements VectorPort {
   private constructor(
     private readonly client: PgClient,
@@ -71,7 +75,7 @@ export class PgVectorStore implements VectorPort {
     );
     if (migResult.rows.length > 0) {
       const constraintName = String((migResult.rows[0] as Record<string, unknown>)["conname"]);
-      await client.query(`ALTER TABLE ${table} DROP CONSTRAINT ${constraintName}`);
+      await client.query(`ALTER TABLE ${table} DROP CONSTRAINT ${quoteIdent(constraintName)}`);
       await client.query(`ALTER TABLE ${table} ADD PRIMARY KEY (id, scope_key)`);
     }
     // Plain btree index on scope_key accelerates the scoped filter; the ORDER BY uses a sequential cosine scan,

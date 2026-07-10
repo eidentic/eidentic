@@ -136,5 +136,36 @@ export interface GuardrailPort {
   checkOutput?(text: string, ctx?: GuardrailContext): Promise<GuardrailResult> | GuardrailResult;
 }
 
+/** Host-owned policy supplied to a centralized outbound network boundary. */
+export interface EgressBoundaryPolicy {
+  /** Exact hosts or dot-boundary parent domains. An empty list denies every host. */
+  allowedHosts: readonly string[];
+  /** Require HTTPS. Production callers should always leave this true. */
+  requireHttps: boolean;
+}
+
+export interface SafeEgressRequest {
+  url: string;
+  method: "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE";
+  headers?: Record<string, string>;
+  body?: string;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  maxRedirects?: number;
+  policy: EgressBoundaryPolicy;
+}
+
+export interface SafeEgressResponse {
+  status: number;
+  /** Credential/query/fragment-free final URL suitable for logs. */
+  safeUrl: string;
+}
+
+/** Centralized DNS/IP/redirect-aware outbound request boundary. */
+export interface SafeEgressPort {
+  validate(url: string, policy: EgressBoundaryPolicy): Promise<void>;
+  request(request: SafeEgressRequest): Promise<SafeEgressResponse>;
+}
+
 // Re-export Scope so consumers of security.ts have it available if needed.
 export type { Scope };

@@ -1,6 +1,45 @@
 /**
  * The host app's functions module, as a test fixture. The user re-exports the package handlers
- * from a file in their `convex/` dir; here we do the same. The module is named `eidentic.ts` so
- * the function paths resolve as "eidentic:<name>" — matching `defaultStoreFns()` / `defaultVectorFns()`.
+ * from a file in their `convex/` dir. Conformance intentionally opts into the legacy unguarded
+ * object; production top-level exports are fail-closed and hosts should use an authorize hook.
  */
-export * from "../../src/server.js";
+import { unsafeLegacyPublicEidenticFunctions } from "../../src/server.js";
+
+export const {
+  createSession,
+  getSession,
+  replaceSessionApiKey,
+  listSessions,
+  appendEvents,
+  readEvents,
+  getBlocks,
+  getBlock,
+  upsertBlock,
+  appendBlock,
+  getBlockHistory,
+  listBlocks,
+  indexMemory,
+  searchMemory,
+  listMemory,
+  deleteMemory,
+  assertFact,
+  queryFacts,
+  corroborate,
+  expireFacts,
+  sweepExpired,
+  eraseScope,
+  writeCheckpoint,
+  lastCheckpoint,
+  recordIntent,
+  claimIntent,
+  releaseIntent,
+  recordCompletion,
+  getIdempotency,
+  recordDecision,
+  getDecision,
+  vectorUpsert,
+  vectorSearch,
+  vectorDelete,
+  vectorEraseScope,
+  vectorList,
+} = unsafeLegacyPublicEidenticFunctions;

@@ -96,8 +96,10 @@ describe("Agent self-editing memory", () => {
     const agent2 = new Agent({ permissions: { mode: "bypass" }, id: "sa", instructions: "Greet.", model: model2, store, memory, now: () => "t", newId: ((n) => () => `b${n++}`)(0) });
     await run(agent2, "hello again", "s2", "baran");
 
-    const system = model2.calls[0]!.messages[0]!.content as string;
-    expect(system).toContain("Name: Baran");
-    expect(system).toContain("<human v=1");
+    const context = String(model2.calls[0]!.messages.find((message) =>
+      message.role === "user" && String(message.content).includes("<memory>"),
+    )?.content);
+    expect(context).toContain("Name: Baran");
+    expect(context).toContain('<block label="human" version="1"');
   });
 });

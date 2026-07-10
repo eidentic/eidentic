@@ -68,6 +68,39 @@ function strNull(v: unknown): string | null {
   return String(v);
 }
 
+function postgresErrorCode(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null || !("code" in error)) return undefined;
+  return typeof error.code === "string" ? error.code : undefined;
+}
+
+function isRetryableFactConflict(error: unknown): boolean {
+  const code = postgresErrorCode(error);
+  if (code === "40001" || code === "40P01") return true;
+  return code === "23505" && error instanceof Error && error.message.includes("idx_facts_one_current");
+}
+
+// PGlite and injected pg.Client values are single connections. Coordinate transactions by
+// client identity so multiple PostgresStore wrappers cannot interleave BEGIN/body/COMMIT calls.
+// Real pg.Pool instances use dedicated checked-out connections instead.
+const singleConnectionTransactionTails = new WeakMap<PgClient, Promise<void>>();
+
+async function acquireSingleConnectionTransaction(client: PgClient): Promise<() => void> {
+  const previous = singleConnectionTransactionTails.get(client) ?? Promise.resolve();
+  let releaseGate!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    releaseGate = resolve;
+  });
+  const tail = previous.then(() => gate);
+  singleConnectionTransactionTails.set(client, tail);
+  await previous;
+  return () => {
+    releaseGate();
+    if (singleConnectionTransactionTails.get(client) === tail) {
+      singleConnectionTransactionTails.delete(client);
+    }
+  };
+}
+
 /**
  * Turn arbitrary user text into a safe `websearch_to_tsquery` OR expression.
  * Each token is lexeme-safe (output of `tokenize` contains only word chars).
@@ -147,12 +180,18 @@ export class PostgresStore implements StorePort, GraphPort, DurablePort {
    * When `this.client` is pglite (no `connect()`), the client IS the connection;
    * we issue BEGIN/COMMIT directly on it, matching the previous behaviour.
    */
-  private async withTransaction<T>(fn: (c: PgClient) => Promise<T>): Promise<T> {
+  private async withTransaction<T>(
+    fn: (c: PgClient) => Promise<T>,
+    isolationLevel?: "SERIALIZABLE",
+  ): Promise<T> {
+    const begin = isolationLevel === "SERIALIZABLE"
+      ? "BEGIN ISOLATION LEVEL SERIALIZABLE"
+      : "BEGIN";
     if (typeof this.client.connect === "function") {
       // Pool path: check out a single dedicated client.
       const c = await this.client.connect();
       try {
-        await c.query("BEGIN");
+        await c.query(begin);
         try {
           const result = await fn(c);
           await c.query("COMMIT");
@@ -166,16 +205,42 @@ export class PostgresStore implements StorePort, GraphPort, DurablePort {
       }
     } else {
       // Single-connection path (pglite).
-      await this.client.query("BEGIN");
+      const releaseTransaction = await acquireSingleConnectionTransaction(this.client);
       try {
-        const result = await fn(this.client);
-        await this.client.query("COMMIT");
-        return result;
-      } catch (err) {
-        try { await this.client.query("ROLLBACK"); } catch { /* ignore rollback error */ }
-        throw err;
+        await this.client.query(begin);
+        try {
+          const result = await fn(this.client);
+          await this.client.query("COMMIT");
+          return result;
+        } catch (err) {
+          try { await this.client.query("ROLLBACK"); } catch { /* ignore rollback error */ }
+          throw err;
+        }
+      } finally {
+        releaseTransaction();
       }
     }
+  }
+
+  private async withFactTransaction<T>(
+    lockKey: string,
+    fn: (c: PgClient) => Promise<T>,
+  ): Promise<T> {
+    const maxAttempts = 3;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        return await this.withTransaction(async (c) => {
+          // FOR UPDATE cannot lock the absence of a row. This transaction-scoped lock closes
+          // that gap for cooperating writers; the partial unique index remains the final
+          // invariant for direct SQL and older adapter versions.
+          await c.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [lockKey]);
+          return fn(c);
+        }, "SERIALIZABLE");
+      } catch (error) {
+        if (attempt === maxAttempts || !isRetryableFactConflict(error)) throw error;
+      }
+    }
+    throw new Error("unreachable fact transaction retry state");
   }
 
   // ── Sessions ──────────────────────────────────────────────────────────────
@@ -205,6 +270,14 @@ export class PostgresStore implements StorePort, GraphPort, DurablePort {
       ...(orgId !== null ? { orgId } : {}),
       ...(apiKey !== null ? { apiKey } : {}),
     };
+  }
+
+  async replaceSessionApiKey(sessionId: string, expected: string, replacement: string): Promise<boolean> {
+    const { rows } = await this.client.query(
+      `UPDATE sessions SET api_key = $1 WHERE id = $2 AND api_key = $3 RETURNING id`,
+      [replacement, sessionId, expected],
+    );
+    return rows.length === 1;
   }
 
   // ── Events ────────────────────────────────────────────────────────────────
@@ -406,6 +479,30 @@ export class PostgresStore implements StorePort, GraphPort, DurablePort {
       .filter((r) => r.score > 0);
   }
 
+  async listMemory(scope: Scope) {
+    const { rows } = await this.client.query(
+      `SELECT ext_id AS id, text, ingested_at, metadata FROM memories WHERE scope_key = $1 ORDER BY ext_id`,
+      [scopeKey(scope)],
+    );
+    return rows.map((row) => ({
+      id: str(row.id),
+      text: str(row.text),
+      ...(row.ingested_at !== null && row.ingested_at !== undefined ? { ingestedAt: num(row.ingested_at) } : {}),
+      ...(row.metadata !== null && row.metadata !== undefined
+        ? { metadata: (typeof row.metadata === "object" ? row.metadata : JSON.parse(str(row.metadata))) as Record<string, unknown> }
+        : {}),
+    }));
+  }
+
+  async deleteMemory(scope: Scope, ids: string[]): Promise<number> {
+    if (ids.length === 0) return 0;
+    const { rows } = await this.client.query(
+      `DELETE FROM memories WHERE scope_key = $1 AND ext_id = ANY($2::text[]) RETURNING ext_id`,
+      [scopeKey(scope), [...new Set(ids)]],
+    );
+    return rows.length;
+  }
+
   // ── Graph (Facts) ──────────────────────────────────────────────────────────
 
   private rowToFact(r: {
@@ -446,10 +543,12 @@ export class PostgresStore implements StorePort, GraphPort, DurablePort {
     const lastCorroboratedRaw = input.lastCorroboratedAt ?? Date.parse(validFrom);
     const lastCorroboratedAt = Number.isNaN(lastCorroboratedRaw) ? null : lastCorroboratedRaw;
 
-    return this.withTransaction(async (c) => {
+    const transitionLock = JSON.stringify([key, input.subject, input.predicate]);
+    return this.withFactTransaction(transitionLock, async (c) => {
       const { rows: current } = await c.query(
         `SELECT id, subject, predicate, object, object_kind, valid_from, valid_until, confidence, source, expires_at, supersedes, last_corroborated_at
-         FROM facts WHERE scope_key = $1 AND subject = $2 AND predicate = $3 AND valid_until IS NULL`,
+         FROM facts WHERE scope_key = $1 AND subject = $2 AND predicate = $3 AND valid_until IS NULL
+         FOR UPDATE`,
         [key, input.subject, input.predicate],
       );
 
@@ -697,6 +796,26 @@ export class PostgresStore implements StorePort, GraphPort, DurablePort {
          owner_key = COALESCE(idempotency_keys.owner_key, EXCLUDED.owner_key)`,
       [key, argsHash, this.graphNow(), metadata?.scopeKey ?? null, metadata?.sessionId ?? null, metadata?.ownerKey ?? null],
     );
+  }
+
+  async claimIntent(key: string, argsHash: string, metadata?: IdempotencyMetadata): Promise<boolean> {
+    const result = await this.client.query(
+      `INSERT INTO idempotency_keys
+         (key, args_hash, status, result, created_at, scope_key, session_id, owner_key)
+       VALUES ($1, $2, 'intent', NULL, $3, $4, $5, $6)
+       ON CONFLICT (key) DO NOTHING
+       RETURNING key`,
+      [key, argsHash, this.graphNow(), metadata?.scopeKey ?? null, metadata?.sessionId ?? null, metadata?.ownerKey ?? null],
+    );
+    return result.rows.length === 1;
+  }
+
+  async releaseIntent(key: string, argsHash: string): Promise<boolean> {
+    const result = await this.client.query(
+      `DELETE FROM idempotency_keys WHERE key = $1 AND args_hash = $2 AND status = 'intent' RETURNING key`,
+      [key, argsHash],
+    );
+    return result.rows.length === 1;
   }
 
   async recordCompletion(key: string, result: unknown, metadata?: IdempotencyMetadata): Promise<void> {

@@ -28,13 +28,30 @@ export type Scope =
   | { kind: "org"; agentId: string; orgId: string }       // tenant-wide institutional knowledge
   | { kind: "shared"; blockId: string };                  // explicitly shared block, cross-agent (§8)
 
-export const scopeKey = (s: Scope): string => {
+/** Previous delimiter-based scope key. Exported only for controlled migration tooling. */
+export const legacyScopeKey = (s: Scope): string => {
   if (s.kind === "agent") return `agent:${s.agentId}`;
   if (s.kind === "user") return `user:${s.agentId}:${s.userId}`;
   if (s.kind === "thread") return `thread:${s.agentId}:${s.sessionId}`;
   if (s.kind === "org") return `org:${s.agentId}:${s.orgId}`;
   // s.kind === "shared" — intentionally NOT agent-scoped; cross-agent by design
   return `shared:${s.blockId}`;
+};
+
+/**
+ * Stable, injective scope key. Delimiter-free legacy keys remain byte-compatible; scopes whose
+ * components contain `:` use a versioned JSON tuple. Ambiguous legacy rows are therefore never
+ * silently reassigned to a tenant and require explicit operator mapping.
+ */
+export const scopeKey = (s: Scope): string => {
+  const parts = s.kind === "agent" ? [s.agentId]
+    : s.kind === "user" ? [s.agentId, s.userId]
+      : s.kind === "thread" ? [s.agentId, s.sessionId]
+        : s.kind === "org" ? [s.agentId, s.orgId]
+          : [s.blockId];
+  return parts.some((part) => part.includes(":"))
+    ? `eidentic.scope.v2:${JSON.stringify([s.kind, ...parts])}`
+    : legacyScopeKey(s);
 };
 
 /** Convenience constructors for stable memory/erasure scopes. */
@@ -47,13 +64,11 @@ export const scopes = {
 } as const;
 
 // --- Model port ---
-export interface ModelMessage {
-  role: "system" | "user" | "assistant" | "tool";
-  content: string | ContentBlock[];
-  // for role: "tool"
-  callId?: string;
-  toolName?: string;
-}
+export type ModelMessage =
+  | { role: "system"; content: string }
+  | { role: "user"; content: string | ContentBlock[] }
+  | { role: "assistant"; content: string | ContentBlock[] }
+  | { role: "tool"; content: string; callId: string; toolName: string };
 
 export interface ToolSchema {
   name: string;
@@ -268,10 +283,19 @@ export interface SessionRecord {
   userId?: string;
   /** The org that owns this session (Fix 1: multi-tenant ownership). Nullable for legacy/NoAuth sessions. */
   orgId?: string;
-  /** The API key whose bearer owns this session. Set when the session is created by an apiKey-only
-   * principal (no userId/orgId). Used in ownership checks to prevent cross-tenant reads via
-   * the exposeEvents endpoint (H1 fix). */
+  /**
+   * Opaque credential fingerprint for an apiKey-only owner. Despite the legacy field name, new
+   * writes MUST NOT store a presented API key. Existing plaintext rows are upgraded on verified use.
+   */
   apiKey?: string;
+}
+
+/** One durable lexical-memory entry, without retrieval-only score fields. */
+export interface MemoryEntry {
+  id: string;
+  text: string;
+  ingestedAt?: number;
+  metadata?: Record<string, unknown>;
 }
 
 // --- Store port ---
@@ -279,6 +303,8 @@ export interface StorePort {
   migrate(): Promise<void>;
   createSession(s: SessionRecord): Promise<void>;
   getSession(id: string): Promise<SessionRecord | null>;
+  /** Compare-and-swap a legacy session credential to an opaque fingerprint. */
+  replaceSessionApiKey(sessionId: string, expected: string, replacement: string): Promise<boolean>;
   appendEvents(events: StoredEvent[]): Promise<void>;
   readEvents(sessionId: string): Promise<StoredEvent[]>;
   getBlocks(scope: Scope): Promise<MemoryBlock[]>;
@@ -300,6 +326,10 @@ export interface StorePort {
    * optional — callers must handle absent values gracefully.
    */
   searchMemory(scope: Scope, query: string, topK: number): Promise<MemorySnippet[]>;
+  /** Enumerate every lexical memory entry in one exact scope for export/consent governance. */
+  listMemory(scope: Scope): Promise<MemoryEntry[]>;
+  /** Delete exact lexical memory ids in one exact scope. Returns rows actually removed. */
+  deleteMemory(scope: Scope, ids: string[]): Promise<number>;
   /**
    * Hard-delete ALL data for `scope` (GDPR right-to-erasure, §15): matching sessions and their
    * events/checkpoints/idempotency records/suspension decisions, plus blocks, block_history,
@@ -559,6 +589,16 @@ export interface DurablePort {
   lastCheckpoint(sessionId: string): Promise<Checkpoint | null>;
   /** Record intent BEFORE a destructive/idempotent tool runs. No-op if the key already exists. */
   recordIntent(key: string, argsHash: string, metadata?: IdempotencyMetadata): Promise<void>;
+  /**
+   * Atomically claim a previously unseen idempotency key.
+   *
+   * Returns `true` only for the single caller that inserted the intent. `false` means another
+   * executor already owns, or has completed, the key. Callers MUST NOT execute the side effect
+   * after a `false` result; they should inspect `getIdempotency()` instead.
+   */
+  claimIntent(key: string, argsHash: string, metadata?: IdempotencyMetadata): Promise<boolean>;
+  /** Release this exact, still-pending claim when execution suspends before the side effect. */
+  releaseIntent(key: string, argsHash: string, metadata?: IdempotencyMetadata): Promise<boolean>;
   /** Flip the key to applied AFTER it succeeds, persisting the result for skip-on-resume. */
   recordCompletion(key: string, result: unknown, metadata?: IdempotencyMetadata): Promise<void>;
   /** Read the ledger row (with parsed result) for a key, or null if absent. */
@@ -664,7 +704,8 @@ export interface LoadedSkill {
   name: string;
   description: string;
   body: string;               // the SKILL.md markdown body (Tier-2)
-  allowedTools?: string[];    // recorded from `allowed-tools`; NOT enforced in v1
+  /** Tool ids permitted while this skill is active; enforced by core dispatch. */
+  allowedTools?: string[];
   memory?: string;            // relevant `.memory.md` slice (Tier-3)
   provenance?: SkillProvenance;
   /** Relative paths of Tier-3 reference/script/asset files (pointer catalog — content loaded on demand via skill_read). */

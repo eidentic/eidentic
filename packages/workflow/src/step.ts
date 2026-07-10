@@ -10,6 +10,8 @@ export interface CtxWithCollector extends StepContext {
   _traces?: StepTrace[];
   /** Replay controller for suspend/resume (present only on imperative runs). */
   _replay?: ReplayController;
+  /** Resume-lease fence invoked immediately before an uncached effect. */
+  _beforeEffect?: () => Promise<void>;
 }
 
 // ─── Replay controller ───────────────────────────────────────────────────────
@@ -77,6 +79,7 @@ export function childCtx(parent: StepContext, name: string): StepContext {
     path: [...parent.path, name],
     _traces: (parent as CtxWithCollector)._traces,
     _replay: (parent as CtxWithCollector)._replay,
+    _beforeEffect: (parent as CtxWithCollector)._beforeEffect,
     // Forward imperative helpers so nested ctx.step/ctx.all work inside named steps
     step: parent.step,
     all: parent.all,
@@ -140,6 +143,8 @@ export function step<I, O>(name: string, fn: Step<I, O>, opts?: { retry?: StepRe
     ctx.emit({ type: "step.start", name, path, at });
     let attempts = 0;
     try {
+      checkSignal(ctx.signal);
+      await (ctx as CtxWithCollector)._beforeEffect?.();
       checkSignal(ctx.signal);
       const child = childCtx(ctx, name);
       const invoke = (): Promise<O> => {

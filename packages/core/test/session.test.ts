@@ -193,6 +193,8 @@ describe("Session", () => {
       newId: () => "id0",
       apiKey: "key-a",
     });
+    expect((await store.getSession("apikey-owned-sess"))?.apiKey).toMatch(/^eidentic\.credential\.sha256:[0-9a-f]{64}$/);
+    expect((await store.getSession("apikey-owned-sess"))?.apiKey).not.toContain("key-a");
 
     await expect(
       Session.open(store, {
@@ -203,6 +205,20 @@ describe("Session", () => {
         apiKey: "key-b",
       }),
     ).rejects.toThrow(StoreConflictError);
+  });
+
+  it("upgrades a verified legacy plaintext credential in place", async () => {
+    const store = new InMemoryStore();
+    await store.createSession({ id: "legacy-key", agentId: "a1", createdAt: "t0", apiKey: "raw-secret" });
+    await Session.open(store, {
+      sessionId: "legacy-key",
+      agentId: "a1",
+      now: () => "t1",
+      newId: () => "id1",
+      apiKey: "raw-secret",
+    });
+    expect((await store.getSession("legacy-key"))?.apiKey).toMatch(/^eidentic\.credential\.sha256:[0-9a-f]{64}$/);
+    expect((await store.getSession("legacy-key"))?.apiKey).not.toContain("raw-secret");
   });
 
   it("Finding #1 — session with no owner (legacy) is openable by any identity (back-compat)", async () => {

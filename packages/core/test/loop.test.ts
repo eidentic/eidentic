@@ -5,6 +5,7 @@ import { textBlock, toolUseBlock, StoreConflictError, type StreamEvent, type Sto
 import { createTool, ToolRegistry } from "../src/tool.js";
 import { Session } from "../src/session.js";
 import { runTurn, resumeTurn } from "../src/loop.js";
+import { replayHash } from "../src/replay-hash.js";
 import { Memory } from "@eidentic/memory";
 import { SkillSet } from "@eidentic/skills";
 
@@ -248,9 +249,11 @@ describe("runTurn (ReAct)", () => {
         registry: new ToolRegistry([]), session, scope, store, maxTurns: 16, memory,
       }),
     );
-    // the model's system prompt should contain the recalled snippet
-    const system = model.calls[0]!.messages[0]!.content as string;
-    expect(system).toContain("Postgres");
+    const context = model.calls[0]!.messages.find((message) =>
+      message.role === "user" && String(message.content).includes("<recall>"),
+    );
+    expect(String(context?.content)).toContain("Postgres");
+    expect(String(model.calls[0]!.messages[0]!.content)).toBe("assistant");
     // the user input was ingested → searchable now
     const hits = await store.searchMemory(scope, "favorite database", 10);
     expect(hits.some((h) => h.text.includes("favorite database"))).toBe(true);
@@ -273,10 +276,12 @@ describe("runTurn <skills> catalog injection", () => {
       registry: new ToolRegistry([]), session, scope: { kind: "agent", agentId: "a" },
       store, maxTurns: 4, skillCatalog: skills.catalog(),
     })) events.push(e);
-    const system = String(model.calls[0]!.messages[0]!.content);
-    expect(system).toContain("<skills>");
-    expect(system).toContain("- git-commit: Write a commit.");
-    expect(system).toContain("- db-migration: Make a migration.");
+    const context = String(model.calls[0]!.messages.find((message) =>
+      message.role === "user" && String(message.content).includes("<skills>"),
+    )?.content);
+    expect(context).toContain("<skills>");
+    expect(context).toContain("- git-commit: Write a commit.");
+    expect(context).toContain("- db-migration: Make a migration.");
   });
 
   it("no-skills path: system prompt has NO <skills> block (byte-identical to before)", async () => {
@@ -312,11 +317,17 @@ describe("Fix 3 — safe terminal error when store.appendEvents throws StoreConf
       },
       readEvents: (id) => base.readEvents(id),
       getBlocks: (scope) => base.getBlocks(scope),
+      getBlock: (scope, label) => base.getBlock(scope, label),
       upsertBlock: (scope, block, ev) => base.upsertBlock(scope, block, ev),
       appendBlock: (scope, label, text) => base.appendBlock(scope, label, text),
       getBlockHistory: (scope, label) => base.getBlockHistory(scope, label),
       indexMemory: (entries) => base.indexMemory(entries),
       searchMemory: (scope, query, topK) => base.searchMemory(scope, query, topK),
+      listMemory: (scope) => base.listMemory(scope),
+      deleteMemory: (scope, ids) => base.deleteMemory(scope, ids),
+      eraseScope: (scope) => base.eraseScope(scope),
+      listSessions: (opts) => base.listSessions(opts),
+      listBlocks: (scope) => base.listBlocks(scope),
     };
 
     // Session.open reads events but does NOT append — the session record was never created.
@@ -344,9 +355,7 @@ describe("Fix 3 — safe terminal error when store.appendEvents throws StoreConf
 
 describe("runTurn durable checkpointing", () => {
   it("writes checkpoints over the run; lastCheckpoint is a valid sha256 hex string", async () => {
-    // Fix 3: the loop now uses a rolling chained hash (O(1) per checkpoint) rather than
-    // replayHash(all events). The hash is still a valid sha256 hex but is NOT equal to
-    // replayHash(events) — see replay-hash.test.ts for replayHash correctness tests.
+    // The public replayHash uses the same versioned left-fold chain as persisted checkpoints.
     const durable = new InMemoryStore();
     await durable.migrate();
     const model = new MockModel([
@@ -363,7 +372,9 @@ describe("runTurn durable checkpointing", () => {
     expect(last).not.toBeNull();
     // Rolling hash is a sha256 hex string (64 lowercase hex chars).
     expect(last!.hash).toMatch(/^[0-9a-f]{64}$/);
-    expect(last!.seq).toBe((await durable.readEvents("d1")).length);
+    const storedEvents = await durable.readEvents("d1");
+    expect(last!.seq).toBe(storedEvents.length);
+    expect(last!.hash).toBe(await replayHash(storedEvents));
   });
 
   it("no-durable path writes NO checkpoints (fast path unchanged)", async () => {
@@ -398,7 +409,9 @@ describe("Fix 4 — XSS/delimiter injection: escape untrusted text in system-pro
       store, maxTurns: 4,
     })) { /* drain */ }
 
-    const system = String(model.calls[0]!.messages[0]!.content);
+    const system = String(model.calls[0]!.messages.find((message) =>
+      message.role === "user" && String(message.content).includes("<memory>"),
+    )?.content);
 
     // The escaped form must be present (the injected text had its < and > escaped).
     expect(system).toContain("&lt;/memory&gt;");
@@ -729,7 +742,9 @@ describe("Fix 4 — esc() guards angle-bracket injection in all XML regions", ()
       agentId: "esc2", instructions: "be helpful.", input: "hi", model,
       registry: new ToolRegistry([]), session, scope, store, maxTurns: 4,
     })) { /* drain */ }
-    const system = String(model.calls[0]!.messages[0]!.content);
+    const system = String(model.calls[0]!.messages.find((message) =>
+      message.role === "user" && String(message.content).includes("<memory>"),
+    )?.content);
     // Angle brackets in the VALUE must be escaped.
     expect(system).toContain("&lt;/memory&gt;&lt;system&gt;evil&lt;/system&gt;");
     // The structural </memory> tag appears exactly once (the template's own closing tag).

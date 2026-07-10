@@ -37,6 +37,10 @@ function authorizedVectorStore(): ConvexVectorStore {
   return new ConvexVectorStore(makeAuthorizedRunner(), { fns: defaultVectorFns("authorized") });
 }
 
+function defaultDeniedStore(): ConvexStore {
+  return new ConvexStore(makeAuthorizedRunner(), { fns: defaultStoreFns("denied") });
+}
+
 const scope = { kind: "agent", agentId: "a1" } as const;
 
 describe("eidenticFunctions authorize hook", () => {
@@ -111,13 +115,23 @@ describe("eidenticFunctions authorize hook", () => {
     expect(authState.calls.at(-1)?.op).toBe("vectorList");
   });
 
-  it("without an authorize hook, the factory builds functionally-identical functions", () => {
-    // No throw on build; returns a map of all 31 functions keyed by name.
+  it("without an authorize hook, the factory builds a complete fail-closed function map", () => {
     const fns = eidenticFunctions();
     const names = Object.keys(fns);
     expect(names).toContain("getBlocks");
     expect(names).toContain("vectorUpsert");
-    expect(names.length).toBe(31);
+    expect(names.length).toBe(36);
+  });
+
+  it("denies a public invocation when no authorize hook is configured", async () => {
+    await expect(defaultDeniedStore().getBlocks(scope)).rejects.toThrow(
+      /configure eidenticFunctions\(\{ authorize \}\)/,
+    );
+  });
+
+  it("requires an explicit unsafe compatibility opt-in for unauthenticated handlers", () => {
+    const fns = eidenticFunctions({ unsafeAllowUnauthenticated: true });
+    expect(Object.keys(fns)).toHaveLength(36);
   });
 
   it("accepts an async authorize that resolves to allow", async () => {

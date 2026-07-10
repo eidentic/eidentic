@@ -72,11 +72,46 @@ export async function resumeWorkflow<I, O>(
     decisions: { ...cache.decisions, [token]: decision },
   };
 
+  const leaseAbort = new AbortController();
+  const forwardAbort = (): void => leaseAbort.abort(opts.signal?.reason);
+  opts.signal?.addEventListener("abort", forwardAbort, { once: true });
+  if (opts.signal?.aborted) forwardAbort();
+
+  let stopped = false;
+  let renewalTimer: ReturnType<typeof setTimeout> | undefined;
+  let heartbeatInFlight: Promise<void> | undefined;
+  let renewalError: unknown;
+  const renew = async (): Promise<WorkflowRunRecord> => {
+    if (renewalError !== undefined) throw renewalError;
+    try {
+      return await registry.renewResume(runId, claimId);
+    } catch (error) {
+      renewalError = error;
+      leaseAbort.abort(error);
+      throw error;
+    }
+  };
+  const scheduleRenewal = (record: WorkflowRunRecord): void => {
+    if (stopped || renewalError !== undefined) return;
+    const remaining = Math.max(1, (record.resumeClaim?.expiresAt ?? Date.now()) - Date.now());
+    const delay = Math.max(1, Math.floor(remaining / 3));
+    renewalTimer = setTimeout(() => {
+      heartbeatInFlight = renew().then((renewed) => scheduleRenewal(renewed)).catch(() => undefined);
+    }, delay);
+  };
+  scheduleRenewal(prev);
+
   const exec = await executeBody<I, O>(workflow.name, body, input as I, {
-    ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
+    signal: leaseAbort.signal,
     ...(opts.onEvent !== undefined ? { onEvent: opts.onEvent } : {}),
     cache: seededCache,
-  }).catch((err: unknown) => ({ kind: "threw" as const, err }));
+    beforeEffect: async () => { await renew(); },
+  }).catch((err: unknown) => ({ kind: "threw" as const, err })).finally(async () => {
+    stopped = true;
+    if (renewalTimer !== undefined) clearTimeout(renewalTimer);
+    await heartbeatInFlight;
+    opts.signal?.removeEventListener("abort", forwardAbort);
+  });
 
   const version = prev.version;
   const meta: WorkflowMeta | undefined = version !== undefined ? { version } : undefined;

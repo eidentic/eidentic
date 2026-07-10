@@ -150,6 +150,8 @@ export interface WorkflowRunRegistry {
   update(id: string, rec: WorkflowRunRecord): WorkflowRunRecord;
   /** Atomically transition suspended → resuming and return the single-use claim id. */
   claimResume(id: string, expectedToken: string): Promise<{ record: WorkflowRunRecord; claimId: string }>;
+  /** Renew a live resume lease. Expired or superseded claims fail closed. */
+  renewResume(id: string, claimId: string): Promise<WorkflowRunRecord>;
   /** Atomically complete/re-suspend/error a run owned by `claimId`. */
   finishResume(id: string, claimId: string, rec: WorkflowRunRecord): Promise<WorkflowRunRecord>;
   /** Retrieve a single run record by id. Returns `undefined` for unknown ids. */
@@ -198,6 +200,8 @@ export interface WorkflowRunStore {
     expectedToken: string,
     claim: WorkflowResumeClaim,
   ): Promise<WorkflowRunRecord>;
+  /** Optional durable CAS that extends a matching, unexpired resume claim. */
+  renewResume?(id: string, claimId: string, expiresAt: number): Promise<WorkflowRunRecord>;
   /** Optional durable CAS that consumes a matching resume claim. */
   finishResume?(id: string, claimId: string, record: WorkflowRunRecord): Promise<WorkflowRunRecord>;
 }
@@ -447,6 +451,29 @@ export function createWorkflowRunRegistry(
       if (store && !store.finishResume) await store.save(durableFinished);
       mem.set(id, durableFinished);
       return durableFinished;
+    },
+
+    async renewResume(id: string, claimId: string): Promise<WorkflowRunRecord> {
+      const current = mem.get(id);
+      const now = Date.now();
+      if (
+        current?.runStatus !== "resuming" ||
+        current.resumeClaim?.id !== claimId ||
+        current.resumeClaim.expiresAt <= now
+      ) {
+        throw new WorkflowResumeConflictError(id, "resume claim is expired or no longer owned");
+      }
+      const expiresAt = now + resumeLeaseMs;
+      const renewed: WorkflowRunRecord = {
+        ...current,
+        resumeClaim: { ...current.resumeClaim, expiresAt },
+      };
+      const durableRenewed = store?.renewResume
+        ? await store.renewResume(id, claimId, expiresAt)
+        : renewed;
+      if (store && !store.renewResume) await store.save(durableRenewed);
+      mem.set(id, durableRenewed);
+      return durableRenewed;
     },
 
     get(id: string): WorkflowRunRecord | undefined {

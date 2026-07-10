@@ -102,7 +102,8 @@ describe("Agent structured output (D2)", () => {
     expect(result.object).toBeUndefined();
     expect(result.details?.errorKind).toBe("structured_output_validation");
     expect(result.details?.validationIssues).toEqual(expect.arrayContaining([expect.stringMatching(/age/i)]));
-    expect(result.details?.rawOutput).toBe('{"name":"Ada","age":"old"}');
+    expect(result.details?.rawOutput).toBeUndefined();
+    expect(JSON.stringify(result.details)).not.toContain('{"name":"Ada","age":"old"}');
   });
 
   it("terminates with error when the final answer is not valid JSON", async () => {
@@ -112,7 +113,8 @@ describe("Agent structured output (D2)", () => {
     expect(result.subtype).toBe("error");
     expect(String(result.output)).toMatch(/not valid JSON/i);
     expect(result.details?.errorKind).toBe("structured_output_parse");
-    expect(result.details?.rawOutput).toBe("I cannot do that");
+    expect(result.details?.rawOutput).toBeUndefined();
+    expect(JSON.stringify(result.details)).not.toContain("I cannot do that");
   });
 
   it("back-compat: a query WITHOUT outputSchema never forwards a schema and yields no object", async () => {

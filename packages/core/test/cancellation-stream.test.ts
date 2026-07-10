@@ -111,6 +111,12 @@ describe("§16.4 cancellation (stream): mid-stream abort — no-final path", () 
 
     // Usage on the aborted terminal should be zero (no model response was received).
     expect(result.usage).toMatchObject({ inputTokens: 0, outputTokens: 0 });
+    const stored = await store.readEvents("s-stream-abort");
+    expect(stored.find((event) => event.kind === "assistant")?.payload).toMatchObject({
+      partial: true,
+      interrupted: "aborted",
+      content: [textBlock("partial...")],
+    });
   });
 
   it("pre-aborted signal on a streaming model → aborted before any delta (top-of-turn boundary)", async () => {

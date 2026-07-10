@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { InMemoryStore, InMemoryVectorStore, FakeEmbedder, MockModel } from "@eidentic/types/testing";
-import { toolUseBlock, type Scope, type ModelResponse } from "@eidentic/types";
+import { toolUseBlock, type Scope, type ModelResponse, type VectorPort } from "@eidentic/types";
 import { Memory } from "../src/index.js";
 
 const scope: Scope = { kind: "agent", agentId: "dedup-agent" };
@@ -32,6 +32,84 @@ function makeSemanticMemory() {
 }
 
 describe("Memory.deduplicateArchival", () => {
+  it("bounds the default work at 100k comparisons for a 10k-entry scope and reports truncation", async () => {
+    const entryCount = 10_000;
+    const entries = Array.from({ length: entryCount }, (_, i) => ({
+      id: `bulk-${i}`,
+      scopeKey: "agent:dedup-agent",
+      text: `passage ${i}`,
+      vector: [1],
+    }));
+    const vector: VectorPort = {
+      upsert: async () => {},
+      search: async () => [],
+      delete: async () => {},
+      eraseScope: async () => ({ deleted: 0 }),
+      list: async () => entries,
+    };
+    const model = new MockModel([]);
+    const mem = new Memory({
+      store: new InMemoryStore(),
+      vector,
+      embedder: { dim: 1, embed: async () => [1] },
+      dedupeOnWrite: false,
+    });
+
+    // threshold > 1 guarantees the model is never called; the test measures candidate work only.
+    const res = await mem.deduplicateArchival(scope, { mergeModel: model, threshold: 1.01 });
+
+    expect(res).toMatchObject({
+      merged: 0,
+      comparisons: 100_000,
+      comparisonBudget: 100_000,
+      totalPairs: 49_995_000,
+      truncated: true,
+    });
+    expect(model.calls).toHaveLength(0);
+  });
+
+  it("spreads a small explicit budget across the scope before widening candidate distance", async () => {
+    const entries = [
+      { id: "p0", scopeKey: "agent:dedup-agent", text: "zero", vector: [1, 0] },
+      { id: "p1", scopeKey: "agent:dedup-agent", text: "one", vector: [0, 1] },
+      { id: "p2", scopeKey: "agent:dedup-agent", text: "two", vector: [-1, 0] },
+      { id: "p3", scopeKey: "agent:dedup-agent", text: "duplicate A", vector: [0, -1] },
+      { id: "p4", scopeKey: "agent:dedup-agent", text: "duplicate B", vector: [0, -1] },
+    ];
+    const vector: VectorPort = {
+      upsert: async () => {},
+      search: async () => [],
+      delete: async () => {},
+      eraseScope: async () => ({ deleted: 0 }),
+      list: async () => entries,
+    };
+    const model = new MockModel([mergeResponse("canonical duplicate", { inputTokens: 3, outputTokens: 1 })]);
+    const mem = new Memory({
+      store: new InMemoryStore(),
+      vector,
+      embedder: { dim: 2, embed: async () => [0, -1] },
+      dedupeOnWrite: false,
+    });
+
+    const res = await mem.deduplicateArchival(scope, {
+      mergeModel: model,
+      threshold: 0.95,
+      maxComparisons: 4,
+    });
+
+    // Distance-one ordering checks (0,1), (1,2), (2,3), then the tail pair (3,4).
+    // An anchor-first prefix would spend all four slots around p0 and miss this duplicate.
+    expect(res).toMatchObject({
+      merged: 1,
+      comparisons: 4,
+      candidatePairsExamined: 4,
+      comparisonBudget: 4,
+      totalPairs: 10,
+      truncated: true,
+    });
+    expect(model.calls).toHaveLength(1);
+  });
+
   it("merges two near-identical passages into one canonical entry", async () => {
     const { store, vector, mem } = makeSemanticMemory();
     const model = new MockModel([mergeResponse("the user prefers dark mode (canonical)", { inputTokens: 50, outputTokens: 20 })]);
@@ -56,6 +134,38 @@ describe("Memory.deduplicateArchival", () => {
     // FTS should find the canonical text
     const hits = await store.searchMemory(scope, "canonical dark mode", 10);
     expect(hits.length).toBeGreaterThan(0);
+    expect(await store.listMemory(scope)).toHaveLength(1);
+  });
+
+  it("bounds LLM merge calls and reports truncation", async () => {
+    const { store, mem } = makeSemanticMemory();
+    const model = new MockModel([
+      mergeResponse("canonical one", { inputTokens: 2, outputTokens: 1 }),
+      mergeResponse("canonical two", { inputTokens: 2, outputTokens: 1 }),
+    ]);
+    await mem.ingest([
+      { scope, id: "b1", text: "same passage" },
+      { scope, id: "b2", text: "same passage" },
+      { scope, id: "b3", text: "same passage" },
+    ]);
+    const result = await mem.deduplicateArchival(scope, {
+      mergeModel: model,
+      threshold: 0.95,
+      maxMerges: 1,
+    });
+    expect(result).toMatchObject({ merged: 1, mergeBudget: 1, truncated: true });
+    expect(model.calls).toHaveLength(1);
+    expect(await store.listMemory(scope)).toHaveLength(2);
+  });
+
+  it("honors an already-aborted maintenance signal", async () => {
+    const { mem } = makeSemanticMemory();
+    const controller = new AbortController();
+    controller.abort();
+    await expect(mem.deduplicateArchival(scope, {
+      mergeModel: new MockModel([]),
+      signal: controller.signal,
+    })).rejects.toMatchObject({ name: "AbortError" });
   });
 
   it("does NOT merge dissimilar passages", async () => {
