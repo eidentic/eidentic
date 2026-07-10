@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { existsSync, readFileSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { initProject, INIT_PROVIDERS } from "../src/commands.js";
@@ -174,6 +174,18 @@ describe("initProject() — model option", () => {
 // ---------------------------------------------------------------------------
 
 describe("initProject() — apiKey option", () => {
+  it("creates .env with owner-only permissions", () => {
+    initProject(tmpDir, { apiKey: "sk-test-key-123" });
+    expect(statSync(join(tmpDir, ".env")).mode & 0o777).toBe(0o600);
+  });
+
+  it("rejects line breaks in apiKey values before creating project files", () => {
+    expect(() => initProject(tmpDir, {
+      apiKey: "safe\nINJECTED_KEY=attacker",
+    })).toThrow(/line break|invalid/i);
+    expect(existsSync(join(tmpDir, ".env"))).toBe(false);
+  });
+
   it("writes the key into .env when apiKey is provided", () => {
     initProject(tmpDir, { apiKey: "sk-test-key-123" });
 

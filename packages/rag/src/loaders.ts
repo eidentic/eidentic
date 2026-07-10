@@ -209,10 +209,11 @@ export interface PdfParseResult {
 
 /** Lazy-require the optional peer dep. Throws a clear error if not installed. */
 function loadPdfParseModule(): (buf: Buffer) => Promise<PdfParseResult> {
-  const req: NodeRequire =
-    typeof require === "function"
-      ? require
-      : createRequire(import.meta.url);
+  // Never branch on `typeof require`: esbuild injects an ESM `__require` shim that is a
+  // function but cannot load native/CJS dependencies. createRequire is the real loader in both
+  // formats; CJS uses __filename while ESM uses import.meta.url.
+  const moduleLocation = typeof __filename === "string" ? __filename : import.meta.url;
+  const req: NodeRequire = createRequire(moduleLocation);
   try {
     // pdf-parse exports itself as a function directly in CJS
     const mod = req("pdf-parse") as unknown;

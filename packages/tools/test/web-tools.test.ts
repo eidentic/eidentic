@@ -1,7 +1,13 @@
 import { describe, it, expect } from "vitest";
 import type { ToolContext } from "@eidentic/core";
 import { MapSecrets } from "@eidentic/types/testing";
-import { webTools, hostAllowed, isBlockedHost, safeUrlForError } from "../src/index.js";
+import { webTools as guardedWebTools, hostAllowed, isBlockedHost, safeUrlForError } from "../src/index.js";
+
+const webTools: typeof guardedWebTools = (opts) => guardedWebTools({
+  unsafeAllowAnyPublicHost: opts.allowlist === undefined,
+  allowInsecureHttp: true,
+  ...opts,
+});
 
 /** Minimal fake fetch returning a fixed text body. */
 function fakeFetch(body: string, status = 200, headers: Record<string, string> = {}): typeof fetch {
@@ -16,6 +22,11 @@ const byId = (tools: ReturnType<typeof webTools>, id: string) => {
 };
 
 describe("webTools — sealed web_fetch + egress allowlist (§5.6)", () => {
+  it("denies an omitted allowlist by default", async () => {
+    const tools = guardedWebTools({ fetchImpl: fakeFetch("SHOULD NOT REACH"), resolveHosts: false });
+    await expect(byId(tools, "web_fetch").execute({ url: "https://example.com/x" }))
+      .rejects.toThrow(/allowlist/i);
+  });
   it("hostAllowed: exact + dot-boundary suffix; empty list denies all", () => {
     expect(hostAllowed("example.com", ["example.com"])).toBe(true);
     expect(hostAllowed("api.example.com", ["example.com"])).toBe(true);
@@ -40,8 +51,8 @@ describe("webTools — sealed web_fetch + egress allowlist (§5.6)", () => {
     await expect(byId(tools, "web_fetch").execute({ url: "https://example.com/x" })).rejects.toThrow(/allowlist/);
   });
 
-  it("omitted allowlist applies NO domain restriction (fetches any public host)", async () => {
-    const tools = webTools({ fetchImpl: fakeFetch("PUBLIC BODY") });
+  it("explicit unsafe compatibility mode permits any public host", async () => {
+    const tools = webTools({ fetchImpl: fakeFetch("PUBLIC BODY"), resolveHosts: false });
     const out = (await byId(tools, "web_fetch").execute({ url: "https://anything.example.org/x" })) as { content: string; status: number };
     expect(out.content).toBe("PUBLIC BODY");
     expect(out.status).toBe(200);
@@ -71,7 +82,7 @@ describe("webTools — sealed web_fetch + egress allowlist (§5.6)", () => {
     expect(hostAllowed("api.example.com", ["example.com"])).toBe(true);
     expect(hostAllowed("notexample.com", ["example.com"])).toBe(false);
     // Also test fetching via subdomain
-    const tools = webTools({ allowlist: ["example.com"], fetchImpl: fakeFetch("SUB") });
+    const tools = webTools({ allowlist: ["example.com"], fetchImpl: fakeFetch("SUB"), resolveHosts: false });
     const out = (await byId(tools, "web_fetch").execute({ url: "https://api.example.com/v1" })) as { content: string };
     expect(out.content).toBe("SUB");
   });
@@ -315,6 +326,7 @@ describe("M4 — web_fetch success result strips query string and fragment from 
   it("url field in success result has query string stripped", async () => {
     const tools = webTools({
       fetchImpl: fakeFetch("PAGE CONTENT"),
+      resolveHosts: false,
     });
     const out = (await byId(tools, "web_fetch").execute({
       url: "https://example.com/path?token=sk-secret&foo=bar",
@@ -327,6 +339,7 @@ describe("M4 — web_fetch success result strips query string and fragment from 
   it("url field in success result has fragment stripped", async () => {
     const tools = webTools({
       fetchImpl: fakeFetch("CONTENT"),
+      resolveHosts: false,
     });
     const out = (await byId(tools, "web_fetch").execute({
       url: "https://example.com/page#sensitive-anchor",
@@ -338,6 +351,7 @@ describe("M4 — web_fetch success result strips query string and fragment from 
   it("url field strips both query and fragment together", async () => {
     const tools = webTools({
       fetchImpl: fakeFetch("CONTENT"),
+      resolveHosts: false,
     });
     const out = (await byId(tools, "web_fetch").execute({
       url: "https://api.example.com/v1/data?api_key=abc123#results",

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import type { MemoryEvent, Scope } from "@eidentic/types";
-import { ingestDocument } from "../src/ingest.js";
+import { ingestDocument as guardedIngestDocument } from "../src/ingest.js";
 import type { IngestableMemory } from "../src/ingest.js";
 
 // ---------------------------------------------------------------------------
@@ -8,6 +8,11 @@ import type { IngestableMemory } from "../src/ingest.js";
 // ---------------------------------------------------------------------------
 
 const agentScope: Scope = { kind: "agent", agentId: "test-agent" };
+const ingestDocument: typeof guardedIngestDocument = (source, opts) => guardedIngestDocument(source, {
+  unsafeAllowAnyPublicHost: opts.allowlist === undefined,
+  allowInsecureHttp: true,
+  ...opts,
+});
 
 /** A fake memory that captures all ingested events. */
 function fakeMemory(): IngestableMemory & { events: MemoryEvent[] } {
@@ -96,6 +101,17 @@ describe("ingestDocument — string source", () => {
 // ---------------------------------------------------------------------------
 
 describe("ingestDocument — URL source", () => {
+  it("denies an omitted host allowlist by default", async () => {
+    const mem = fakeMemory();
+    await expect(guardedIngestDocument({ url: "https://example.com/doc" }, {
+      memory: mem,
+      scope: agentScope,
+      fetchImpl: fakeFetch("SHOULD NOT REACH"),
+      resolveHosts: false,
+    })).rejects.toThrow(/allowlist/i);
+    expect(mem.events).toHaveLength(0);
+  });
+
   it("fetches text from URL and ingests it", async () => {
     const mem = fakeMemory();
     const docText = "This is fetched document text.";
@@ -159,6 +175,71 @@ describe("ingestDocument — URL source", () => {
 // ---------------------------------------------------------------------------
 
 describe("ingestDocument — SSRF guard", () => {
+  it("rejects a public-looking hostname when DNS includes loopback", async () => {
+    const mem = fakeMemory();
+    let fetchCalls = 0;
+    const fetchImpl = (async () => {
+      fetchCalls++;
+      return new Response("must not be reached");
+    }) as typeof fetch;
+
+    await expect(ingestDocument(
+      { url: "https://files.example/document" },
+      {
+        memory: mem,
+        scope: agentScope,
+        fetchImpl,
+        resolveHost: async () => ["93.184.216.34", "127.0.0.1"],
+      },
+    )).rejects.toThrow(/resolved host|non-global|blocked/i);
+    expect(fetchCalls).toBe(0);
+    expect(mem.events).toHaveLength(0);
+  });
+
+  it("rejects URL credentials", async () => {
+    const mem = fakeMemory();
+    await expect(ingestDocument(
+      { url: "https://user:secret@example.com/document" },
+      {
+        memory: mem,
+        scope: agentScope,
+        fetchImpl: fakeFetch("never"),
+        resolveHost: async () => ["93.184.216.34"],
+      },
+    )).rejects.toThrow(/credentials/i);
+  });
+
+  it("rejects fetched bodies above maxResponseBytes without ingesting a prefix", async () => {
+    const mem = fakeMemory();
+    await expect(ingestDocument(
+      { url: "https://example.com/large" },
+      {
+        memory: mem,
+        scope: agentScope,
+        fetchImpl: fakeFetch("x".repeat(2048)),
+        resolveHost: async () => ["93.184.216.34"],
+        maxResponseBytes: 1024,
+      },
+    )).rejects.toThrow(/response body.*1024|exceeds.*1024/i);
+    expect(mem.events).toHaveLength(0);
+  });
+
+  it("rejects binary media types", async () => {
+    const mem = fakeMemory();
+    const fetchImpl = (async () => new Response(new Uint8Array([0, 1, 2]), {
+      headers: { "content-type": "application/octet-stream" },
+    })) as typeof fetch;
+    await expect(ingestDocument(
+      { url: "https://example.com/file.bin" },
+      {
+        memory: mem,
+        scope: agentScope,
+        fetchImpl,
+        resolveHost: async () => ["93.184.216.34"],
+      },
+    )).rejects.toThrow(/content type/i);
+  });
+
   it("rejects cloud-metadata endpoint 169.254.169.254", async () => {
     const mem = fakeMemory();
     await expect(
@@ -227,6 +308,7 @@ describe("ingestDocument — SSRF guard", () => {
         scope: agentScope,
         allowlist: ["trusted.example.com"],
         fetchImpl: fakeFetch("trusted content"),
+        resolveHost: async () => ["93.184.216.34"],
         docId: "allowed-doc",
       },
     );
@@ -291,7 +373,12 @@ describe("ingestDocument — redirect chain SSRF guard (multi-hop, FIX 1)", () =
     await expect(
       ingestDocument(
         { url: "https://example.com/step1" },
-        { memory: mem, scope: agentScope, fetchImpl: chainFetch },
+        {
+          memory: mem,
+          scope: agentScope,
+          fetchImpl: chainFetch,
+          resolveHost: async () => ["93.184.216.34"],
+        },
       ),
     ).rejects.toThrow(/blocked/i);
     expect(mem.events).toHaveLength(0);

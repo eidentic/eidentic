@@ -208,6 +208,14 @@ export function createPromptRegistry(store?: PromptStore): PromptRegistry {
     return loaded ?? { versions: [], tags: {}, history: [] };
   }
 
+  async function mutateState<T>(mutator: (state: PromptStoreState) => T | Promise<T>): Promise<T> {
+    if (s.transact) return s.transact(mutator);
+    const state = await loadState();
+    const result = await mutator(state);
+    await s.save(state);
+    return result;
+  }
+
   function tagKey(name: string, tag: string): string {
     return `${name}/${tag}`;
   }
@@ -265,8 +273,7 @@ export function createPromptRegistry(store?: PromptStore): PromptRegistry {
       body: string,
       options: RegisterOptions = {},
     ): Promise<PromptVersion> {
-      return enqueue(async () => {
-      const state = await loadState();
+      return enqueue(() => mutateState(async (state) => {
       const hash = sha256(body);
 
       // Dedup: if an identical body already exists for this name, return it.
@@ -298,9 +305,8 @@ export function createPromptRegistry(store?: PromptStore): PromptRegistry {
         createdAt: pv.createdAt,
       });
 
-      await s.save(state);
       return pv;
-      }); // end enqueue
+      })); // end enqueue
     },
 
     get(name: string, ref?: number | string): Promise<PromptVersion> {
@@ -309,8 +315,7 @@ export function createPromptRegistry(store?: PromptStore): PromptRegistry {
     },
 
     tag(name: string, version: number, tagName: string): Promise<void> {
-      return enqueue(async () => {
-        const state = await loadState();
+      return enqueue(() => mutateState(async (state) => {
 
         // Verify the version exists for this name
         const all = versionsFor(state, name);
@@ -336,13 +341,11 @@ export function createPromptRegistry(store?: PromptStore): PromptRegistry {
           createdAt: new Date().toISOString(),
         });
 
-        await s.save(state);
-      }); // end enqueue
+      })); // end enqueue
     },
 
     untag(name: string, tagName: string): Promise<void> {
-      return enqueue(async () => {
-        const state = await loadState();
+      return enqueue(() => mutateState(async (state) => {
         const key = tagKey(name, tagName);
         const fromVersion = state.tags[key];
         if (fromVersion === undefined) {
@@ -360,8 +363,7 @@ export function createPromptRegistry(store?: PromptStore): PromptRegistry {
           createdAt: new Date().toISOString(),
         });
 
-        await s.save(state);
-      }); // end enqueue
+      })); // end enqueue
     },
 
     async history(name: string): Promise<HistoryEvent[]> {

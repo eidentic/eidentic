@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtemp, rm, readFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -22,6 +22,51 @@ afterEach(async () => {
 });
 
 describe("filePromptStore — round-trip", () => {
+  it("creates the store with owner-only permissions", async () => {
+    const path = await makeTmpPath();
+    const registry = createPromptRegistry(filePromptStore(path));
+    await registry.register("private", "body");
+    expect((await stat(path)).mode & 0o777).toBe(0o600);
+  });
+
+  it("rejects a symlink destination without changing its target", async () => {
+    const path = await makeTmpPath();
+    const outside = join(tmpDir!, "outside.json");
+    await writeFile(outside, "outside", "utf8");
+    await symlink(outside, path, "file");
+    const registry = createPromptRegistry(filePromptStore(path));
+    await expect(registry.register("escape", "body")).rejects.toThrow(/symlink/i);
+    expect(await readFile(outside, "utf8")).toBe("outside");
+  });
+
+  it("rejects a symlinked writable parent directory", async () => {
+    await makeTmpPath();
+    const outside = join(tmpDir!, "outside");
+    const linkedParent = join(tmpDir!, "linked");
+    await mkdir(outside);
+    await symlink(outside, linkedParent, "dir");
+    const escaped = join(linkedParent, "prompts.json");
+    const registry = createPromptRegistry(filePromptStore(escaped));
+    await expect(registry.register("escape", "body")).rejects.toThrow(/symlink parent/i);
+    await expect(access(join(outside, "prompts.json"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("serializes independent registries without losing version allocation", async () => {
+    const path = await makeTmpPath();
+    const first = createPromptRegistry(filePromptStore(path));
+    const second = createPromptRegistry(filePromptStore(path));
+    const [a, b] = await Promise.all([
+      first.register("shared", "body-a"),
+      second.register("shared", "body-b"),
+    ]);
+    expect(new Set([a.version, b.version])).toEqual(new Set([1, 2]));
+
+    const reloaded = createPromptRegistry(filePromptStore(path));
+    expect((await reloaded.history("shared")).filter((event) => event.kind === "version_registered"))
+      .toHaveLength(2);
+    expect((await reloaded.get("shared", 1)).body).not.toBe((await reloaded.get("shared", 2)).body);
+  });
+
   it("persists and reloads state correctly", async () => {
     const path = await makeTmpPath();
 

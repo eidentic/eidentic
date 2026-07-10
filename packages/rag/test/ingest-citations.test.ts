@@ -4,9 +4,14 @@
 import { describe, it, expect } from "vitest";
 import { InMemoryStore } from "@eidentic/types/testing";
 import type { MemoryEvent, Scope } from "@eidentic/types";
-import { ingestDocument } from "../src/ingest.js";
+import { ingestDocument as guardedIngestDocument } from "../src/ingest.js";
 
 const scope: Scope = { kind: "agent", agentId: "test-rag-agent" };
+const ingestDocument: typeof guardedIngestDocument = (source, opts) => guardedIngestDocument(source, {
+  unsafeAllowAnyPublicHost: opts.allowlist === undefined,
+  allowInsecureHttp: true,
+  ...opts,
+});
 
 /** A simple memory that records all ingested events for inspection. */
 class CapturingMemory {
@@ -79,6 +84,48 @@ describe("Feature 3 — ingestDocument attaches metadata.source per chunk", () =
       expect(event.metadata).toBeDefined();
       expect(event.metadata?.source).toBe(targetUrl);
     }
+  });
+
+  it("URL citations omit credentials, query strings and fragments", async () => {
+    const memory = new CapturingMemory();
+    await ingestDocument(
+      { url: "https://example.com/document?token=secret#section" },
+      {
+        memory,
+        scope,
+        fetchImpl: async () => new Response("safe text"),
+        resolveHost: async () => ["93.184.216.34"],
+      },
+    );
+
+    expect(memory.captured[0]!.metadata?.source).toBe("https://example.com/document");
+  });
+
+  it("URL citations use the final validated redirect URL", async () => {
+    const memory = new CapturingMemory();
+    const fetchImpl = (async (input: string | URL | Request) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url === "https://example.com/start") {
+        return new Response(null, {
+          status: 302,
+          headers: { location: "https://cdn.example.com/final?signature=secret#section" },
+        });
+      }
+      return new Response("redirected document", {
+        headers: { "content-type": "text/plain" },
+      });
+    }) as typeof fetch;
+
+    await ingestDocument(
+      { url: "https://example.com/start" },
+      {
+        memory,
+        scope,
+        fetchImpl,
+        resolveHost: async () => ["93.184.216.34"],
+      },
+    );
+    expect(memory.captured[0]!.metadata?.source).toBe("https://cdn.example.com/final");
   });
 
   it("chunk ids are stable: ${docId}:chunk:${i} with correct chunk count", async () => {

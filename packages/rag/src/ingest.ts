@@ -1,5 +1,5 @@
 import type { MemoryEvent, Scope } from "@eidentic/types";
-import { resilientFetch, assertFetchableUrl } from "@eidentic/tools";
+import { safeFetchText, safeUrlForError } from "@eidentic/tools";
 import { chunkText, type ChunkOptions } from "./chunk.js";
 import { loadMarkdown, loadHtml, loadPdf, type PdfLoaderOptions } from "./loaders.js";
 
@@ -47,27 +47,43 @@ export interface IngestDocumentOptions {
   /** Chunking options forwarded to {@link chunkText}. */
   chunk?: ChunkOptions;
   /**
-   * Fetch implementation override (useful in tests). Defaults to {@link resilientFetch}.
+   * Fetch implementation override (useful in tests). The shared safe-egress wrapper still
+   * performs DNS, redirect, timeout, media-type and response-size enforcement around it.
    *
    * **SSRF contract:** the provided implementation MUST respect the `redirect: "manual"`
    * option and return a 3xx response instead of silently following redirects.  If the
    * implementation auto-follows redirects (e.g. the default `globalThis.fetch` without
    * the `manual` option), the SSRF guard will detect this at runtime and throw, because
    * redirect chains must be validated hop-by-hop.  If you supply a custom fetch, ensure
-   * it honours `{ redirect: "manual" }`.
+   * it honours `{ redirect: "manual" }`. DNS checking remains enabled unless explicitly
+   * disabled behind an equivalent network-level egress policy.
    */
   fetchImpl?: typeof fetch;
   /**
    * Optional egress allowlist of hostnames for URL-based ingestion (§5.6 / §10.3).
    *
-   * - **Omitted (`undefined`):** no domain restriction — any public http(s) host is allowed
-   *   (private/loopback/metadata hosts are still always blocked by the SSRF guard).
-   * - **Empty array (`[]`):** denies ALL URL fetches (explicit lockdown).
+   * - **Omitted/empty:** denies ALL URL fetches.
    * - **Non-empty:** restricts URL fetches to the listed hosts and their subdomains.
    *
    * Has no effect when `source` is a plain string (no fetch occurs).
    */
   allowlist?: string[];
+  /** @deprecated Unsafe compatibility mode permitting every globally routed host. */
+  unsafeAllowAnyPublicHost?: boolean;
+  /** @deprecated Permit cleartext HTTP. Production default is HTTPS-only. */
+  allowInsecureHttp?: boolean;
+  /** Resolve and validate every A/AAAA address before every attempt. Default: true. */
+  resolveHosts?: boolean;
+  /** Resolver override for deterministic runtimes/tests. Must return all usable addresses. */
+  resolveHost?: (hostname: string) => Promise<string[]>;
+  /** Per-attempt network timeout in milliseconds. Default: 10 seconds. */
+  timeoutMs?: number;
+  /** Response-body timeout in milliseconds. Defaults to `timeoutMs`. */
+  bodyTimeoutMs?: number;
+  /** Maximum decoded response bytes. Default: 5 MiB. Oversized documents are rejected. */
+  maxResponseBytes?: number;
+  /** Maximum manually validated redirect hops. Default: 5. */
+  maxRedirects?: number;
 }
 
 /**
@@ -98,22 +114,7 @@ function hashSlug(text: string): string {
   return `doc-${h.toString(16)}`;
 }
 
-/** Maximum number of redirect hops to follow before giving up (SSRF / loop protection). */
-const MAX_REDIRECT_HOPS = 5;
-
-/**
- * Normalise a URL string for comparison: remove trailing slashes and
- * canonicalise the scheme+host to lowercase.  Used to detect whether a
- * fetchImpl silently changed the effective URL (auto-followed redirect).
- */
-function normalizeUrl(url: string): string {
-  try {
-    const u = new URL(url);
-    return `${u.protocol}//${u.host}${u.pathname.replace(/\/+$/, "")}${u.search}`;
-  } catch {
-    return url;
-  }
-}
+const DEFAULT_MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
 
 /**
  * Ingest a document into a memory store via chunking.
@@ -141,6 +142,7 @@ export async function ingestDocument(
 ): Promise<{ chunks: number }> {
   let rawText: string;
   let docId: string;
+  let validatedUrlSource: string | undefined;
   let extraMeta: Record<string, unknown> = {};
 
   if (typeof source === "string") {
@@ -149,7 +151,7 @@ export async function ingestDocument(
     if (source.startsWith("http://") || source.startsWith("https://")) {
       console.warn(
         `[ingestDocument] source looks like a URL but was passed as a plain string — it will be ` +
-        `ingested as raw text, NOT fetched. If you meant to fetch this URL, use { url: "${source}" } instead.`,
+        `ingested as raw text, NOT fetched. If you meant to fetch it, pass a { url } source instead.`,
       );
     }
     rawText = source;
@@ -175,79 +177,32 @@ export async function ingestDocument(
     extraMeta = loaded.metadata;
     docId = opts.docId ?? hashSlug(rawText);
   } else {
-    // SSRF guard: validate before any network I/O.
-    // Throws if URL is non-http(s), private, loopback, link-local, or metadata range,
-    // or if an allowlist is provided and the host is not on it.
-    assertFetchableUrl(source.url, { allowlist: opts.allowlist });
-
-    // FIX 1: Follow redirect chains with per-hop SSRF re-validation.
-    //
-    // Mirror the web_fetch hardening pattern: issue every hop with redirect:"manual"
-    // so the platform never silently follows a redirect to a private/metadata host.
-    // Each Location header is parsed and re-validated via assertFetchableUrl before
-    // the next request is issued. A hard cap of MAX_REDIRECT_HOPS prevents infinite
-    // redirect loops (circular redirect / DoS mitigation).
-    const doFetch: typeof fetch = opts.fetchImpl ?? globalThis.fetch;
-    let currentUrl = source.url;
-    let hops = 0;
-    let finalRes: Response;
-
-    while (true) {
-      const res = await resilientFetch(currentUrl, { redirect: "manual" }, { fetchImpl: doFetch });
-
-      // Runtime assertion: verify the fetchImpl honours redirect:"manual".
-      // If the implementation silently auto-followed a redirect, `res.redirected`
-      // will be true — meaning the SSRF hop-by-hop guard was bypassed.
-      // We also check res.url when it is explicitly set to a different URL
-      // (non-empty, differs from the requested URL) on a 2xx response, which
-      // is another indicator that auto-following occurred.
-      const autoFollowed =
-        res.redirected === true ||
-        (
-          res.status < 300 &&
-          typeof res.url === "string" &&
-          res.url !== "" &&
-          normalizeUrl(res.url) !== normalizeUrl(currentUrl)
-        );
-      if (autoFollowed) {
-        throw new Error(
-          "ingestDocument: the supplied fetchImpl auto-followed a redirect instead of " +
-          "honouring redirect:\"manual\". Replace it with a fetch implementation that " +
-          "returns 3xx responses rather than following them, so every redirect hop can " +
-          "be re-validated by the SSRF guard.",
-        );
-      }
-
-      if (res.status >= 300 && res.status < 400) {
-        hops++;
-        if (hops > MAX_REDIRECT_HOPS) {
-          throw new Error(
-            `ingestDocument: too many redirects (> ${MAX_REDIRECT_HOPS} hops) starting from ${source.url}`,
-          );
-        }
-        const location = res.headers.get("location");
-        if (location === null) {
-          throw new Error(`ingestDocument: redirect has no Location header (hop ${hops})`);
-        }
-        let nextUrl: URL;
-        try {
-          nextUrl = new URL(location, currentUrl);
-        } catch {
-          throw new Error(`ingestDocument: invalid redirect target at hop ${hops} (URL omitted for security)`);
-        }
-        // Re-validate each hop — a public→public→internal chain must be rejected at hop 2+.
-        assertFetchableUrl(nextUrl.toString(), { allowlist: opts.allowlist });
-        currentUrl = nextUrl.toString();
-      } else {
-        finalRes = res;
-        break;
-      }
+    const fetched = await safeFetchText(source.url, { method: "GET" }, {
+      allowlist: opts.allowlist,
+      unsafeAllowAnyPublicHost: opts.unsafeAllowAnyPublicHost,
+      requireHttps: opts.allowInsecureHttp !== true,
+      fetchImpl: opts.fetchImpl,
+      resolveHosts: opts.resolveHosts,
+      resolveHost: opts.resolveHost,
+      timeoutMs: opts.timeoutMs,
+      bodyTimeoutMs: opts.bodyTimeoutMs,
+      maxResponseBytes: opts.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES,
+      maxRedirects: opts.maxRedirects ?? 5,
+      allowedContentTypes: [
+        "text/",
+        "application/json",
+        "application/xml",
+        "application/xhtml+xml",
+        "application/markdown",
+      ],
+    });
+    if (fetched.status < 200 || fetched.status >= 300) {
+      throw new Error(
+        `ingestDocument: failed to fetch ${safeUrlForError(source.url)} — HTTP ${fetched.status}`,
+      );
     }
-
-    if (!finalRes.ok) {
-      throw new Error(`ingestDocument: failed to fetch ${source.url} — HTTP ${finalRes.status}`);
-    }
-    rawText = await finalRes.text();
+    rawText = fetched.content;
+    validatedUrlSource = fetched.url;
     docId = opts.docId ?? slugFromUrl(source.url);
   }
 
@@ -266,7 +221,7 @@ export async function ingestDocument(
     // TypedContentSource: use loader-provided metadata.source (already set by the loader)
     citationSource = (extraMeta.source as string | undefined) ?? docId;
   } else {
-    citationSource = (source as UrlSource).url;
+    citationSource = validatedUrlSource ?? safeUrlForError((source as UrlSource).url);
   }
 
   const events: MemoryEvent[] = chunks.map((chunk, i) => ({

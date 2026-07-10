@@ -87,6 +87,19 @@ describe("E2BSandbox lifecycle", () => {
 // ---------------------------------------------------------------------------
 
 describe("M18 fix — E2BSandbox: timeoutMs forwarded to runCode", () => {
+  it("uses a finite default timeout when none is configured", async () => {
+    let lastSandbox: FakeSandbox | null = null;
+    const client: E2BLike = {
+      async create() {
+        lastSandbox = new FakeSandbox();
+        return lastSandbox;
+      },
+    };
+    const sandbox = await E2BSandbox.create({ client });
+    await sandbox.run("x");
+    expect(lastSandbox!.lastRunOpts?.timeoutMs).toBe(60_000);
+  });
+
   it("passes timeoutMs from SandboxRunOptions to runCode", async () => {
     let lastSandbox: FakeSandbox | null = null;
     const client: E2BLike = {
@@ -128,6 +141,31 @@ describe("M18 fix — E2BSandbox: timeoutMs forwarded to runCode", () => {
 });
 
 describe("M18 fix — E2BSandbox: AbortSignal kills sandbox and throws AbortError", () => {
+  it("enforces the timeout locally and kills a hanging sandbox", async () => {
+    const hanging = new FakeSandbox();
+    hanging.runCode = () => new Promise(() => { /* intentionally never resolves */ });
+    const sandbox = await E2BSandbox.create({ client: { create: async () => hanging } });
+    await expect(sandbox.run("x", { timeoutMs: 5 })).rejects.toThrow(/timed out/i);
+    expect(hanging.killed).toBe(true);
+  });
+
+  it("kills a sandbox that finishes creating after the abort already won", async () => {
+    const controller = new AbortController();
+    const lateSandbox = new FakeSandbox();
+    let resolveCreate!: (sandbox: FakeSandbox) => void;
+    const client: E2BLike = {
+      create: () => new Promise((resolve) => { resolveCreate = resolve; }),
+    };
+    const sandbox = await E2BSandbox.create({ client });
+    const run = sandbox.run("x", { signal: controller.signal });
+    controller.abort();
+    await expect(run).rejects.toMatchObject({ name: "AbortError" });
+
+    resolveCreate(lateSandbox);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(lateSandbox.killed).toBe(true);
+  });
+
   it("throws AbortError immediately when signal is already aborted", async () => {
     const controller = new AbortController();
     controller.abort();
@@ -186,5 +224,60 @@ describe("M18 fix — E2BSandbox: AbortSignal kills sandbox and throws AbortErro
     expect(thrown).toBeInstanceOf(DOMException);
     expect((thrown as DOMException).name).toBe("AbortError");
     expect(hangingSandbox.killCalled).toBe(true);
+  });
+});
+
+describe("E2BSandbox output budget", () => {
+  it("truncates stdout and stderr to the configured UTF-8 byte cap", async () => {
+    const client: E2BLike = {
+      async create() {
+        const sandbox = new FakeSandbox();
+        sandbox.runCode = async () => ({
+          logs: {
+            stdout: ["x".repeat(1024)],
+            stderr: ["y".repeat(1024)],
+          },
+        });
+        return sandbox;
+      },
+    };
+    const sandbox = await E2BSandbox.create({ client, maxOutputBytes: 64 });
+    const result = await sandbox.run("x");
+    expect(Buffer.byteLength(result.stdout)).toBeLessThanOrEqual(64);
+    expect(Buffer.byteLength(result.stderr)).toBeLessThanOrEqual(64);
+    expect(result.stdout).toContain("truncated");
+    expect(result.stderr).toContain("truncated");
+  });
+
+  it("keeps multibyte UTF-8 output within the byte cap", async () => {
+    const client: E2BLike = {
+      async create() {
+        const sandbox = new FakeSandbox();
+        sandbox.runCode = async () => ({
+          logs: { stdout: ["🙂".repeat(100)], stderr: [] },
+        });
+        return sandbox;
+      },
+    };
+    const sandbox = await E2BSandbox.create({ client, maxOutputBytes: 64 });
+    const result = await sandbox.run("x");
+    expect(Buffer.byteLength(result.stdout, "utf8")).toBeLessThanOrEqual(64);
+  });
+
+  it("caps execution error text as well as stdout and stderr", async () => {
+    const client: E2BLike = {
+      async create() {
+        const sandbox = new FakeSandbox();
+        sandbox.runCode = async () => ({
+          logs: { stdout: [], stderr: [] },
+          error: { name: "Failure", value: "secret".repeat(200), traceback: "" },
+        });
+        return sandbox;
+      },
+    };
+    const sandbox = await E2BSandbox.create({ client, maxOutputBytes: 64 });
+    const result = await sandbox.run("x");
+    expect(Buffer.byteLength(result.error ?? "", "utf8")).toBeLessThanOrEqual(64);
+    expect(result.error).toContain("truncated");
   });
 });

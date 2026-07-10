@@ -6,10 +6,15 @@
 import { describe, it, expect } from "vitest";
 import type { MemoryEvent, Scope } from "@eidentic/types";
 import { loadMarkdown, loadHtml, loadPdf } from "../src/loaders.js";
-import { ingestDocument } from "../src/ingest.js";
+import { ingestDocument as guardedIngestDocument } from "../src/ingest.js";
 import type { IngestableMemory } from "../src/ingest.js";
 
 const scope: Scope = { kind: "agent", agentId: "loader-test-agent" };
+const ingestDocument: typeof guardedIngestDocument = (source, opts) => guardedIngestDocument(source, {
+  unsafeAllowAnyPublicHost: opts.allowlist === undefined,
+  allowInsecureHttp: true,
+  ...opts,
+});
 
 function fakeMemory(): IngestableMemory & { events: MemoryEvent[] } {
   const events: MemoryEvent[] = [];

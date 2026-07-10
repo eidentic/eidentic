@@ -18,16 +18,33 @@ import { Agent, NoopSandbox } from "eidentic";
 
 const agent = new Agent({
   id: "coder",
+  instructions: "Use only the configured tools and workspace.",
   model,
   store,
   tools: [
-    ...fileTools({ root: process.cwd() }),      // read_file, write_file, list_files
-    bashTool(new NoopSandbox()),                 // run_bash (swap NoopSandbox for a real sandbox)
-    ...webTools({ searchProvider: webSearchFromEnv() ?? undefined }), // web_fetch, web_search
+    ...fileTools({ root: process.cwd() }), // read_file, write_file, edit_file, glob, grep
+    bashTool(new NoopSandbox()),            // bash (swap NoopSandbox for a real sandbox)
+    ...webTools({
+      allowlist: ["docs.example.com"],
+      searchProvider: webSearchFromEnv() ?? undefined,
+    }), // web_fetch, web_search
   ],
   // Deny-by-default: only the tools above are available
 });
 ```
+
+`web_fetch` rejects URL credentials, non-global/private IPs and any hostname whose A/AAAA
+answers include a non-global address. DNS is rechecked before every retry and redirect hop;
+text responses have decompressed-byte and body-time limits. An omitted or empty `allowlist` denies
+all arbitrary fetches, and HTTPS is required. The deprecated `unsafeAllowAnyPublicHost` and
+`allowInsecureHttp` options exist only for controlled migration behind an equivalent egress policy.
+Retries are limited to `GET`/`HEAD`; cross-origin redirects discard caller
+headers, cookies, and referrer information before the next request. DNS validation and the
+connection are still separate operations in the standard Fetch API, so high-risk deployments
+should also enforce egress through a pinning proxy/firewall.
+
+The same boundary is available to adapters through `assertSafeEgressUrl`, `safeFetch`, and
+`safeFetchText`.
 
 ### Web search providers
 

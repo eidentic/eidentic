@@ -189,7 +189,7 @@ const studioCmd = defineCommand({
 
     // Auth-enabled Studio reads the token from the URL fragment so it is not sent in HTTP requests.
     if (config.auth && config.auth !== NoAuth) {
-      consola.warn(`Studio auth is active. Open the studio URL with #key=<your-token> appended so the UI can authenticate (e.g. http://localhost:${port}/#key=<your-token>).`);
+      consola.warn(`Studio run and admin auth are active. Open the studio URL with #key=<your-token> appended so the UI can authenticate (e.g. http://localhost:${port}/#key=<your-token>).`);
     }
 
     let serveStudio: (opts: unknown, serveOpts: { port: number }) => Promise<{ close(): void }>;
@@ -208,6 +208,9 @@ const studioCmd = defineCommand({
         {
           agents: config.agents,
           auth: config.auth,
+          // The CLI intentionally uses its single configured credential for both boundaries.
+          // Studio itself no longer promotes run credentials to admin implicitly.
+          adminAuth: config.auth,
           skillBanks: config.skillBanks,
         },
         { port },
