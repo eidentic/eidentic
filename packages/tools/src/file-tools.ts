@@ -15,7 +15,10 @@ const MAX_GREP_FILE_BYTES = 1024 * 1024;
 const MAX_GREP_TOTAL_BYTES = 8 * 1024 * 1024;
 const MAX_GREP_FILES = 10_000;
 const MAX_GREP_REGEX_MS = 2_000;
-const MAX_GREP_REGEX_FILE_MS = 250;
+// Worker scheduling can exceed a few hundred milliseconds under a saturated CI runner even for a
+// literal pattern. Keep the total scan budget strict, but allow one second for an individual file
+// so scheduler latency is not mistaken for catastrophic backtracking.
+const MAX_GREP_REGEX_FILE_MS = 1_000;
 
 const sha256 = (s: string): string => createHash("sha256").update(s).digest("hex");
 

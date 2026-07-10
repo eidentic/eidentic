@@ -347,7 +347,7 @@ describe("Fix 3 — safe terminal error when store.appendEvents throws StoreConf
     // Must end with a terminal error, not an uncaught exception.
     const last = events.at(-1)!;
     expect(last).toMatchObject({ type: "result", subtype: "error" });
-    expect((last as Extract<StreamEvent, { type: "result" }>).output).toMatch(/conflict/i);
+    expect((last as Extract<StreamEvent, { type: "result" }>).output).toBe("event persistence failed");
     // The model must NOT have been called (we failed before the first turn).
     expect(model.calls.length).toBe(0);
   });
@@ -953,7 +953,7 @@ describe("appendEventToMessages shape validation", () => {
     }]);
   }
 
-  it("corrupt 'assistant' event (payload missing content array) → result:error with clear message naming event id", async () => {
+  it("corrupt 'assistant' event → generic result:error without exposing persisted payload details", async () => {
     const store = new InMemoryStore();
     await store.migrate();
     await seedCorruptEvent(store, "s-corrupt-a", "assistant", { content: "not-an-array" });
@@ -972,11 +972,11 @@ describe("appendEventToMessages shape validation", () => {
     // The loop should surface an error terminal, not crash
     const result = events.find((e) => e.type === "result") as Extract<StreamEvent, { type: "result" }> | undefined;
     expect(result?.subtype).toBe("error");
-    expect(result?.output).toMatch(/corrupt.*assistant/i);
-    expect(result?.output).toMatch(/corrupt-s-corrupt-a/); // event id in message
+    expect(result?.output).toBe("failed to rebuild session state; terminal result persistence failed");
+    expect(result?.output).not.toMatch(/assistant|corrupt-s-corrupt-a/i);
   });
 
-  it("corrupt 'tool_result' event (payload missing callId) → result:error with clear message naming event id", async () => {
+  it("corrupt 'tool_result' event → generic result:error without exposing persisted payload details", async () => {
     const store = new InMemoryStore();
     await store.migrate();
     // Seed a user event first so there's a real conversation start, then a corrupt tool_result
@@ -999,7 +999,7 @@ describe("appendEventToMessages shape validation", () => {
 
     const result = events.find((e) => e.type === "result") as Extract<StreamEvent, { type: "result" }> | undefined;
     expect(result?.subtype).toBe("error");
-    expect(result?.output).toMatch(/corrupt.*tool_result/i);
-    expect(result?.output).toMatch(/tr-corrupt/); // event id in message
+    expect(result?.output).toBe("failed to rebuild session state; terminal result persistence failed");
+    expect(result?.output).not.toMatch(/tool_result|tr-corrupt/i);
   });
 });
