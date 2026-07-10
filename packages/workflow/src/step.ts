@@ -1,6 +1,7 @@
 import type { Step, StepContext, StepRetryPolicy, StepTrace } from "./types.js";
 import type { ReplayCache } from "./suspend.js";
 import { isWorkflowSuspended } from "./suspend.js";
+import { assertPositiveSafeInteger, sleepWithSignal } from "./runtime.js";
 
 // ─── Internal interface for trace collector ──────────────────────────────────
 
@@ -113,7 +114,15 @@ export function isAbortError(err: unknown): boolean {
  * replay the fn is NOT re-invoked and no new trace entry is emitted.
  */
 export function step<I, O>(name: string, fn: Step<I, O>, opts?: { retry?: StepRetryPolicy }): Step<I, O> {
-  const retry = opts?.retry;
+  if (opts?.retry !== undefined) {
+    assertPositiveSafeInteger(opts.retry.maxAttempts, "step retry maxAttempts");
+    if (opts.retry.backoffMs !== undefined) {
+      assertPositiveSafeInteger(opts.retry.backoffMs, "step retry backoffMs");
+    }
+  }
+  // Snapshot validated scalar options so later caller mutation cannot bypass
+  // the construction-time validation.
+  const retry = opts?.retry !== undefined ? { ...opts.retry } : undefined;
   return async (input: I, ctx: StepContext): Promise<O> => {
     const path = [...ctx.path, name];
 
@@ -203,22 +212,4 @@ async function runWithRetry<O>(
     }
   }
   throw lastErr;
-}
-
-function sleepWithSignal(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    if (signal?.aborted) {
-      const err = new Error("AbortError") as Error & { name: string };
-      err.name = "AbortError";
-      reject(err);
-      return;
-    }
-    const id = setTimeout(resolve, ms);
-    signal?.addEventListener("abort", () => {
-      clearTimeout(id);
-      const err = new Error("AbortError") as Error & { name: string };
-      err.name = "AbortError";
-      reject(err);
-    });
-  });
 }

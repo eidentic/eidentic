@@ -1,5 +1,6 @@
 import type { StepTrace, WorkflowResult } from "./types.js";
 import type { ReplayCache } from "./suspend.js";
+import { assertPositiveSafeInteger } from "./runtime.js";
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -204,7 +205,7 @@ export interface WorkflowRunStore {
 // ─── Factory ──────────────────────────────────────────────────────────────────
 
 export interface WorkflowRunRegistryOptions {
-  /** Maximum number of records to keep in memory (ring-buffer eviction). Default 100. */
+  /** Positive safe integer record limit for ring-buffer eviction. Default 100. */
   limit?: number;
   /**
    * @deprecated alias for {@link limit}; kept for back-compat. `limit` wins if both set.
@@ -218,7 +219,7 @@ export interface WorkflowRunRegistryOptions {
    * record is still kept regardless).
    */
   onStoreError?: (err: unknown, record: WorkflowRunRecord) => void;
-  /** Resume claim lease duration. Default 300_000 ms; expired claims may be recovered. */
+  /** Positive safe integer resume-claim lease duration. Default 300_000 ms. */
   resumeLeaseMs?: number;
 }
 
@@ -246,12 +247,18 @@ export interface WorkflowRunRegistryOptions {
 export function createWorkflowRunRegistry(
   opts?: WorkflowRunRegistryOptions,
 ): WorkflowRunRegistry {
+  if (opts?.limit !== undefined) {
+    assertPositiveSafeInteger(opts.limit, "createWorkflowRunRegistry limit");
+  }
+  if (opts?.maxRuns !== undefined) {
+    assertPositiveSafeInteger(opts.maxRuns, "createWorkflowRunRegistry maxRuns");
+  }
+  if (opts?.resumeLeaseMs !== undefined) {
+    assertPositiveSafeInteger(opts.resumeLeaseMs, "createWorkflowRunRegistry resumeLeaseMs");
+  }
   const limit = opts?.limit ?? opts?.maxRuns ?? 100;
   const store = opts?.store;
   const resumeLeaseMs = opts?.resumeLeaseMs ?? 300_000;
-  if (!Number.isFinite(resumeLeaseMs) || resumeLeaseMs <= 0) {
-    throw new RangeError("createWorkflowRunRegistry: resumeLeaseMs must be a positive finite number");
-  }
   const onStoreError =
     opts?.onStoreError ??
     ((err: unknown, record: WorkflowRunRecord) => {

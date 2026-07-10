@@ -10,9 +10,9 @@ export type Step<I, O> = (input: I, ctx: StepContext) => Promise<O>;
 
 /** Per-step retry policy (mirrors the `retry()` combinator's options). */
 export interface StepRetryPolicy {
-  /** Maximum number of attempts (1 = no retry). */
+  /** Positive safe integer maximum number of attempts (1 = no retry). */
   maxAttempts: number;
-  /** Delay between attempts in ms. Default 0. */
+  /** Positive safe integer delay between attempts in ms. Omit for no delay. */
   backoffMs?: number;
   /** Predicate deciding whether a given error is retryable. Default: always. */
   shouldRetry?: (err: unknown) => boolean;

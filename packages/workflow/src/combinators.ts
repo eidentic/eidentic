@@ -1,6 +1,7 @@
 import type { Step, StepContext } from "./types.js";
 import { checkSignal, isAbortError } from "./step.js";
 import { isWorkflowSuspended } from "./suspend.js";
+import { assertPositiveSafeInteger, sleepWithSignal } from "./runtime.js";
 
 // ─── chain() ─────────────────────────────────────────────────────────────────
 
@@ -143,12 +144,18 @@ export function branch<I, O>(
 // ─── retry() ─────────────────────────────────────────────────────────────────
 
 export interface RetryOptions {
+  /** Positive safe integer; 1 means no retry. */
   maxAttempts: number;
+  /** Positive safe integer delay. Omit for no delay. */
   backoffMs?: number;
   shouldRetry?: (err: unknown) => boolean;
 }
 
 export function retry<I, O>(inner: Step<I, O>, opts: RetryOptions): Step<I, O> {
+  assertPositiveSafeInteger(opts.maxAttempts, "retry maxAttempts");
+  if (opts.backoffMs !== undefined) {
+    assertPositiveSafeInteger(opts.backoffMs, "retry backoffMs");
+  }
   const { maxAttempts, backoffMs = 0, shouldRetry } = opts;
   return async (input: I, ctx: StepContext): Promise<O> => {
     let lastErr: unknown;
@@ -196,7 +203,9 @@ export function fallback<I, O>(primary: Step<I, O>, ...fallbacks: Step<I, O>[]):
 
 // ─── withTimeout() ───────────────────────────────────────────────────────────
 
+/** Wrap a step with a positive-safe-integer timeout in milliseconds. */
 export function withTimeout<I, O>(inner: Step<I, O>, ms: number): Step<I, O> {
+  assertPositiveSafeInteger(ms, "withTimeout timeoutMs");
   return async (input: I, ctx: StepContext): Promise<O> => {
     checkSignal(ctx.signal);
     const controller = new AbortController();
@@ -256,7 +265,7 @@ export type MapItemResult<O> =
 export type MapErrorPolicy = "fail-fast" | "collect";
 
 export interface MapOptions {
-  /** Max items processed concurrently. Default 4. */
+  /** Positive safe integer max items processed concurrently. Default 4. */
   concurrency?: number;
   /**
    * How to handle item failures.
@@ -318,6 +327,7 @@ export function map<I, O>(
   opts: MapOptions = {},
 ): Step<I[], O[]> | Step<I[], MapItemResult<O>[]> {
   const concurrency = opts.concurrency ?? 4;
+  assertPositiveSafeInteger(concurrency, "map concurrency");
   const policy: MapErrorPolicy = opts.errorPolicy ?? "fail-fast";
 
   if (policy === "collect") {
@@ -407,24 +417,4 @@ export function tap<I>(fn: (input: I, ctx: StepContext) => void | Promise<void>)
     await fn(input, ctx);
     return input;
   };
-}
-
-// ─── internal helpers ────────────────────────────────────────────────────────
-
-function sleepWithSignal(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    if (signal?.aborted) {
-      const err = new Error("AbortError") as Error & { name: string };
-      err.name = "AbortError";
-      reject(err);
-      return;
-    }
-    const id = setTimeout(resolve, ms);
-    signal?.addEventListener("abort", () => {
-      clearTimeout(id);
-      const err = new Error("AbortError") as Error & { name: string };
-      err.name = "AbortError";
-      reject(err);
-    });
-  });
 }
