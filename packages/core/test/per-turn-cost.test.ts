@@ -185,7 +185,7 @@ import { Session } from "../src/session.js";
 import { ToolRegistry } from "../src/tool.js";
 
 describe("Fix 5 — resume terminal fast-path includes child (tree) cost", () => {
-  it("resumed already-terminated session with budget passes child USD in cost", async () => {
+  it("resumed already-terminated session preserves its original cost snapshot", async () => {
     const store = await freshStore();
     // Set up a completed session: user → assistant (no tool uses)
     const model = new MockModel([
@@ -239,12 +239,11 @@ describe("Fix 5 — resume terminal fast-path includes child (tree) cost", () =>
     const result = terminal(events);
     expect(result.subtype).toBe("success");
 
-    // Without Fix 5: cost.usd would be just the foreground (100 input @ $1/M + 50 output @ $2/M = $0.0001 + $0.0001 = $0.0002)
-    // With Fix 5: cost.usd must include the child budget USD ($0.9) too.
+    // A completed run's persisted result is immutable. A new caller-side budget supplied only
+    // during replay must not rewrite the historical cost or child usage.
     expect(result.cost).toBeDefined();
-    // The child budget alone is $0.9, foreground is tiny — total must be > $0.9
-    expect(result.cost!.usd).toBeGreaterThan(0.9);
-    expect(result.cost!.children).toBeDefined();
+    expect(result.cost!.usd).toBeCloseTo(0.0002);
+    expect(result.cost!.children).toBeUndefined();
   });
 
   it("resume no-events path also passes budget (early error path)", async () => {

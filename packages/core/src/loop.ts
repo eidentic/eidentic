@@ -513,6 +513,7 @@ function buildInitialMessages(
 function appendEventToMessages(messages: ModelMessage[], e: StoredEvent): void {
   if (e.kind === "compaction") return; // audit marker only (§4.4, Plan 15); never a model message on replay.
   if (e.kind === "suspension") return; // audit marker only (§5.7/§9.4, Plan 16); never a model message on replay.
+  if (e.kind === "run_started" || e.kind === "terminal_result") return; // run-state markers; never model context.
   // Resume rebuilds from the full event log and then re-compacts — compaction events are ignored so
   // the window is faithfully reconstructed from the real user/assistant/tool_result events first.
   if (e.kind === "user") messages.push({ role: "user", content: String(e.payload) });
@@ -568,6 +569,73 @@ async function* safeAppend(
       cost: { foreground: usage, background: { inputTokens: 0, outputTokens: 0 }, cachedInputTokens: 0 },
     };
     return null;
+  }
+}
+
+type TerminalResultEvent = Extract<StreamEvent, { type: "result" }>;
+
+interface PersistedTerminalPayload {
+  version: 1;
+  runId: string;
+  result: Omit<TerminalResultEvent, "sessionId">;
+}
+
+function readPersistedTerminal(event: StoredEvent, runId: string, sessionId: string): TerminalResultEvent | null {
+  if (event.kind !== "terminal_result" || typeof event.payload !== "object" || event.payload === null) return null;
+  const payload = event.payload as Partial<PersistedTerminalPayload>;
+  const result = payload.result;
+  if (payload.version !== 1 || payload.runId !== runId || typeof result !== "object" || result === null) return null;
+  if (result.type !== "result" || typeof result.subtype !== "string") return null;
+  if (typeof result.numTurns !== "number" || typeof result.usage !== "object" || result.usage === null) return null;
+  return { ...result, sessionId } as TerminalResultEvent;
+}
+
+/** Persist a terminal before exposing it to the caller, then emit that exact value. */
+async function* persistAndYieldTerminal(
+  args: RunTurnArgs,
+  runId: string,
+  result: TerminalResultEvent,
+): AsyncGenerator<StreamEvent, void> {
+  const { sessionId: _sessionId, ...portableResult } = result;
+  const payload: PersistedTerminalPayload = { version: 1, runId, result: portableResult };
+  try {
+    await args.session.append("terminal_result", payload);
+    if (args.durable) {
+      // The regular loop checkpoints before it knows the terminal subtype. Include the final
+      // marker in a closing checkpoint so checkpoint.seq and the durable event log agree.
+      let terminalHash = "";
+      for (const event of args.session.events()) terminalHash = await chainHash(terminalHash, event);
+      await writeCheckpointWith(args, terminalHash);
+    }
+  } catch (err) {
+    const persistenceError = err instanceof Error ? err.message : String(err);
+    const original = result.subtype === "error" && typeof result.output === "string"
+      ? `${result.output}; `
+      : "";
+    yield {
+      type: "result",
+      subtype: "error",
+      output: `${original}terminal result persistence failed: ${persistenceError}`,
+      usage: result.usage,
+      numTurns: result.numTurns,
+      sessionId: result.sessionId,
+      cost: result.cost,
+      details: buildDetails("error", { errorName: "TerminalPersistenceError" }),
+    };
+    return;
+  }
+  yield result;
+}
+
+/** Forward loop output while durably recording its one terminal result. */
+async function* persistLoopTerminal(
+  args: RunTurnArgs,
+  runId: string,
+  stream: AsyncIterable<StreamEvent>,
+): AsyncGenerator<StreamEvent, void> {
+  for await (const event of stream) {
+    if (event.type === "result") yield* persistAndYieldTerminal(args, runId, event);
+    else yield event;
   }
 }
 
@@ -1411,6 +1479,26 @@ export async function* runTurn(args: RunTurnArgs): AsyncIterable<StreamEvent> {
     ...(args.greeting !== undefined ? { greeting: args.greeting } : {}),
   };
 
+  let runStarted: StoredEvent | null = null;
+  {
+    const gen = safeAppend(
+      args.session,
+      "run_started",
+      { version: 1, mode: "query" },
+      undefined,
+      ZERO_USAGE,
+      0,
+    );
+    let step = await gen.next();
+    while (!step.done) {
+      yield step.value as StreamEvent;
+      step = await gen.next();
+    }
+    runStarted = step.value as StoredEvent | null;
+  }
+  if (runStarted === null) return;
+  const runId = runStarted.id;
+
   // --- D7: input guardrails — enforce before crossing any persistence boundary. ---
   // Blocked input is never stored. Redacted input is stored only in its sanitized form, which
   // also prevents later turns and resume/replay paths from reconstructing the original secret.
@@ -1426,7 +1514,7 @@ export async function* runTurn(args: RunTurnArgs): AsyncIterable<StreamEvent> {
     };
     const gr = await runGuardrails(args.guardrails, checkedText, "checkInput", guardrailCtx);
     if (gr.blocked !== undefined) {
-      yield {
+      const result: TerminalResultEvent = {
         type: "result",
         subtype: "guardrail",
         output: `Input blocked by guardrail: ${gr.blocked.reason}`,
@@ -1440,6 +1528,7 @@ export async function* runTurn(args: RunTurnArgs): AsyncIterable<StreamEvent> {
           guardrailSeverity: gr.blocked.severity,
         }),
       };
+      yield* persistAndYieldTerminal(args, runId, result);
       return;
     }
     effectiveInput = applyGuardrailRedaction(args.input, checkedText, gr.text);
@@ -1482,10 +1571,15 @@ export async function* runTurn(args: RunTurnArgs): AsyncIterable<StreamEvent> {
     ingestSpan?.end();
   }
   // Seed the rolling hash with the user event then checkpoint it (§9.2).
-  const userRollingHash = await chainHash("", userEvent);
+  const runRollingHash = await chainHash("", runStarted);
+  const userRollingHash = await chainHash(runRollingHash, userEvent);
   await writeCheckpointWith(args, userRollingHash); // checkpoint the user event (§9.2)
 
-  yield* runLoop(args, messages, { inputTokens: 0, outputTokens: 0 }, 0, userRollingHash);
+  yield* persistLoopTerminal(
+    args,
+    runId,
+    runLoop(args, messages, { inputTokens: 0, outputTokens: 0 }, 0, userRollingHash),
+  );
 }
 
 /**
@@ -1505,43 +1599,28 @@ export async function* resumeTurn(args: RunTurnArgs): AsyncIterable<StreamEvent>
     ...(args.greeting !== undefined ? { greeting: args.greeting } : {}),
   };
 
-  const events = args.session.events();
+  let events = args.session.events();
   if (events.length === 0) {
     // Fix 5: pass args.budget so child USD is included even on this early error path.
     yield { type: "result", subtype: "error", output: "resume: session has no events", usage: { inputTokens: 0, outputTokens: 0 }, numTurns: 0, sessionId: args.session.id, cost: breakdownFor({ inputTokens: 0, outputTokens: 0 }, args.prices, args.modelId, args.budget) };
     return;
   }
 
-  // Reconstruct prior spend from persisted assistant events (used by both the early-exit and the resumed run).
-  const priorUsage = events.reduce<Usage>((acc, e) => {
-    if (e.kind === "assistant" && e.meta?.usage) {
-      return addUsage(acc, e.meta.usage as Usage);
-    }
-    return acc;
-  }, ZERO_USAGE);
-
-  // Terminal-completion fast-path: if the last real event is a tool-less assistant turn,
-  // the run already finished — replay its result without calling the model.
-  const last = events[events.length - 1]!;
-  if (last.kind === "assistant") {
-    const lastPayload = last.payload;
-    if (
-      typeof lastPayload !== "object" || lastPayload === null ||
-      !Array.isArray((lastPayload as Record<string, unknown>).content)
-    ) {
-      yield { type: "result", subtype: "error", output: `appendEventToMessages: corrupt "assistant" event (id=${last.id}): payload.content must be an array, got ${JSON.stringify(lastPayload)}`, usage: priorUsage, numTurns: 0, sessionId: args.session.id, cost: breakdownFor(priorUsage, args.prices, args.modelId, args.budget) };
-      return;
-    }
-    const content = (lastPayload as { content: ContentBlock[] }).content;
-    if (content.filter(isToolUse).length === 0) {
-      const text = content.filter(isText).map((b) => b.text).join("");
-      const numTurns = events.filter(e => e.kind === "assistant").length;
-      // Fix 5: pass args.budget so child USD is included (was missing, causing under-reported cost on resume).
-      const cost = breakdownFor(priorUsage, args.prices, args.modelId, args.budget);
-      // D2: when resuming an already-terminated session WITH an outputSchema, validate the
-      // stored final text against the schema and attach the parsed object — same semantics as
-      // the live terminal turn. A mismatch / unparseable text terminates with subtype:"error".
-      if (args.outputSchema) {
+  // A terminal result is authoritative. Re-emit the exact persisted value rather than inferring
+  // success from the shape of the last assistant message (which loses budget/error semantics).
+  const latestRunStarted = [...events].reverse().find((event) => event.kind === "run_started");
+  let runId: string;
+  if (latestRunStarted) {
+    runId = latestRunStarted.id;
+    const persistedTerminal = [...events]
+      .reverse()
+      .map((event) => readPersistedTerminal(event, runId, args.session.id))
+      .find((result): result is TerminalResultEvent => result !== null);
+    // Suspension is a resumable state, not an immutable completion. Re-enter the same run so
+    // the newly supplied human decision can resolve the pending tool call exactly once.
+    if (persistedTerminal && persistedTerminal.subtype !== "suspended") {
+      if (persistedTerminal.subtype === "success" && args.outputSchema && persistedTerminal.object === undefined) {
+        const text = typeof persistedTerminal.output === "string" ? persistedTerminal.output : "";
         let candidate: unknown;
         try {
           candidate = JSON.parse(text);
@@ -1549,12 +1628,12 @@ export async function* resumeTurn(args: RunTurnArgs): AsyncIterable<StreamEvent>
           yield {
             type: "result",
             subtype: "error",
-            output: `structured output requested but the resumed final answer is not valid JSON: ${text.slice(0, 200)}`,
-            usage: priorUsage,
-            numTurns,
+            output: `structured output requested but the persisted final answer is not valid JSON: ${text.slice(0, 200)}`,
+            usage: persistedTerminal.usage,
+            numTurns: persistedTerminal.numTurns,
             sessionId: args.session.id,
-            cost,
-            details: buildDetails("error", { errorName: "SyntaxError", errorKind: "structured_output_parse", rawOutput: text }),
+            cost: persistedTerminal.cost,
+            details: buildDetails("error", { errorName: "SyntaxError", errorKind: "structured_output_parse" }),
           };
           return;
         }
@@ -1564,26 +1643,64 @@ export async function* resumeTurn(args: RunTurnArgs): AsyncIterable<StreamEvent>
             type: "result",
             subtype: "error",
             output: `structured output failed schema validation: ${validated.error}`,
-            usage: priorUsage,
-            numTurns,
+            usage: persistedTerminal.usage,
+            numTurns: persistedTerminal.numTurns,
             sessionId: args.session.id,
-            cost,
+            cost: persistedTerminal.cost,
             details: buildDetails("error", {
               errorName: "ValidationError",
               errorKind: "structured_output_validation",
               validationIssues: validated.issues,
-              rawOutput: text,
             }),
           };
           return;
         }
-        yield { type: "result", subtype: "success", output: text, object: validated.value, usage: priorUsage, numTurns, sessionId: args.session.id, cost };
+        yield { ...persistedTerminal, object: validated.value };
         return;
       }
-      yield { type: "result", subtype: "success", output: text, usage: priorUsage, numTurns, sessionId: args.session.id, cost };
+      yield persistedTerminal;
       return;
     }
+  } else {
+    // Establish a durable boundary for pre-v1 incomplete logs. Completed legacy logs are
+    // handled fail-closed below because their terminal subtype cannot be reconstructed safely.
+    const legacyLast = events.at(-1);
+    if (legacyLast?.kind === "assistant") {
+      const payload = legacyLast.payload as { content?: ContentBlock[] };
+      if (Array.isArray(payload?.content) && payload.content.filter(isToolUse).length === 0) {
+        yield {
+          type: "result",
+          subtype: "error",
+          output: "resume: legacy session has no persisted terminal state",
+          usage: ZERO_USAGE,
+          numTurns: 0,
+          sessionId: args.session.id,
+          cost: breakdownFor(ZERO_USAGE, args.prices, args.modelId, args.budget),
+          details: buildDetails("error", { errorName: "TerminalStateUnknown" }),
+        };
+        return;
+      }
+    }
+    let created: StoredEvent | null = null;
+    const gen = safeAppend(args.session, "run_started", { version: 1, mode: "resume_legacy" }, undefined, ZERO_USAGE, 0);
+    let step = await gen.next();
+    while (!step.done) {
+      yield step.value as StreamEvent;
+      step = await gen.next();
+    }
+    created = step.value as StoredEvent | null;
+    if (created === null) return;
+    runId = created.id;
+    events = args.session.events();
   }
+
+  // Reconstruct prior spend from persisted assistant events (used by the resumed run).
+  const priorUsage = events.reduce<Usage>((acc, e) => {
+    if (e.kind === "assistant" && e.meta?.usage) {
+      return addUsage(acc, e.meta.usage as Usage);
+    }
+    return acc;
+  }, ZERO_USAGE);
 
   // Compute pending tool calls: look at the LAST assistant event in the log (regardless of whether
   // subsequent audit-only events like `suspension` or `compaction` follow it). If that assistant
@@ -1593,8 +1710,8 @@ export async function* resumeTurn(args: RunTurnArgs): AsyncIterable<StreamEvent>
   const lastAssistantEvent = [...events].reverse().find((e) => e.kind === "assistant");
   let pendingCalls: ToolCall[] = [];
   if (lastAssistantEvent) {
-    const content = (lastAssistantEvent.payload as { content: ContentBlock[] }).content;
-    const toolUseBlocks = content.filter(isToolUse);
+    const content = (lastAssistantEvent.payload as { content?: ContentBlock[] }).content;
+    const toolUseBlocks = Array.isArray(content) ? content.filter(isToolUse) : [];
     if (toolUseBlocks.length > 0) {
       const answeredCallIds = new Set(
         events
@@ -1626,7 +1743,7 @@ export async function* resumeTurn(args: RunTurnArgs): AsyncIterable<StreamEvent>
     const guardrailCtx: GuardrailContext = { agentId: args.agentId, sessionId: args.session.id, source: "input" };
     const gr = await runGuardrails(args.guardrails, effectiveLastUserText, "checkInput", guardrailCtx);
     if (gr.blocked !== undefined) {
-      yield {
+      const result: TerminalResultEvent = {
         type: "result",
         subtype: "guardrail",
         output: `Input blocked by guardrail on resume: ${gr.blocked.reason}`,
@@ -1640,6 +1757,7 @@ export async function* resumeTurn(args: RunTurnArgs): AsyncIterable<StreamEvent>
           guardrailSeverity: gr.blocked.severity,
         }),
       };
+      yield* persistAndYieldTerminal(args, runId, result);
       return;
     }
     effectiveLastUserText = gr.text; // may be redacted
@@ -1659,7 +1777,8 @@ export async function* resumeTurn(args: RunTurnArgs): AsyncIterable<StreamEvent>
     messages = buildInitialMessages(args, blocks, recall);
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
-    yield { type: "result", subtype: "error", output: errMsg, usage: priorUsage, numTurns: 0, sessionId: args.session.id, cost: breakdownFor(priorUsage, args.prices, args.modelId, args.budget) };
+    const result: TerminalResultEvent = { type: "result", subtype: "error", output: errMsg, usage: priorUsage, numTurns: 0, sessionId: args.session.id, cost: breakdownFor(priorUsage, args.prices, args.modelId, args.budget) };
+    yield* persistAndYieldTerminal(args, runId, result);
     return;
   }
 
@@ -1703,5 +1822,9 @@ export async function* resumeTurn(args: RunTurnArgs): AsyncIterable<StreamEvent>
 
   // numTurns restarts at 0 for the resumed segment (max_turns guards the resumed run, not the original).
   // pendingCalls (if any) are dispatched first inside runLoop before the initial model call.
-  yield* runLoop(args, messages, priorUsage, 0, resumeRollingHash, pendingCalls);
+  yield* persistLoopTerminal(
+    args,
+    runId,
+    runLoop(args, messages, priorUsage, 0, resumeRollingHash, pendingCalls),
+  );
 }

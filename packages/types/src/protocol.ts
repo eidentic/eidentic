@@ -182,7 +182,18 @@ export type ResultDetails =
  * - Tool calls are embedded in the assistant event's content, not logged as separate events.
  * Keep them in the union — removing them would be a breaking change.
  */
-export type EventKind = "user" | "assistant" | "tool_call" | "tool_result" | "checkpoint" | "compaction" | "suspension";
+export type EventKind =
+  | "user"
+  | "assistant"
+  | "tool_call"
+  | "tool_result"
+  | "checkpoint"
+  | "compaction"
+  | "suspension"
+  /** Versioned boundary identifying one query/resume execution within a long-lived session. */
+  | "run_started"
+  /** Durable copy of the exact terminal result emitted for the corresponding run. */
+  | "terminal_result";
 
 export interface StoredEvent {
   id: string;

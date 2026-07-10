@@ -67,7 +67,14 @@ describe("runTurn (ReAct)", () => {
     expect(result).toMatchObject({ type: "result", subtype: "success", output: "all done" });
     expect((result as Extract<StreamEvent, { type: "result" }>).usage).toEqual({ inputTokens: 11, outputTokens: 5 });
     const stored = await store.readEvents("s1");
-    expect(stored.map((e) => e.kind)).toEqual(["user", "assistant", "tool_result", "assistant"]);
+    expect(stored.map((e) => e.kind)).toEqual([
+      "run_started",
+      "user",
+      "assistant",
+      "tool_result",
+      "assistant",
+      "terminal_result",
+    ]);
   });
 
   it("stops with max_turns when the model never stops calling tools", async () => {

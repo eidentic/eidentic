@@ -53,7 +53,9 @@ describe("GuardrailPort wiring", () => {
       // Model must NOT have been called
       expect(model.calls).toHaveLength(0);
       // Rejected content must not cross the persistence boundary either.
-      expect(await store.readEvents("s1")).toEqual([]);
+      const stored = await store.readEvents("s1");
+      expect(stored.some((event) => event.kind === "user")).toBe(false);
+      expect(JSON.stringify(stored)).not.toContain("this input is blocked");
     });
 
     it("redact: only sanitized text is persisted and replayed", async () => {
