@@ -16,6 +16,7 @@ import {
   type DurablePort,
   type Checkpoint,
   type IdempotencyRecord,
+  type IdempotencyMetadata,
   type IdempotencyStatus,
   type SuspendDecision,
 } from "@eidentic/types";
@@ -81,6 +82,14 @@ function ftsOr(text: string): string | null {
   if (tokens.length === 0) return null;
   // tokens from tokenize() contain only word characters; `or` is the websearch OR operator.
   return tokens.join(" or ");
+}
+
+function sessionSelection(scope: Scope): { where: string; args: string[] } | null {
+  if (scope.kind === "agent") return { where: "agent_id = $1", args: [scope.agentId] };
+  if (scope.kind === "user") return { where: "agent_id = $1 AND user_id = $2", args: [scope.agentId, scope.userId] };
+  if (scope.kind === "org") return { where: "agent_id = $1 AND org_id = $2", args: [scope.agentId, scope.orgId] };
+  if (scope.kind === "thread") return { where: "agent_id = $1 AND id = $2", args: [scope.agentId, scope.sessionId] };
+  return null;
 }
 
 export class PostgresStore implements StorePort, GraphPort, DurablePort {
@@ -618,7 +627,6 @@ export class PostgresStore implements StorePort, GraphPort, DurablePort {
 
   async eraseScope(scope: Scope): Promise<{ deleted: number }> {
     const key = scopeKey(scope);
-    const agentId = "agentId" in scope ? (scope as { agentId: string }).agentId : null;
     return this.withTransaction(async (c) => {
       let deleted = 0;
       // Scope-keyed tables
@@ -630,15 +638,22 @@ export class PostgresStore implements StorePort, GraphPort, DurablePort {
       deleted += bh.length;
       const { rows: b } = await c.query(`DELETE FROM blocks WHERE scope_key = $1 RETURNING label`, [key]);
       deleted += b.length;
-      // Sessions + events by agentId
-      if (agentId !== null) {
-        const { rows: sessions } = await c.query(`SELECT id FROM sessions WHERE agent_id = $1`, [agentId]);
-        for (const sess of sessions) {
-          const { rows: ev } = await c.query(`DELETE FROM events WHERE session_id = $1 RETURNING id`, [str(sess.id)]);
-          deleted += ev.length;
-        }
-        const { rows: s } = await c.query(`DELETE FROM sessions WHERE agent_id = $1 RETURNING id`, [agentId]);
-        deleted += s.length;
+      const { rows: scopedIdempotency } = await c.query(`DELETE FROM idempotency_keys WHERE scope_key = $1 RETURNING key`, [key]);
+      deleted += scopedIdempotency.length;
+
+      const selection = sessionSelection(scope);
+      if (selection) {
+        const selectedSessions = `SELECT id FROM sessions WHERE ${selection.where}`;
+        const { rows: idempotency } = await c.query(`DELETE FROM idempotency_keys WHERE session_id IN (${selectedSessions}) RETURNING key`, selection.args);
+        deleted += idempotency.length;
+        const { rows: decisions } = await c.query(`DELETE FROM suspension_decisions WHERE session_id IN (${selectedSessions}) RETURNING call_id`, selection.args);
+        deleted += decisions.length;
+        const { rows: checkpoints } = await c.query(`DELETE FROM checkpoints WHERE session_id IN (${selectedSessions}) RETURNING seq`, selection.args);
+        deleted += checkpoints.length;
+        const { rows: events } = await c.query(`DELETE FROM events WHERE session_id IN (${selectedSessions}) RETURNING id`, selection.args);
+        deleted += events.length;
+        const { rows: sessions } = await c.query(`DELETE FROM sessions WHERE ${selection.where} RETURNING id`, selection.args);
+        deleted += sessions.length;
       }
       return { deleted };
     });
@@ -670,34 +685,43 @@ export class PostgresStore implements StorePort, GraphPort, DurablePort {
     };
   }
 
-  async recordIntent(key: string, argsHash: string): Promise<void> {
-    // INSERT ... ON CONFLICT DO NOTHING: intent is write-once; an existing row is left untouched.
+  async recordIntent(key: string, argsHash: string, metadata?: IdempotencyMetadata): Promise<void> {
+    // Intent lifecycle fields are write-once; missing ownership metadata may be enriched but never reassigned.
     await this.client.query(
-      `INSERT INTO idempotency_keys (key, args_hash, status, result, created_at) VALUES ($1, $2, 'intent', NULL, $3)
-       ON CONFLICT (key) DO NOTHING`,
-      [key, argsHash, this.graphNow()],
+      `INSERT INTO idempotency_keys
+         (key, args_hash, status, result, created_at, scope_key, session_id, owner_key)
+       VALUES ($1, $2, 'intent', NULL, $3, $4, $5, $6)
+       ON CONFLICT (key) DO UPDATE SET
+         scope_key = COALESCE(idempotency_keys.scope_key, EXCLUDED.scope_key),
+         session_id = COALESCE(idempotency_keys.session_id, EXCLUDED.session_id),
+         owner_key = COALESCE(idempotency_keys.owner_key, EXCLUDED.owner_key)`,
+      [key, argsHash, this.graphNow(), metadata?.scopeKey ?? null, metadata?.sessionId ?? null, metadata?.ownerKey ?? null],
     );
   }
 
-  async recordCompletion(key: string, result: unknown): Promise<void> {
+  async recordCompletion(key: string, result: unknown, metadata?: IdempotencyMetadata): Promise<void> {
     const serialized = JSON.stringify(result ?? null);
     await this.withTransaction(async (c) => {
       // Ensure a row exists (covers completion without a prior intent), then flip to applied.
       await c.query(
-        `INSERT INTO idempotency_keys (key, args_hash, status, result, created_at) VALUES ($1, '', 'intent', NULL, $2)
+        `INSERT INTO idempotency_keys
+           (key, args_hash, status, result, created_at, scope_key, session_id, owner_key)
+         VALUES ($1, '', 'intent', NULL, $2, $3, $4, $5)
          ON CONFLICT (key) DO NOTHING`,
-        [key, this.graphNow()],
+        [key, this.graphNow(), metadata?.scopeKey ?? null, metadata?.sessionId ?? null, metadata?.ownerKey ?? null],
       );
       await c.query(
-        `UPDATE idempotency_keys SET status = 'applied', result = $1 WHERE key = $2`,
-        [serialized, key],
+        `UPDATE idempotency_keys SET status = 'applied', result = $1,
+           scope_key = COALESCE(scope_key, $2), session_id = COALESCE(session_id, $3), owner_key = COALESCE(owner_key, $4)
+         WHERE key = $5`,
+        [serialized, metadata?.scopeKey ?? null, metadata?.sessionId ?? null, metadata?.ownerKey ?? null, key],
       );
     });
   }
 
   async getIdempotency(key: string): Promise<IdempotencyRecord | null> {
     const { rows } = await this.client.query(
-      `SELECT key, args_hash, status, result, created_at FROM idempotency_keys WHERE key = $1`,
+      `SELECT key, args_hash, status, result, created_at, scope_key, session_id, owner_key FROM idempotency_keys WHERE key = $1`,
       [key],
     );
     const row = rows[0];
@@ -708,6 +732,9 @@ export class PostgresStore implements StorePort, GraphPort, DurablePort {
       status: str(row.status) as IdempotencyStatus,
       ...(row.result !== null && row.result !== undefined ? { result: JSON.parse(str(row.result)) } : {}),
       createdAt: str(row.created_at),
+      ...(row.scope_key !== null && row.scope_key !== undefined ? { scopeKey: str(row.scope_key) } : {}),
+      ...(row.session_id !== null && row.session_id !== undefined ? { sessionId: str(row.session_id) } : {}),
+      ...(row.owner_key !== null && row.owner_key !== undefined ? { ownerKey: str(row.owner_key) } : {}),
     };
   }
 

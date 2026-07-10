@@ -53,7 +53,7 @@ export class InMemoryStore implements StorePort, GraphPort, DurablePort {
   private graphIdCounter = 0;
   private checkpoints: Checkpoint[] = [];
   private idempotency = new Map<string, IdempotencyRecord>();
-  private decisions = new Map<string, SuspendDecision>(); // key: `${sessionId}#${callId}`
+  private decisions = new Map<string, { sessionId: string; callId: string; decision: SuspendDecision }>();
   private readonly newGraphId: () => string;
   private readonly graphNow: () => string;
 
@@ -345,18 +345,43 @@ export class InMemoryStore implements StorePort, GraphPort, DurablePort {
     this.facts = this.facts.filter((f) => f.scopeKey !== key);
     deleted += factsBefore - this.facts.length;
 
-    // Sessions and events: sessions are agent-scoped (no per-user scope_key column).
-    // Erase all sessions for this scope's agentId and their events. Safe because
-    // the conformance case uses unique agentIds per test scope.
-    const agentId = "agentId" in scope ? (scope as { agentId: string }).agentId : undefined;
-    if (agentId !== undefined) {
-      const sessionIds: string[] = [];
-      for (const [sid, sess] of this.sessions.entries()) {
-        if (sess.agentId === agentId) { sessionIds.push(sid); this.sessions.delete(sid); deleted += 1; }
+    const sessionIds = new Set<string>();
+    for (const [sid, session] of this.sessions) {
+      const selected = scope.kind === "agent"
+        ? session.agentId === scope.agentId
+        : scope.kind === "user"
+          ? session.agentId === scope.agentId && session.userId === scope.userId
+          : scope.kind === "org"
+            ? session.agentId === scope.agentId && session.orgId === scope.orgId
+            : scope.kind === "thread"
+              ? session.agentId === scope.agentId && sid === scope.sessionId
+              : false;
+      if (selected) sessionIds.add(sid);
+    }
+
+    const checkpointsBefore = this.checkpoints.length;
+    this.checkpoints = this.checkpoints.filter((checkpoint) => !sessionIds.has(checkpoint.sessionId));
+    deleted += checkpointsBefore - this.checkpoints.length;
+
+    for (const [idempotencyKey, record] of [...this.idempotency]) {
+      if (record.scopeKey === key || (record.sessionId !== undefined && sessionIds.has(record.sessionId))) {
+        this.idempotency.delete(idempotencyKey);
+        deleted += 1;
       }
-      const eventsBefore = this.events.length;
-      this.events = this.events.filter((e) => !sessionIds.includes(e.sessionId));
-      deleted += eventsBefore - this.events.length;
+    }
+
+    for (const [decisionKey, record] of [...this.decisions]) {
+      if (sessionIds.has(record.sessionId)) {
+        this.decisions.delete(decisionKey);
+        deleted += 1;
+      }
+    }
+
+    const eventsBefore = this.events.length;
+    this.events = this.events.filter((event) => !sessionIds.has(event.sessionId));
+    deleted += eventsBefore - this.events.length;
+    for (const sessionId of sessionIds) {
+      if (this.sessions.delete(sessionId)) deleted += 1;
     }
 
     return { deleted };
@@ -380,7 +405,13 @@ export class InMemoryStore implements StorePort, GraphPort, DurablePort {
   }
 
   async recordIntent(key: string, argsHash: string, metadata?: IdempotencyMetadata): Promise<void> {
-    if (this.idempotency.has(key)) return; // intent is write-once; never downgrade applied → intent
+    const existing = this.idempotency.get(key);
+    if (existing) {
+      if (existing.scopeKey === undefined && metadata?.scopeKey !== undefined) existing.scopeKey = metadata.scopeKey;
+      if (existing.sessionId === undefined && metadata?.sessionId !== undefined) existing.sessionId = metadata.sessionId;
+      if (existing.ownerKey === undefined && metadata?.ownerKey !== undefined) existing.ownerKey = metadata.ownerKey;
+      return; // intent is write-once; never downgrade applied → intent or reassign ownership
+    }
     this.idempotency.set(key, { key, argsHash, status: "intent", createdAt: this.graphNow(), ...metadata });
   }
 
@@ -394,10 +425,9 @@ export class InMemoryStore implements StorePort, GraphPort, DurablePort {
       key,
       argsHash,
       createdAt: existing?.createdAt ?? this.graphNow(),
-      ...(existing?.scopeKey !== undefined ? { scopeKey: existing.scopeKey } : {}),
-      ...(existing?.sessionId !== undefined ? { sessionId: existing.sessionId } : {}),
-      ...(existing?.ownerKey !== undefined ? { ownerKey: existing.ownerKey } : {}),
-      ...metadata,
+      ...((existing?.scopeKey ?? metadata?.scopeKey) !== undefined ? { scopeKey: existing?.scopeKey ?? metadata?.scopeKey } : {}),
+      ...((existing?.sessionId ?? metadata?.sessionId) !== undefined ? { sessionId: existing?.sessionId ?? metadata?.sessionId } : {}),
+      ...((existing?.ownerKey ?? metadata?.ownerKey) !== undefined ? { ownerKey: existing?.ownerKey ?? metadata?.ownerKey } : {}),
       status,
       result: stored,
     });
@@ -411,18 +441,31 @@ export class InMemoryStore implements StorePort, GraphPort, DurablePort {
   async recordDecision(sessionId: string, callId: string, decision: SuspendDecision): Promise<void> {
     // JSON round-trip so the in-memory store matches SqliteStore serialize/parse semantics.
     const stored = JSON.parse(JSON.stringify(decision)) as SuspendDecision;
-    this.decisions.set(`${sessionId}#${callId}`, stored);
+    this.decisions.set(JSON.stringify([sessionId, callId]), { sessionId, callId, decision: stored });
   }
 
   async getDecision(sessionId: string, callId: string): Promise<SuspendDecision | null> {
-    const d = this.decisions.get(`${sessionId}#${callId}`);
-    return d ? { ...d } : null;
+    const record = this.decisions.get(JSON.stringify([sessionId, callId]));
+    return record ? { ...record.decision } : null;
   }
 }
 
 export interface ConformanceCase {
   name: string;
   run: () => Promise<void>;
+}
+
+function asDurableStore(store: StorePort & GraphPort): DurablePort | null {
+  const candidate = store as StorePort & GraphPort & Partial<DurablePort>;
+  return typeof candidate.writeCheckpoint === "function" &&
+    typeof candidate.lastCheckpoint === "function" &&
+    typeof candidate.recordIntent === "function" &&
+    typeof candidate.recordCompletion === "function" &&
+    typeof candidate.getIdempotency === "function" &&
+    typeof candidate.recordDecision === "function" &&
+    typeof candidate.getDecision === "function"
+    ? candidate as StorePort & GraphPort & DurablePort
+    : null;
 }
 
 function assert(cond: boolean, msg: string): void {
@@ -864,6 +907,83 @@ export function storeConformanceCases(makeStore: () => StorePort & GraphPort): C
       assert((await s.getBlock(scopeB, "bio")) !== null, "scopeB block intact");
       assert((await s.readEvents("sess_erase_b")).length > 0, "scopeB events intact");
     }) },
+    { name: "eraseScope(user): deletes only that user's sessions and durable records within a shared agent", run: withStore(async (s) => {
+      const durable = asDurableStore(s);
+      const at = "2026-01-01T00:00:00.000Z";
+      const alice: Scope = { kind: "user", agentId: "erase_shared_agent", userId: "alice" };
+      const bob: Scope = { kind: "user", agentId: "erase_shared_agent", userId: "bob" };
+      const event = (id: string, sessionId: string): StoredEvent => ({
+        id, sessionId, seq: 0, kind: "user", schemaVersion: 1, payload: id, createdAt: at,
+      });
+
+      await s.createSession({ id: "erase_alice_session", agentId: "erase_shared_agent", userId: "alice", orgId: "acme", createdAt: at });
+      await s.createSession({ id: "erase_bob_session", agentId: "erase_shared_agent", userId: "bob", orgId: "acme", createdAt: at });
+      await s.appendEvents([
+        event("erase_alice_event", "erase_alice_session"),
+        event("erase_bob_event", "erase_bob_session"),
+      ]);
+      await s.upsertBlock(alice, { label: "profile", value: "Alice" });
+      await s.upsertBlock(bob, { label: "profile", value: "Bob" });
+
+      if (durable) {
+        await durable.writeCheckpoint("erase_alice_session", 1, "alice-hash");
+        await durable.writeCheckpoint("erase_bob_session", 1, "bob-hash");
+        await durable.recordIntent("erase_alice_session:tool", "alice-args", { sessionId: "erase_alice_session" });
+        await durable.recordCompletion("erase_alice_session:tool", { owner: "alice" }, { sessionId: "erase_alice_session" });
+        await durable.recordIntent("erase_bob_session:tool", "bob-args", { sessionId: "erase_bob_session" });
+        await durable.recordCompletion("erase_bob_session:tool", { owner: "bob" }, { sessionId: "erase_bob_session" });
+        await durable.recordIntent("erase_alice_scope_only", "alice-scope", { scopeKey: scopeKey(alice) });
+        await durable.recordDecision("erase_alice_session", "call", { approved: true, data: { owner: "alice" } });
+        await durable.recordDecision("erase_bob_session", "call", { approved: true, data: { owner: "bob" } });
+      }
+
+      await s.eraseScope(alice);
+
+      assertEqual(await s.getSession("erase_alice_session"), null, "Alice session erased");
+      assert((await s.getSession("erase_bob_session")) !== null, "Bob session remains");
+      assertEqual(await s.readEvents("erase_alice_session"), [], "Alice events erased");
+      assertEqual((await s.readEvents("erase_bob_session")).map((e) => e.id), ["erase_bob_event"], "Bob events remain");
+      assertEqual(await s.getBlock(alice, "profile"), null, "Alice scoped data erased");
+      assert((await s.getBlock(bob, "profile")) !== null, "Bob scoped data remains");
+
+      if (durable) {
+        assertEqual(await durable.lastCheckpoint("erase_alice_session"), null, "Alice checkpoint erased");
+        assert((await durable.lastCheckpoint("erase_bob_session")) !== null, "Bob checkpoint remains");
+        assertEqual(await durable.getIdempotency("erase_alice_session:tool"), null, "Alice session idempotency erased");
+        assertEqual(await durable.getIdempotency("erase_alice_scope_only"), null, "Alice scope idempotency erased");
+        assert((await durable.getIdempotency("erase_bob_session:tool")) !== null, "Bob idempotency remains");
+        assertEqual(await durable.getDecision("erase_alice_session", "call"), null, "Alice decision erased");
+        assert((await durable.getDecision("erase_bob_session", "call")) !== null, "Bob decision remains");
+      }
+    }) },
+    { name: "eraseScope(org/thread/shared): selects exact sessions and never fans shared erasure into sessions", run: withStore(async (s) => {
+      const at = "2026-01-01T00:00:00.000Z";
+      const agentId = "erase_scope_kinds_agent";
+      const session = async (id: string, userId: string, orgId: string) => {
+        await s.createSession({ id, agentId, userId, orgId, createdAt: at });
+        await s.appendEvents([{ id: `${id}_event`, sessionId: id, seq: 0, kind: "user", schemaVersion: 1, payload: id, createdAt: at }]);
+      };
+
+      await session("erase_org_acme_1", "alice", "acme");
+      await session("erase_org_acme_2", "bob", "acme");
+      await session("erase_org_other", "carol", "other");
+      await s.eraseScope({ kind: "org", agentId, orgId: "acme" });
+      assertEqual(await s.getSession("erase_org_acme_1"), null, "first Acme session erased");
+      assertEqual(await s.getSession("erase_org_acme_2"), null, "second Acme session erased");
+      assert((await s.getSession("erase_org_other")) !== null, "other org session remains");
+
+      await session("erase_thread_target", "dana", "other");
+      await session("erase_thread_sibling", "dana", "other");
+      await s.eraseScope({ kind: "thread", agentId, sessionId: "erase_thread_target" });
+      assertEqual(await s.getSession("erase_thread_target"), null, "exact thread session erased");
+      assert((await s.getSession("erase_thread_sibling")) !== null, "same-owner sibling session remains");
+
+      await s.upsertBlock({ kind: "shared", blockId: "erase_shared_block" }, { label: "shared", value: "erase me" });
+      await s.eraseScope({ kind: "shared", blockId: "erase_shared_block" });
+      assertEqual(await s.getBlock({ kind: "shared", blockId: "erase_shared_block" }, "shared"), null, "shared block erased");
+      assert((await s.getSession("erase_org_other")) !== null, "shared erase leaves sessions untouched");
+      assert((await s.getSession("erase_thread_sibling")) !== null, "shared erase leaves sibling session untouched");
+    }) },
     { name: "graph: contradiction records supersedes link on the new fact + defaults lastCorroboratedAt to validFrom", run: withStore(async (s) => {
       const t1 = "2026-01-01T00:00:00.000Z";
       const t2 = "2026-03-01T00:00:00.000Z";
@@ -1110,6 +1230,30 @@ export function durableConformanceCases(makeStore: () => Promise<DurablePort> | 
       const r = await s.getIdempotency("k2");
       assertEqual(r?.status, "applied", "still applied after a second intent");
       assertEqual(r?.result, "done", "result intact");
+    }) },
+    { name: "durable: idempotency ownership metadata persists and completion enriches missing fields", run: withStore(async (s) => {
+      await s.recordIntent("meta-key", "meta-hash", { sessionId: "meta-session" });
+      await s.recordCompletion("meta-key", "done", { scopeKey: "user:meta-agent:meta-user", ownerKey: "user:meta-user" });
+      const record = await s.getIdempotency("meta-key");
+      assertEqual(record?.sessionId, "meta-session", "sessionId metadata persists from intent");
+      assertEqual(record?.scopeKey, "user:meta-agent:meta-user", "scopeKey metadata is enriched on completion");
+      assertEqual(record?.ownerKey, "user:meta-user", "ownerKey metadata is enriched on completion");
+    }) },
+    { name: "durable: idempotency ownership metadata cannot be reassigned by a later write", run: withStore(async (s) => {
+      await s.recordIntent("owned-key", "owned-hash", {
+        sessionId: "alice-session",
+        scopeKey: "user:agent:alice",
+        ownerKey: "user:alice",
+      });
+      await s.recordCompletion("owned-key", "done", {
+        sessionId: "bob-session",
+        scopeKey: "user:agent:bob",
+        ownerKey: "user:bob",
+      });
+      const record = await s.getIdempotency("owned-key");
+      assertEqual(record?.sessionId, "alice-session", "existing session ownership is immutable");
+      assertEqual(record?.scopeKey, "user:agent:alice", "existing scope ownership is immutable");
+      assertEqual(record?.ownerKey, "user:alice", "existing owner key is immutable");
     }) },
     { name: "durable: recordCompletion persists null/falsy results faithfully", run: withStore(async (s) => {
       await s.recordIntent("k3", "h");

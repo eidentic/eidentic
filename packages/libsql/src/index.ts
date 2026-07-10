@@ -18,6 +18,7 @@ import {
   type DurablePort,
   type Checkpoint,
   type IdempotencyRecord,
+  type IdempotencyMetadata,
   type IdempotencyStatus,
   type SuspendDecision,
 } from "@eidentic/types";
@@ -71,6 +72,14 @@ function numOrNull(v: RowValue): number | null {
 }
 
 type Stmt = { sql: string; args?: import("@libsql/client").InArgs };
+
+function sessionSelection(scope: Scope): { where: string; args: string[] } | null {
+  if (scope.kind === "agent") return { where: "agent_id = ?", args: [scope.agentId] };
+  if (scope.kind === "user") return { where: "agent_id = ? AND user_id = ?", args: [scope.agentId, scope.userId] };
+  if (scope.kind === "org") return { where: "agent_id = ? AND org_id = ?", args: [scope.agentId, scope.orgId] };
+  if (scope.kind === "thread") return { where: "agent_id = ? AND id = ?", args: [scope.agentId, scope.sessionId] };
+  return null;
+}
 
 export class LibsqlStore implements StorePort, GraphPort, DurablePort {
   private readonly client: Client;
@@ -704,31 +713,24 @@ export class LibsqlStore implements StorePort, GraphPort, DurablePort {
 
   async eraseScope(scope: Scope): Promise<{ deleted: number }> {
     const key = scopeKey(scope);
-    const agentId = "agentId" in scope ? (scope as { agentId: string }).agentId : null;
-
-    // Find session ids for this agentId (needed to delete events).
-    let sessionIds: string[] = [];
-    if (agentId !== null) {
-      const rs = await this.client.execute({
-        sql: `SELECT id FROM sessions WHERE agent_id = ?`,
-        args: [agentId],
-      });
-      sessionIds = rs.rows.map((r) => str(r["id"]));
-    }
-
-    // Build the batch of deletes.
     const stmts: Stmt[] = [
       { sql: `DELETE FROM facts WHERE scope_key = ?`, args: [key] },
       { sql: `DELETE FROM memories WHERE scope_key = ?`, args: [key] },
       { sql: `DELETE FROM memory_meta WHERE scope_key = ?`, args: [key] },
       { sql: `DELETE FROM block_history WHERE scope_key = ?`, args: [key] },
       { sql: `DELETE FROM blocks WHERE scope_key = ?`, args: [key] },
+      { sql: `DELETE FROM idempotency_keys WHERE scope_key = ?`, args: [key] },
     ];
-    for (const sid of sessionIds) {
-      stmts.push({ sql: `DELETE FROM events WHERE session_id = ?`, args: [sid] });
-    }
-    if (agentId !== null) {
-      stmts.push({ sql: `DELETE FROM sessions WHERE agent_id = ?`, args: [agentId] });
+    const selection = sessionSelection(scope);
+    if (selection) {
+      const selectedSessions = `SELECT id FROM sessions WHERE ${selection.where}`;
+      stmts.push(
+        { sql: `DELETE FROM idempotency_keys WHERE session_id IN (${selectedSessions})`, args: selection.args },
+        { sql: `DELETE FROM suspension_decisions WHERE session_id IN (${selectedSessions})`, args: selection.args },
+        { sql: `DELETE FROM checkpoints WHERE session_id IN (${selectedSessions})`, args: selection.args },
+        { sql: `DELETE FROM events WHERE session_id IN (${selectedSessions})`, args: selection.args },
+        { sql: `DELETE FROM sessions WHERE ${selection.where}`, args: selection.args },
+      );
     }
 
     const results = await this.client.batch(stmts, "write");
@@ -763,27 +765,41 @@ export class LibsqlStore implements StorePort, GraphPort, DurablePort {
     };
   }
 
-  async recordIntent(key: string, argsHash: string): Promise<void> {
-    // INSERT OR IGNORE: intent is write-once; an existing row is left untouched.
-    await this.client.execute({
-      sql: `INSERT OR IGNORE INTO idempotency_keys (key, args_hash, status, result, created_at) VALUES (?, ?, 'intent', NULL, ?)`,
-      args: [key, argsHash, this.graphNow()],
-    });
+  async recordIntent(key: string, argsHash: string, metadata?: IdempotencyMetadata): Promise<void> {
+    // Intent lifecycle fields are write-once; missing ownership metadata may be enriched but never reassigned.
+    await this.client.batch([
+      {
+        sql: `INSERT OR IGNORE INTO idempotency_keys
+          (key, args_hash, status, result, created_at, scope_key, session_id, owner_key)
+          VALUES (?, ?, 'intent', NULL, ?, ?, ?, ?)`,
+        args: [key, argsHash, this.graphNow(), metadata?.scopeKey ?? null, metadata?.sessionId ?? null, metadata?.ownerKey ?? null],
+      },
+      {
+        sql: `UPDATE idempotency_keys SET
+          scope_key = COALESCE(scope_key, ?), session_id = COALESCE(session_id, ?), owner_key = COALESCE(owner_key, ?)
+          WHERE key = ?`,
+        args: [metadata?.scopeKey ?? null, metadata?.sessionId ?? null, metadata?.ownerKey ?? null, key],
+      },
+    ], "write");
   }
 
-  async recordCompletion(key: string, result: unknown): Promise<void> {
+  async recordCompletion(key: string, result: unknown, metadata?: IdempotencyMetadata): Promise<void> {
     const serialized = JSON.stringify(result ?? null);
     // Ensure row exists (covers completion without a prior intent), then flip to applied.
     // Both operations in a single batch for atomicity.
     await this.client.batch(
       [
         {
-          sql: `INSERT OR IGNORE INTO idempotency_keys (key, args_hash, status, result, created_at) VALUES (?, '', 'intent', NULL, ?)`,
-          args: [key, this.graphNow()],
+          sql: `INSERT OR IGNORE INTO idempotency_keys
+            (key, args_hash, status, result, created_at, scope_key, session_id, owner_key)
+            VALUES (?, '', 'intent', NULL, ?, ?, ?, ?)`,
+          args: [key, this.graphNow(), metadata?.scopeKey ?? null, metadata?.sessionId ?? null, metadata?.ownerKey ?? null],
         },
         {
-          sql: `UPDATE idempotency_keys SET status = 'applied', result = ? WHERE key = ?`,
-          args: [serialized, key],
+          sql: `UPDATE idempotency_keys SET status = 'applied', result = ?,
+            scope_key = COALESCE(scope_key, ?), session_id = COALESCE(session_id, ?), owner_key = COALESCE(owner_key, ?)
+            WHERE key = ?`,
+          args: [serialized, metadata?.scopeKey ?? null, metadata?.sessionId ?? null, metadata?.ownerKey ?? null, key],
         },
       ],
       "write",
@@ -792,18 +808,24 @@ export class LibsqlStore implements StorePort, GraphPort, DurablePort {
 
   async getIdempotency(key: string): Promise<IdempotencyRecord | null> {
     const rs = await this.client.execute({
-      sql: `SELECT key, args_hash, status, result, created_at FROM idempotency_keys WHERE key = ?`,
+      sql: `SELECT key, args_hash, status, result, created_at, scope_key, session_id, owner_key FROM idempotency_keys WHERE key = ?`,
       args: [key],
     });
     const row = rs.rows[0];
     if (!row) return null;
     const resultStr = strOrNull(row["result"]);
+    const scopeKeyValue = strOrNull(row["scope_key"]);
+    const sessionId = strOrNull(row["session_id"]);
+    const ownerKey = strOrNull(row["owner_key"]);
     return {
       key: str(row["key"]),
       argsHash: str(row["args_hash"]),
       status: str(row["status"]) as IdempotencyStatus,
       ...(resultStr !== null ? { result: JSON.parse(resultStr) } : {}),
       createdAt: str(row["created_at"]),
+      ...(scopeKeyValue !== null ? { scopeKey: scopeKeyValue } : {}),
+      ...(sessionId !== null ? { sessionId } : {}),
+      ...(ownerKey !== null ? { ownerKey } : {}),
     };
   }
 

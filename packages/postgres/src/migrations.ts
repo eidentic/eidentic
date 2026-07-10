@@ -147,6 +147,34 @@ export const MIGRATIONS: ReadonlyArray<{ version: number; sql: string }> = [
       ALTER TABLE sessions ADD COLUMN IF NOT EXISTS api_key TEXT;
     `,
   },
+  {
+    version: 11,
+    sql: `
+      ALTER TABLE idempotency_keys ADD COLUMN IF NOT EXISTS scope_key TEXT;
+      ALTER TABLE idempotency_keys ADD COLUMN IF NOT EXISTS session_id TEXT;
+      ALTER TABLE idempotency_keys ADD COLUMN IF NOT EXISTS owner_key TEXT;
+      CREATE INDEX IF NOT EXISTS idx_idempotency_scope ON idempotency_keys(scope_key);
+      CREATE INDEX IF NOT EXISTS idx_idempotency_session ON idempotency_keys(session_id);
+      CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent_id);
+      CREATE INDEX IF NOT EXISTS idx_sessions_agent_user ON sessions(agent_id, user_id);
+      CREATE INDEX IF NOT EXISTS idx_sessions_agent_org ON sessions(agent_id, org_id);
+      CREATE INDEX IF NOT EXISTS idx_checkpoints_session ON checkpoints(session_id);
+      CREATE INDEX IF NOT EXISTS idx_suspension_decisions_session ON suspension_decisions(session_id);
+      UPDATE idempotency_keys AS idem
+      SET session_id = (
+        SELECT sessions.id
+        FROM sessions
+        WHERE left(idem.key, length(sessions.id) + 1) = sessions.id || ':'
+        LIMIT 1
+      )
+      WHERE idem.session_id IS NULL
+        AND 1 = (
+          SELECT count(*)
+          FROM sessions
+          WHERE left(idem.key, length(sessions.id) + 1) = sessions.id || ':'
+        );
+    `,
+  },
 ];
 
 export async function runMigrations(client: PgClient): Promise<void> {

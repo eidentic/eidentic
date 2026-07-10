@@ -155,6 +155,36 @@ export const MIGRATIONS: ReadonlyArray<{ version: number; sql: string[] }> = [
       `ALTER TABLE sessions ADD COLUMN api_key TEXT`,
     ],
   },
+  {
+    version: 13,
+    sql: [
+      `ALTER TABLE idempotency_keys ADD COLUMN scope_key TEXT`,
+      `ALTER TABLE idempotency_keys ADD COLUMN session_id TEXT`,
+      `ALTER TABLE idempotency_keys ADD COLUMN owner_key TEXT`,
+      `CREATE INDEX idx_idempotency_scope ON idempotency_keys(scope_key)`,
+      `CREATE INDEX idx_idempotency_session ON idempotency_keys(session_id)`,
+      `CREATE INDEX idx_sessions_agent ON sessions(agent_id)`,
+      `CREATE INDEX idx_sessions_agent_user ON sessions(agent_id, user_id)`,
+      `CREATE INDEX idx_sessions_agent_org ON sessions(agent_id, org_id)`,
+      `CREATE INDEX idx_checkpoints_session ON checkpoints(session_id)`,
+      `CREATE INDEX idx_suspension_decisions_session ON suspension_decisions(session_id)`,
+      // Backfill only an unambiguous session prefix. Opaque/ambiguous legacy keys remain unowned
+      // rather than being guessed and potentially erased across a tenant boundary.
+      `UPDATE idempotency_keys
+       SET session_id = (
+         SELECT sessions.id
+         FROM sessions
+         WHERE substr(idempotency_keys.key, 1, length(sessions.id) + 1) = sessions.id || ':'
+         LIMIT 1
+       )
+       WHERE session_id IS NULL
+         AND 1 = (
+           SELECT count(*)
+           FROM sessions
+           WHERE substr(idempotency_keys.key, 1, length(sessions.id) + 1) = sessions.id || ':'
+         )`,
+    ],
+  },
 ];
 
 export async function runMigrations(client: Client): Promise<void> {

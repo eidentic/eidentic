@@ -410,7 +410,24 @@ export class ConvexStore implements StorePort, GraphPort, DurablePort {
 
   async eraseScope(scope: Scope): Promise<{ deleted: number }> {
     const args: Record<string, unknown> = { scopeKey: scopeKey(scope) };
-    if ("agentId" in scope) args["agentId"] = (scope as { agentId: string }).agentId;
+    // Preserve the old wire shape for agent/shared scopes so a newer client remains compatible
+    // with already-deployed Convex functions. Narrower scopes require the new discriminator and
+    // therefore fail closed against an old backend instead of falling back to agent-wide erasure.
+    if (scope.kind === "agent") {
+      args["agentId"] = scope.agentId;
+    } else if (scope.kind === "user") {
+      args["kind"] = scope.kind;
+      args["agentId"] = scope.agentId;
+      args["userId"] = scope.userId;
+    } else if (scope.kind === "org") {
+      args["kind"] = scope.kind;
+      args["agentId"] = scope.agentId;
+      args["orgId"] = scope.orgId;
+    } else if (scope.kind === "thread") {
+      args["kind"] = scope.kind;
+      args["agentId"] = scope.agentId;
+      args["sessionId"] = scope.sessionId;
+    }
     return (await this.runner.mutation(this.fns.eraseScope, args)) as { deleted: number };
   }
 

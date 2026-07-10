@@ -29,6 +29,7 @@
   ],
   "scripts": {
     "build": "tsup src/index.ts --format esm,cjs --dts --clean",
+    "test:dist": "node test/runtime-smoke.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

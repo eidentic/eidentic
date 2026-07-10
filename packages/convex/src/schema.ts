@@ -104,7 +104,9 @@ export function createEidenticTables(opts: CreateEidenticTablesOptions = {}) {
       apiKey: v.optional(v.string()),
     })
       .index("by_session_id", ["sessionId"])
-      .index("by_agent", ["agentId"]),
+      .index("by_agent", ["agentId"])
+      .index("by_agent_user", ["agentId", "userId"])
+      .index("by_agent_org", ["agentId", "orgId"]),
 
     // Append-only event log. Uniqueness is enforced in the appendEvents mutation.
     [names.event]: defineTable({
