@@ -35,6 +35,7 @@ written in full detail. The v1 scope is sliced only after this document is compl
 | 18 | SDK Testing & Adapter Conformance | [18-testing-conformance.md](18-testing-conformance.md) |
 | 19 | Schema & Prompt Evolution | [19-schema-prompt-evolution.md](19-schema-prompt-evolution.md) |
 | 20 | Secrets, Rate Limiting & Quotas | [20-secrets-rate-limiting.md](20-secrets-rate-limiting.md) |
+| 21 | Security Boundary Migrations | [21-security-boundary-migrations.md](21-security-boundary-migrations.md) |
 
 ## Reading order
 
@@ -42,13 +43,13 @@ written in full detail. The v1 scope is sliced only after this document is compl
 verified 2026 tech stack, and the v1 scope. Sections 1–2 give the whole picture. Sections
 3–5 are the runtime core. Sections 6–8 are the differentiators (memory, skills, multi-agent).
 Sections 9–11 are the production fundamentals. Sections 12–13 are the substrate (data,
-packaging). Section 14 ties every design choice to a sourced gap. Sections 15–20 are the
+packaging). Section 14 ties every design choice to a sourced gap. Sections 15–21 are the
 production-hardening concerns surfaced by adversarial review (governance, concurrency,
-errors, testing, evolution, secrets/limits).
+errors, testing, evolution, secrets/limits, and compatibility-safe security migrations).
 
 ## Status
 
-All 21 sections (0–20) written and reconciled against two rounds of June-2026 deep research
+All 22 sections (0–21) written and reconciled against two rounds of June-2026 deep research
 plus an adversarial design review. Decisions are **finalized** (see Section 0). v1 scope is
 sliced (Section 0, part E).
 
