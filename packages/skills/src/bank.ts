@@ -31,7 +31,11 @@ export interface SkillBankOptions {
   sandbox?: SandboxPort;
   /** Wall-clock timeout for code-string sandbox runs. Defaults to the sandbox adapter's own policy. */
   sandboxTimeoutMs?: number;
-  /** When true, `use()` requires a valid signature (verified with `verifyKey`). Wired fully in Task 3. */
+  /**
+   * When true, only serialized `code` skills may register and `use()` requires a valid signature
+   * verified with `verifyKey`. In-process `run` closures are rejected because they are not
+   * portably signable. Default false for trusted development compatibility.
+   */
   requireSigned?: boolean;
   /** Public key (PEM) used to verify signatures when `requireSigned`. */
   verifyKey?: string;
@@ -50,8 +54,81 @@ export type RegisterResult =
   | { ok: false; failures: string[] };
 
 interface BankRecord {
-  def: ExecutableSkillDef;
-  lock: SkillLock;
+  readonly def: StoredSkillDefinition;
+  readonly lock: SkillLock;
+}
+
+interface StoredSkillDefinition {
+  readonly name: string;
+  readonly description: string;
+  readonly allowedTools?: readonly string[];
+  readonly tests: readonly { readonly name: string }[];
+  readonly run?: ExecutableSkillDef["run"];
+  readonly code?: string;
+}
+
+type InvocableSkillDefinition = Pick<StoredSkillDefinition, "name" | "allowedTools" | "run" | "code">;
+
+function cloneLock(lock: SkillLock): SkillLock {
+  return {
+    ...lock,
+    tests: lock.tests.map((test) => ({ ...test })),
+  };
+}
+
+function immutableLock(lock: SkillLock): SkillLock {
+  const tests = Object.freeze(lock.tests.map((test) => Object.freeze({ ...test })));
+  return Object.freeze({ ...lock, tests }) as SkillLock;
+}
+
+function immutableRecord(def: StoredSkillDefinition, lock: SkillLock): BankRecord {
+  return Object.freeze({ def, lock: immutableLock(lock) });
+}
+
+function cloneTestInput(input: unknown, skillName: string, testName: string): unknown {
+  try {
+    return structuredClone(input);
+  } catch {
+    throw new Error(
+      `executable skill "${skillName}": test "${testName}" input must be structured-cloneable`,
+    );
+  }
+}
+
+/** Snapshot caller-owned mutable arrays/objects before the asynchronous test gate starts. */
+function snapshotCandidate(def: ExecutableSkillDef): ExecutableSkillDef {
+  const allowedTools = def.allowedTools === undefined
+    ? undefined
+    : [...def.allowedTools];
+  if (allowedTools) Object.freeze(allowedTools);
+  const tests: SkillTest[] = def.tests.map((test) => Object.freeze({
+    name: test.name,
+    input: cloneTestInput(test.input, def.name, test.name),
+    check: test.check,
+  }));
+  Object.freeze(tests);
+  return Object.freeze({
+    name: def.name,
+    description: def.description,
+    ...(allowedTools !== undefined ? { allowedTools } : {}),
+    tests,
+    ...(def.run !== undefined ? { run: def.run } : {}),
+    ...(def.code !== undefined ? { code: def.code } : {}),
+  });
+}
+
+function storedDefinitionOf(def: ExecutableSkillDef): StoredSkillDefinition {
+  const tests = Object.freeze(def.tests.map((test) => Object.freeze({ name: test.name })));
+  return Object.freeze({
+    name: def.name,
+    description: def.description,
+    ...(def.allowedTools !== undefined
+      ? { allowedTools: Object.freeze([...def.allowedTools]) }
+      : {}),
+    tests,
+    ...(def.run !== undefined ? { run: def.run } : {}),
+    ...(def.code !== undefined ? { code: def.code } : {}),
+  });
 }
 
 /** Default test-gate callTool stub: echoes `toolId-prefix:input` so skills that call an allowed tool
@@ -61,23 +138,23 @@ async function defaultTestCallTool(toolId: string, input: unknown): Promise<unkn
 }
 
 export class SkillBank {
-  private readonly records = new Map<string, BankRecord>();
-  private readonly order: string[] = [];
-  private readonly versions = new Map<string, number>();
-  private readonly sandbox: SandboxPort;
-  private readonly sandboxTimeoutMs: number | undefined;
-  private readonly requireSigned: boolean;
-  private readonly verifyKey?: string;
-  private readonly now: () => string;
-  private readonly testCallTool: (toolId: string, input: unknown) => Promise<unknown>;
+  readonly #records = new Map<string, BankRecord>();
+  readonly #order: string[] = [];
+  readonly #versions = new Map<string, number>();
+  readonly #sandbox: SandboxPort;
+  readonly #sandboxTimeoutMs: number | undefined;
+  readonly #requireSigned: boolean;
+  readonly #verifyKey?: string;
+  readonly #now: () => string;
+  readonly #testCallTool: (toolId: string, input: unknown) => Promise<unknown>;
 
   constructor(opts?: SkillBankOptions) {
-    this.sandbox = opts?.sandbox ?? REFUSING_SANDBOX;
-    this.sandboxTimeoutMs = opts?.sandboxTimeoutMs;
-    this.requireSigned = opts?.requireSigned ?? false;
-    if (opts?.verifyKey !== undefined) this.verifyKey = opts.verifyKey;
-    this.now = opts?.now ?? (() => new Date().toISOString());
-    this.testCallTool = opts?.testCallTool ?? defaultTestCallTool;
+    this.#sandbox = opts?.sandbox ?? REFUSING_SANDBOX;
+    this.#sandboxTimeoutMs = opts?.sandboxTimeoutMs;
+    this.#requireSigned = opts?.requireSigned ?? false;
+    if (opts?.verifyKey !== undefined) this.#verifyKey = opts.verifyKey;
+    this.#now = opts?.now ?? (() => new Date().toISOString());
+    this.#testCallTool = opts?.testCallTool ?? defaultTestCallTool;
   }
 
   /**
@@ -89,6 +166,9 @@ export class SkillBank {
     def: ExecutableSkillDef,
     opts?: { author?: "human" | "agent" },
   ): Promise<RegisterResult> {
+    // Provenance is security-sensitive state. Snapshot it before the test gate yields so a
+    // caller cannot change an agent-authored registration into a trusted human one mid-flight.
+    const author = opts?.author ?? "human";
     validateSkillName(def.name);
     const hasRun = typeof def.run === "function";
     const hasCode = typeof def.code === "string";
@@ -98,68 +178,87 @@ export class SkillBank {
 
     // Security (§7.6): agent-authored skills MUST use `code` (sandboxed), never in-process `run`.
     // This ensures agent-generated logic never executes in-process, even during the test-gate.
-    if (opts?.author === "agent" && hasRun) {
+    if (author === "agent" && hasRun) {
       return { ok: false, failures: ["agent-authored skills must use 'code' (sandboxed), not an in-process 'run' function"] };
     }
 
-    if (def.tests.length === 0) {
+    // Function.toString() cannot attest closure state, native bindings, or runtime dependencies.
+    // Claiming such a function is signed would be security theatre, so signed banks accept only
+    // serialized code whose exact bytes are included in contentHash.
+    if (this.#requireSigned && hasRun) {
+      return {
+        ok: false,
+        failures: [
+          "requireSigned skill banks cannot register an in-process `run` function because its function body and closure cannot be signed reliably; migrate to serialized `code` executed in a sandbox",
+        ],
+      };
+    }
+
+    // Take the ownership boundary snapshot only after synchronous shape validation, but before
+    // the first await in the test gate. Caller mutations can no longer swap tested code/capabilities.
+    const candidate = snapshotCandidate(def);
+
+    if (candidate.tests.length === 0) {
       return { ok: false, failures: ["no tests declared: executable skills must declare at least one test (test-gate)"] };
     }
 
     // Evaluate (§7.4): run every test, recording per-test pass/fail. Reuses the shared
     // runSkillTests helper (also used by evolveSkill — NOT duplicated). Allowed tools are
     // proxied through the injected testCallTool stub; the invoker enforces deny-by-default.
-    const results = await this.runBankTests(def);
+    const results = await this.runBankTests(candidate);
     const testsPassed = results.every((r) => r.passed);
     if (!testsPassed) {
       // INVARIANT: a failing test means the skill is NOT registered.
       return { ok: false, failures: results.filter((r) => !r.passed).map((r) => r.name) };
     }
 
-    const author = opts?.author ?? "human";
-    const version = (this.versions.get(def.name) ?? 0) + 1;
-    this.versions.set(def.name, version);
+    const version = (this.#versions.get(candidate.name) ?? 0) + 1;
+    this.#versions.set(candidate.name, version);
+    const storedDef = storedDefinitionOf(candidate);
     const lock: SkillLock = {
-      name: def.name,
+      name: candidate.name,
       version,
       author,
-      contentHash: contentHashOf(def),
+      contentHash: contentHashOf(storedDef),
       tests: results,
       testsPassed: true,
-      createdAt: this.now(),
+      createdAt: this.#now(),
       quarantined: author === "agent", // agent-authored quarantined until approve() (§7.6)
     };
-    if (!this.records.has(def.name)) this.order.push(def.name);
-    this.records.set(def.name, { def, lock });
-    return { ok: true, lock };
+    if (!this.#records.has(candidate.name)) this.#order.push(candidate.name);
+    this.#records.set(candidate.name, immutableRecord(storedDef, lock));
+    return { ok: true, lock: cloneLock(lock) };
   }
 
   /** §7.6 quarantine release: clear quarantine for an agent-authored skill (only after tests passed).
    *  Strips the existing signature (if any) because flipping `quarantined` makes it stale. */
   approve(name: string): boolean {
-    const rec = this.records.get(name);
+    const rec = this.#records.get(name);
     if (!rec) return false;
+    this.assertIntegrity(rec, "approve");
     const { signature: _drop, ...rest } = rec.lock;
-    rec.lock = { ...rest, quarantined: false };
+    this.#records.set(name, immutableRecord(rec.def, { ...rest, quarantined: false }));
     return true;
   }
 
   /** Attach a signature to a registered skill's lock (produced by `signLock`, §7.6). */
   setSignature(name: string, signature: string): boolean {
-    const rec = this.records.get(name);
+    const rec = this.#records.get(name);
     if (!rec) return false;
-    rec.lock = { ...rec.lock, signature };
+    this.assertIntegrity(rec, "setSignature");
+    this.#records.set(name, immutableRecord(rec.def, { ...rec.lock, signature }));
     return true;
   }
 
   /** The `skill.lock` for a registered skill, or null. Quarantined skills ARE returned here (listed, not runnable). */
   get(name: string): SkillLock | null {
-    return this.records.get(name)?.lock ?? null;
+    const lock = this.#records.get(name)?.lock;
+    return lock ? cloneLock(lock) : null;
   }
 
   /** All registered skill.locks in registration order (includes quarantined — they are listed but not runnable). */
   list(): SkillLock[] {
-    return this.order.map((n) => this.records.get(n)!.lock);
+    return this.#order.map((n) => cloneLock(this.#records.get(n)!.lock));
   }
 
   /**
@@ -168,11 +267,16 @@ export class SkillBank {
    * injected `SandboxPort`. Throws on: unknown skill, quarantined skill, signature failure.
    */
   async use(name: string, input: unknown, ctx?: SkillRunContext): Promise<unknown> {
-    const rec = this.records.get(name);
+    const rec = this.#records.get(name);
     if (!rec) throw new Error(`SkillBank.use: unknown skill "${name}"`);
+    this.assertIntegrity(rec, "use");
     if (rec.lock.quarantined) throw new Error(`SkillBank.use: skill "${name}" is quarantined (needs approve())`);
-    if (this.requireSigned) {
-      // verifyLock is imported lazily in Task 3; until then this branch is unused (requireSigned default false).
+    if (this.#requireSigned) {
+      if (typeof rec.def.run === "function") {
+        throw new Error(
+          `SkillBank.use: signed skill "${name}" uses an unverifiable in-process function; migrate to serialized code`,
+        );
+      }
       const ok = await this.verifySignature(rec.lock);
       if (!ok) throw new Error(`SkillBank.use: skill "${name}" failed signature verification`);
     }
@@ -180,7 +284,7 @@ export class SkillBank {
   }
 
   /** Run a skill def (typed-function via `run`, or code-string via the sandbox), enforcing allowedTools. */
-  private async invoke(def: ExecutableSkillDef, input: unknown, ctx?: SkillRunContext): Promise<unknown> {
+  private async invoke(def: InvocableSkillDefinition, input: unknown, ctx?: SkillRunContext): Promise<unknown> {
     const scopedCtx: SkillRunContext = {
       callTool: this.wrapCallTool(def.allowedTools, ctx?.callTool),
       ...(ctx?.signal !== undefined ? { signal: ctx.signal } : {}),
@@ -195,9 +299,9 @@ export class SkillBank {
     // escapes all characters that could break out of the literal context (M3 fix).
     const inputPreamble = `const INPUT = ${JSON.stringify(input)};\n`;
     const codeWithInput = inputPreamble + def.code!;
-    const res = await this.sandbox.run(codeWithInput, {
+    const res = await this.#sandbox.run(codeWithInput, {
       language: "javascript",
-      ...(this.sandboxTimeoutMs !== undefined ? { timeoutMs: this.sandboxTimeoutMs } : {}),
+      ...(this.#sandboxTimeoutMs !== undefined ? { timeoutMs: this.#sandboxTimeoutMs } : {}),
       ...(ctx?.signal !== undefined ? { signal: ctx.signal } : {}),
     });
     if (res.exitCode !== 0) {
@@ -215,7 +319,7 @@ export class SkillBank {
 
   /** Wrap a host `callTool` so a tool id NOT matching the skill's `allowedTools` is rejected (deny-by-default). */
   private wrapCallTool(
-    allowedTools: string[] | undefined,
+    allowedTools: readonly string[] | undefined,
     callTool: SkillRunContext["callTool"],
   ): SkillRunContext["callTool"] {
     return async (toolId: string, input: unknown): Promise<unknown> => {
@@ -235,19 +339,38 @@ export class SkillBank {
    * optional `invoker` parameter.
    */
   private async runBankTests(def: ExecutableSkillDef): Promise<{ name: string; passed: boolean }[]> {
-    const wrappedCallTool = this.wrapCallTool(def.allowedTools, this.testCallTool);
+    const wrappedCallTool = this.wrapCallTool(def.allowedTools, this.#testCallTool);
     return runSkillTests(
       def,
       wrappedCallTool,
       // For code-string skills, route through the bank's full invoke machinery (sandbox-aware).
-      async (skillDef, input) => this.invoke(skillDef, input, { callTool: this.testCallTool }),
+      async (skillDef, input) => this.invoke(skillDef, input, { callTool: this.#testCallTool }),
     );
+  }
+
+  private assertIntegrity(rec: BankRecord, operation: "approve" | "setSignature" | "use"): void {
+    const actualHash = contentHashOf(rec.def);
+    const lockTests = rec.lock.tests.map((test) => test.name).sort();
+    const definitionTests = rec.def.tests.map((test) => test.name).sort();
+    const testsMatch = lockTests.length === definitionTests.length &&
+      lockTests.every((name, index) => name === definitionTests[index]);
+    if (
+      actualHash !== rec.lock.contentHash ||
+      rec.lock.name !== rec.def.name ||
+      !rec.lock.testsPassed ||
+      rec.lock.tests.some((test) => !test.passed) ||
+      !testsMatch
+    ) {
+      throw new Error(
+        `SkillBank.${operation}: skill "${rec.lock.name}" failed integrity/content hash verification`,
+      );
+    }
   }
 
   /** Verify the lock signature against the configured `verifyKey` (§7.6). */
   protected async verifySignature(lock: SkillLock): Promise<boolean> {
-    if (this.verifyKey === undefined) return false; // requireSigned but no key ⇒ cannot verify ⇒ deny
-    return verifyLock(lock, this.verifyKey);
+    if (this.#verifyKey === undefined) return false; // requireSigned but no key ⇒ cannot verify ⇒ deny
+    return verifyLock(lock, this.#verifyKey);
   }
 }
 

@@ -41,6 +41,19 @@ const result = await evolveSkill(executableSkill satisfies ExecutableSkillDef, {
 });
 ```
 
+## Signed production banks
+
+`requireSigned: true` is fail-closed: it accepts only serialized `code` skills executed through a
+`SandboxPort`. In-process `run` functions remain supported by the default unsigned/trusted
+development bank, but cannot be registered in a signed bank because JavaScript closures and their
+captured state cannot be represented honestly by a portable content signature.
+
+To migrate a signed deployment, move the executable body to `code`, provide a real sandbox, approve
+agent-authored skills, then sign the approved lock and attach it with `setSignature`. `SkillBank`
+snapshots definitions and locks at registration, and verifies the stored content digest again before
+approval, signature attachment, and execution. Test inputs must be structured-cloneable so the
+asynchronous test gate cannot observe caller mutations after registration begins.
+
 ## Links
 
 - [GitHub](https://github.com/eidentic/eidentic)

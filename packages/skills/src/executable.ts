@@ -26,6 +26,12 @@ export interface ExecutableSkillDef {
   description: string;          // ≤1024 chars
   allowedTools?: string[];      // capability scope (globs); deny-by-default at run time
   tests: SkillTest[];           // MUST all pass to register (the test-gate)
+  /**
+   * Trusted in-process implementation. Supported by unsigned/development banks, but deliberately
+   * rejected by `SkillBank({ requireSigned: true })`: a closure's captured state cannot be
+   * serialized and therefore cannot be covered honestly by a portable content signature.
+   * Use `code` in a sandbox for signed/production skill banks.
+   */
   run?: (input: unknown, ctx: SkillRunContext) => Promise<unknown>;  // typed-function form
   code?: string;                // OR code-string form: executed via SandboxPort instead of `run`
 }
@@ -81,7 +87,7 @@ export function matchSkillGlob(pattern: string, id: string): boolean {
  * Deny-by-default capability check (§7.6). A skill with NO `allowedTools` may call NO tools; a skill
  * with `allowedTools` may call only ids matching one of its globs.
  */
-export function isToolAllowed(allowedTools: string[] | undefined, toolId: string): boolean {
+export function isToolAllowed(allowedTools: readonly string[] | undefined, toolId: string): boolean {
   if (!allowedTools || allowedTools.length === 0) return false;
   return allowedTools.some((g) => matchSkillGlob(g, toolId));
 }
@@ -90,13 +96,15 @@ export function isToolAllowed(allowedTools: string[] | undefined, toolId: string
  * sha256 over the canonical, function-free SHAPE of a skill (§7.6 content hash). Test `check`
  * functions and `run` bodies are NOT serializable, so the hash covers only the durable identity:
  * name, description, allowedTools, code (for code-string skills), and the test NAMES (order-independent).
+ * Consequently a `run` definition is suitable only for an unsigned trusted bank; signed banks
+ * reject it rather than pretending this digest attests the closure.
  */
 export function contentHashOf(def: {
   name: string;
   description: string;
-  allowedTools?: string[];
+  allowedTools?: readonly string[];
   code?: string;
-  tests?: { name: string }[];
+  tests?: readonly { name: string }[];
 }): string {
   const shape = {
     name: def.name,

@@ -4,11 +4,16 @@ import { SkillBank } from "../src/bank.js";
 import type { ExecutableSkillDef, SkillLock } from "../src/executable.js";
 
 const FIXED = () => "2026-06-06T00:00:00.000Z";
-const skill: ExecutableSkillDef = {
-  name: "greeter",
-  description: "greets",
-  tests: [{ name: "greets", input: "x", check: (o) => o === "hi x" }],
-  run: async (input) => `hi ${input}`,
+const signedCodeSkill: ExecutableSkillDef = {
+  name: "greeter-code",
+  description: "greets from serialized code",
+  code: `console.log("EIDENTIC_RESULT:\\"hi x\\"")`,
+  tests: [{ name: "greets", input: "x", check: (output) => output === "hi x" }],
+};
+const codeSandbox = {
+  async run() {
+    return { stdout: `EIDENTIC_RESULT:"hi x"`, stderr: "", exitCode: 0 };
+  },
 };
 
 describe("ed25519 sign/verify over the canonical lock (§7.6)", () => {
@@ -53,18 +58,32 @@ describe("ed25519 sign/verify over the canonical lock (§7.6)", () => {
 describe("SkillBank requireSigned enforcement (§7.6)", () => {
   it("rejects use() of an unsigned skill when requireSigned", async () => {
     const { publicKey } = generateSkillKeypair();
-    const bank = new SkillBank({ now: FIXED, requireSigned: true, verifyKey: publicKey });
-    expect((await bank.register(skill)).ok).toBe(true);   // registration is unaffected by signing
-    await expect(bank.use("greeter", "x")).rejects.toThrow(/signature verification/);
+    const bank = new SkillBank({ now: FIXED, requireSigned: true, verifyKey: publicKey, sandbox: codeSandbox });
+    expect((await bank.register(signedCodeSkill)).ok).toBe(true);
+    await expect(bank.use("greeter-code", "x")).rejects.toThrow(/signature verification/);
   });
 
   it("allows use() once the lock is signed with the matching key", async () => {
     const { publicKey, privateKey } = generateSkillKeypair();
-    const bank = new SkillBank({ now: FIXED, requireSigned: true, verifyKey: publicKey });
-    const r = await bank.register(skill);
+    const bank = new SkillBank({ now: FIXED, requireSigned: true, verifyKey: publicKey, sandbox: codeSandbox });
+    const r = await bank.register(signedCodeSkill);
     const signature = signLock(r.lock!, privateKey);
-    bank.setSignature("greeter", signature);
-    expect(await bank.use("greeter", "x")).toBe("hi x");
+    bank.setSignature("greeter-code", signature);
+    expect(await bank.use("greeter-code", "x")).toBe("hi x");
+  });
+
+  it("rejects a signature made over a caller-mutated lock copy", async () => {
+    const { publicKey, privateKey } = generateSkillKeypair();
+    const bank = new SkillBank({ now: FIXED, requireSigned: true, verifyKey: publicKey, sandbox: codeSandbox });
+    const result = await bank.register(signedCodeSkill);
+    expect(result.ok).toBe(true);
+    const forged = bank.get("greeter-code")!;
+    forged.contentHash = "0".repeat(64);
+
+    bank.setSignature("greeter-code", signLock(forged, privateKey));
+
+    await expect(bank.use("greeter-code", "x")).rejects.toThrow(/signature verification/);
+    expect(bank.get("greeter-code")!.contentHash).toBe(result.lock!.contentHash);
   });
 });
 
