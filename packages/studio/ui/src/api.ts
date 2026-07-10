@@ -131,27 +131,44 @@ export interface WorkflowRunDetail {
 }
 
 // ---------------------------------------------------------------------------
-// Auth token helper reads #key= from the URL fragment and persists it to localStorage.
-// or from localStorage directly. Returns { Authorization: "Bearer <token>" } when
-// a token is present, else {} (NoAuth path — behavior unchanged).
+// Auth token helper reads #key= from the URL fragment and keeps it only for the
+// current browser tab. Query-string credentials are rejected by default because
+// they leak into server logs, browser history, analytics, and referrer headers.
 // ---------------------------------------------------------------------------
 
 const STORAGE_KEY = "eidentic_studio_key";
 
-export function authHeaders(): Record<string, string> {
+export function authHeaders(
+  opts: { allowQueryCredential?: boolean } = {},
+): Record<string, string> {
   if (typeof window !== "undefined") {
     const hashParams = new URLSearchParams(window.location.hash.startsWith("#") ? window.location.hash.slice(1) : window.location.hash);
     const queryParams = new URLSearchParams(window.location.search);
-    const keyFromUrl = hashParams.get("key") ?? queryParams.get("key");
+    const fragmentKey = hashParams.get("key");
+    const queryKey = queryParams.get("key");
+    const keyFromUrl = fragmentKey ?? (opts.allowQueryCredential === true ? queryKey : null);
+    // Always scrub credential-looking URL parameters, even when refusing to
+    // consume a query credential.
+    hashParams.delete("key");
+    queryParams.delete("key");
     if (keyFromUrl) {
-      localStorage.setItem(STORAGE_KEY, keyFromUrl);
-      hashParams.delete("key");
-      queryParams.delete("key");
+      sessionStorage.setItem(STORAGE_KEY, keyFromUrl);
+    }
+    if (fragmentKey !== null || queryKey !== null) {
       const query = queryParams.toString();
       const hash = hashParams.toString();
       window.history.replaceState(null, "", `${window.location.pathname}${query ? `?${query}` : ""}${hash ? `#${hash}` : ""}`);
     }
-    const token = localStorage.getItem(STORAGE_KEY);
+
+    // One-time compatibility migration: remove credentials left by older
+    // Studio versions from persistent localStorage and scope them to this tab.
+    const legacyToken = localStorage.getItem(STORAGE_KEY);
+    if (legacyToken && !sessionStorage.getItem(STORAGE_KEY)) {
+      sessionStorage.setItem(STORAGE_KEY, legacyToken);
+    }
+    if (legacyToken !== null) localStorage.removeItem(STORAGE_KEY);
+
+    const token = sessionStorage.getItem(STORAGE_KEY);
     if (token) return { Authorization: `Bearer ${token}` };
   }
   return {};
@@ -160,6 +177,7 @@ export function authHeaders(): Record<string, string> {
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     ...init,
+    referrerPolicy: "no-referrer",
     headers: { ...authHeaders(), ...(init?.headers as Record<string, string> | undefined) },
   });
   if (!res.ok) {

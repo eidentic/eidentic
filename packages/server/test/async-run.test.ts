@@ -40,7 +40,7 @@ async function waitForCompletion(
     });
     expect(res.status).toBe(200);
     const body = await res.json() as { status: string; output?: unknown; sessionId?: string };
-    if (body.status === "completed" || body.status === "failed" || body.status === "aborted") {
+    if (body.status !== "running") {
       return body;
     }
     // short spin for async settling
@@ -71,6 +71,27 @@ describe("POST /v1/agents/:agentId/runs — fire-and-poll async run", () => {
     expect(typeof body.sessionId).toBe("string");
     expect(body.sessionId.length).toBeGreaterThan(0);
     expect(body.status).toBe("running");
+  });
+
+  it("preserves non-success terminal subtypes in async status", async () => {
+    const store = new InMemoryStore();
+    const agent = new Agent({
+      id: "limited",
+      instructions: "",
+      model: new MockModel([textResponse("too expensive")]),
+      store,
+      policy: { maxTokens: 1 },
+    });
+    const app = createServer({ agents: { limited: agent }, preAuthRateLimiter: null });
+    const start = await app.request("/v1/agents/limited/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ input: "go" }),
+    });
+    expect(start.status).toBe(202);
+    const { runId } = await start.json() as { runId: string };
+    const status = await waitForCompletion(app, "limited", runId);
+    expect(status.status).toBe("max_tokens");
   });
 
   it("accepts a client-supplied sessionId", async () => {
@@ -262,7 +283,8 @@ describe("POST /v1/agents/:agentId/runs — fire-and-poll async run", () => {
     await waitForCompletion(app, "demo", body.runId, { authorization: "Bearer key-a" });
 
     const session = await store.getSession("apikey-async-sess");
-    expect(session?.apiKey).toBe("key-a");
+    expect(session?.apiKey).toMatch(/^eidentic\.credential\.sha256:[0-9a-f]{64}$/);
+    expect(session?.apiKey).not.toContain("key-a");
   });
 });
 
@@ -464,20 +486,24 @@ describe("[M10] AsyncRunRegistry bounded eviction", () => {
     expect(reg.get("r4")).toBeDefined();   // just added
   });
 
-  it("in-flight runs are never evicted under normal cap pressure", () => {
+  it("hard-rejects a new run when every bounded slot is in-flight", () => {
     const reg = new AsyncRunRegistry({ maxRuns: 2 });
 
     const base = { sessionId: "s", agentId: "a", status: "running" as const, owner: {} };
     reg.set({ ...base, runId: "inf1", createdAt: 1 });
     reg.set({ ...base, runId: "inf2", createdAt: 2 });
 
-    // Both slots full and both in-flight — adding a third should NOT evict either
-    reg.set({ ...base, runId: "inf3", createdAt: 3 });
+    // Both slots full and both in-flight — adding a third must fail without eviction.
+    expect(reg.set({ ...base, runId: "inf3", createdAt: 3 })).toBe(false);
 
-    // All three remain because no settled run was available to evict
     expect(reg.get("inf1")).toBeDefined();
     expect(reg.get("inf2")).toBeDefined();
-    expect(reg.get("inf3")).toBeDefined();
+    expect(reg.get("inf3")).toBeUndefined();
+  });
+
+  it("validates maxRuns as a positive safe integer", () => {
+    expect(() => new AsyncRunRegistry({ maxRuns: 0 })).toThrow(/positive safe integer/);
+    expect(() => new AsyncRunRegistry({ maxRuns: Number.POSITIVE_INFINITY })).toThrow(/positive safe integer/);
   });
 
   it("settled runs (completed/failed) are evicted before in-flight ones", () => {

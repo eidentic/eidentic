@@ -1,3 +1,4 @@
+import { sanitizeBoundaryText, sanitizeBoundaryValue } from "@eidentic/core";
 import type { Tool } from "@eidentic/core";
 import type { ToolContext } from "@eidentic/core";
 import type { TracerPort } from "@eidentic/types";
@@ -15,9 +16,50 @@ import { randomUUID } from "node:crypto";
  * Satisfied by the real SDK `Server` and by the in-memory fake used in tests.
  */
 export interface McpServerLike {
-  setRequestHandler(schema: unknown, handler: (req: any) => Promise<any>): void;
+  setRequestHandler(schema: unknown, handler: (req: any, extra?: any) => Promise<any>): void;
   connect(transport: unknown): Promise<void>;
   close(): Promise<void>;
+}
+
+/**
+ * Request metadata supplied by the MCP SDK transport. Protocol parameters are
+ * deliberately kept separate from transport metadata so authorization code
+ * cannot accidentally treat caller-controlled tool arguments as credentials.
+ */
+export interface McpTransportContext {
+  /** The validated MCP protocol request. This is caller-controlled data. */
+  request: unknown;
+  /** The SDK RequestHandlerExtra value (transport/session metadata). */
+  transport?: unknown;
+  /** Transport-verified MCP auth info, when the transport supplies it. */
+  authInfo?: unknown;
+  /** HTTP request metadata supplied by the SDK transport, when available. */
+  requestInfo?: unknown;
+}
+
+/**
+ * Minimal context passed downstream after authentication. Raw transport/request metadata is
+ * intentionally not retained here because it may contain bearer tokens or cookies.
+ */
+export interface McpAuthenticatedContext {
+  /** The validated MCP protocol request (still caller-controlled). */
+  request: unknown;
+  /** Verified application principal, or a credential-free projection of SDK authInfo. */
+  principal?: unknown;
+}
+
+/** Explicit success result for authenticateConnection when it resolves a principal. */
+export interface McpAuthenticationSuccess {
+  principal: unknown;
+}
+
+export type McpAuthenticationResult = boolean | McpAuthenticationSuccess | null | undefined;
+
+/** Identity fields accepted by Agent.query after a trusted principal mapping. */
+export interface McpAgentIdentity {
+  userId?: string;
+  orgId?: string;
+  apiKey?: string;
 }
 
 /**
@@ -27,8 +69,9 @@ export interface McpServerLike {
  * Fields:
  * - `method` — the MCP method that was invoked (`"tools/list"` or `"tools/call"`).
  * - `toolName` — the tool name from the request (only present for `tools/call`).
- * - `principal` — opaque context from `authenticateConnection` or the raw request object,
- *   whichever is available. Cast to your auth context type to extract identity information.
+ * - `principal` — the verified principal returned by `authenticateConnection`, or transport
+ *   `authInfo` when the MCP SDK transport authenticated the request. Raw protocol data is never
+ *   reported as a principal.
  * - `startedAt` — wall-clock timestamp (ms since epoch) when the handler was entered.
  * - `durationMs` — handler wall-clock duration in milliseconds.
  * - `outcome` — `"ok"` for successful calls, `"denied"` for auth/authz rejections, `"error"` for
@@ -38,7 +81,7 @@ export interface McpServerLike {
 export interface McpAuditEvent {
   method: "tools/list" | "tools/call";
   toolName?: string;
-  /** Whatever context was available on the raw request (connection context or raw req). */
+  /** Verified principal only; never caller-controlled MCP request parameters. */
   principal?: unknown;
   startedAt: number;
   durationMs: number;
@@ -58,12 +101,14 @@ export interface McpServerOptions {
    * Use this to enforce connection-level access control, e.g. validating a bearer token embedded
    * in a request header, checking a shared secret, or verifying a session cookie.
    *
-   * The callback receives whatever `connectionContext` the transport makes available. For the
-   * structural fake used in tests the value is whatever the test passes as the second argument
-   * to `invoke`; for real transports it is the raw request object (or `undefined` for stdio).
+   * The callback receives a structured context containing the caller-controlled protocol
+   * `request` and the SDK's separate `transport`, `authInfo`, and `requestInfo` metadata.
+   * Return `true` to accept the transport's verified `authInfo`, or
+   * `{ principal }` to supply an application principal.
    *
-   * **Fully back-compat:** when this option is not set, all requests are allowed through
-   * unchanged — existing behaviour is preserved.
+   * When this option is not set, direct handler/stdio requests retain the legacy open behavior.
+   * Streamable HTTP setup is stricter: it refuses to start unless this hook is configured or
+   * `allowUnauthenticatedHttp: true` is explicitly selected for isolated local development.
    *
    * **Note:** per-call `authorize` still applies on top of `authenticateConnection`. A request
    * must pass transport-level authentication first, then each individual `tools/call` is gated
@@ -71,13 +116,16 @@ export interface McpServerOptions {
    *
    * @example
    * ```ts
-   * authenticateConnection: (ctx) => {
-   *   const token = (ctx as Request)?.headers?.get("authorization") ?? "";
-   *   return token === `Bearer ${process.env.MCP_SECRET}`;
+   * authenticateConnection: async (ctx) => {
+   *   const token = readBearerFromRequestInfo(ctx.requestInfo);
+   *   const principal = await verifyToken(token);
+   *   return principal ? { principal } : false;
    * }
    * ```
    */
-  authenticateConnection?: (connectionContext: unknown) => boolean | Promise<boolean>;
+  authenticateConnection?: (
+    context: McpTransportContext,
+  ) => McpAuthenticationResult | Promise<McpAuthenticationResult>;
 
   /**
    * Factory for the `ToolContext` passed to each `tool.execute` call.
@@ -90,10 +138,10 @@ export interface McpServerOptions {
    * Override this to inject scope, a `PermissionPolicy`, secrets, or a custom `AbortSignal`.
    * Example:
    * ```ts
-   * ctxFactory: () => ({ policy: myPermissionPolicy, secrets: mySecretsPort })
+   * ctxFactory: ({ principal }) => ({ policy: policyFor(principal), secrets: mySecretsPort })
    * ```
    */
-  ctxFactory?: () => ToolContext;
+  ctxFactory?: (context: McpAuthenticatedContext) => ToolContext;
 
   /**
    * Per-call authorization hook. Called before every `tools/call` dispatch with the tool name
@@ -102,12 +150,12 @@ export interface McpServerOptions {
    *
    * When not set, ALL registered tools may be called by any connected client — there is no
    * per-call authorization. Use this hook to enforce fine-grained access control, e.g. based on
-   * the calling client's identity, the requested tool, or the call arguments.
+   * the calling client's verified identity, the requested tool, or the call arguments. The third
+   * callback argument contains the authenticated transport context and `principal`.
    *
-   * **Important:** this hook is NOT a substitute for transport-level authentication. You must
-   * put the HTTP transport behind your own auth middleware (e.g. `Authorization` header check,
-   * session validation) BEFORE relying on this hook. The hook only fires for requests that have
-   * already reached the MCP server.
+   * **Important:** this hook is NOT a substitute for transport-level authentication. Configure
+   * `authenticateConnection` (and, where appropriate, upstream session/mTLS middleware) before
+   * relying on per-call authorization.
    *
    * Example (allowlist):
    * ```ts
@@ -119,7 +167,37 @@ export interface McpServerOptions {
    * authorize: (toolName, input) => myClient.role === "admin" || toolName !== "bash"
    * ```
    */
-  authorize?: (toolName: string, input: unknown) => boolean | Promise<boolean>;
+  authorize?: (
+    toolName: string,
+    input: unknown,
+    context: McpAuthenticatedContext,
+  ) => boolean | Promise<boolean>;
+
+  /**
+   * Map a verified MCP principal to Agent.query identity fields. This hook is
+   * only used for agent-as-tool adapters; ordinary tools may ignore it.
+   */
+  agentIdentity?: (
+    principal: unknown,
+    context: McpAuthenticatedContext,
+  ) => McpAgentIdentity | Promise<McpAgentIdentity>;
+
+  /**
+   * Restore the pre-hardening behavior where MCP tool arguments named
+   * userId/orgId/apiKey are forwarded into Agent.query.
+   *
+   * @deprecated Caller-supplied identity is spoofable. Prefer agentIdentity.
+   * @default false
+   */
+  allowUntrustedIdentityArgs?: boolean;
+
+  /**
+   * Permit Streamable HTTP setup without an authentication hook.
+   *
+   * @deprecated Public HTTP MCP without transport authentication is unsafe. Stdio is unaffected.
+   * @default false
+   */
+  allowUnauthenticatedHttp?: boolean;
 
   /**
    * Opt-in to registering tools whose `sideEffect` is `"destructive"`.
@@ -180,6 +258,179 @@ export interface McpServerOptions {
    * spans feed your distributed tracing backend; `onAudit` feeds your structured audit log.
    */
   tracer?: TracerPort;
+}
+
+const MCP_CONTEXT = Symbol("eidentic.mcp.context");
+
+function toTransportContext(request: unknown, transport?: unknown): McpTransportContext {
+  const extra = transport != null && typeof transport === "object"
+    ? transport as Record<string, unknown>
+    : undefined;
+  return {
+    request,
+    transport,
+    ...(extra?.["authInfo"] !== undefined ? { authInfo: extra["authInfo"] } : {}),
+    ...(extra?.["requestInfo"] !== undefined ? { requestInfo: extra["requestInfo"] } : {}),
+  };
+}
+
+async function authenticateRequest(
+  opts: McpServerOptions | undefined,
+  context: McpTransportContext,
+): Promise<{ allowed: boolean; context: McpAuthenticatedContext }> {
+  const transportPrincipal = safeTransportPrincipal(context.authInfo);
+  const authenticatedContext: McpAuthenticatedContext = {
+    request: context.request,
+    ...(transportPrincipal !== undefined ? { principal: transportPrincipal } : {}),
+  };
+  if (opts?.authenticateConnection === undefined) {
+    return { allowed: true, context: authenticatedContext };
+  }
+  try {
+    const decision = await opts.authenticateConnection(context);
+    if (decision === false || decision === null || decision === undefined) {
+      return { allowed: false, context: authenticatedContext };
+    }
+    if (decision === true) {
+      return { allowed: true, context: authenticatedContext };
+    }
+    if (decision.principal === undefined) {
+      return { allowed: false, context: authenticatedContext };
+    }
+    return {
+      allowed: true,
+      context: {
+        ...authenticatedContext,
+        ...(decision.principal !== undefined ? { principal: decision.principal } : {}),
+      },
+    };
+  } catch {
+    return { allowed: false, context: authenticatedContext };
+  }
+}
+
+function safeTransportPrincipal(authInfo: unknown): unknown | undefined {
+  if (authInfo === null || typeof authInfo !== "object") return undefined;
+  const raw = authInfo as Record<string, unknown>;
+  const principal: Record<string, unknown> = {};
+  if (typeof raw["clientId"] === "string") principal["clientId"] = raw["clientId"];
+  if (Array.isArray(raw["scopes"])) {
+    principal["scopes"] = raw["scopes"]
+      .filter((scope): scope is string => typeof scope === "string")
+      .slice(0, 256);
+  }
+  if (typeof raw["expiresAt"] === "number" && Number.isFinite(raw["expiresAt"])) {
+    principal["expiresAt"] = raw["expiresAt"];
+  }
+  if (typeof raw["resource"] === "string") principal["resource"] = raw["resource"];
+  return Object.keys(principal).length > 0 ? principal : undefined;
+}
+
+const SENSITIVE_PRINCIPAL_KEY = /(?:token|secret|password|authorization|cookie|credential|api[-_]?key)/i;
+
+function principalForAudit(value: unknown, seen = new WeakSet<object>(), depth = 0): unknown {
+  if (value === null || typeof value !== "object") {
+    return typeof value === "string" && value.length > 2048 ? `${value.slice(0, 2048)}…` : value;
+  }
+  if (seen.has(value) || depth >= 6) return "[TRUNCATED]";
+  seen.add(value);
+  if (Array.isArray(value)) {
+    return value.slice(0, 256).map((item) => principalForAudit(item, seen, depth + 1));
+  }
+  const output: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value as Record<string, unknown>).slice(0, 256)) {
+    output[key] = SENSITIVE_PRINCIPAL_KEY.test(key)
+      ? "[REDACTED]"
+      : principalForAudit(item, seen, depth + 1);
+  }
+  return output;
+}
+
+function toolContextFor(
+  opts: McpServerOptions | undefined,
+  context: McpAuthenticatedContext,
+): ToolContext {
+  const base = opts?.ctxFactory ? opts.ctxFactory(context) : {};
+  const copy = Object.assign({}, base) as ToolContext & { [MCP_CONTEXT]?: McpAuthenticatedContext };
+  Object.defineProperty(copy, MCP_CONTEXT, { value: context, enumerable: false });
+  return copy;
+}
+
+function contextFromToolContext(ctx: ToolContext | undefined): McpAuthenticatedContext | undefined {
+  return (ctx as ToolContext & { [MCP_CONTEXT]?: McpAuthenticatedContext } | undefined)?.[MCP_CONTEXT];
+}
+
+function untrustedAgentIdentity(args: Record<string, unknown>): McpAgentIdentity {
+  return {
+    ...(typeof args["userId"] === "string" ? { userId: args["userId"] } : {}),
+    ...(typeof args["orgId"] === "string" ? { orgId: args["orgId"] } : {}),
+    ...(typeof args["apiKey"] === "string" ? { apiKey: args["apiKey"] } : {}),
+  };
+}
+
+function nonEmptyIdentityString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 && value.length <= 1_024
+    ? value
+    : undefined;
+}
+
+function normalizeMappedAgentIdentity(value: unknown): McpAgentIdentity {
+  if (value === null || typeof value !== "object") return {};
+  const raw = value as Record<string, unknown>;
+  const identity: McpAgentIdentity = {};
+  for (const field of ["userId", "orgId", "apiKey"] as const) {
+    if (raw[field] === undefined) continue;
+    const normalized = nonEmptyIdentityString(raw[field]);
+    if (normalized === undefined) {
+      throw new Error(`MCP agent identity field '${field}' must be a non-empty string`);
+    }
+    identity[field] = normalized;
+  }
+  return identity;
+}
+
+function defaultAgentIdentity(principal: unknown): McpAgentIdentity {
+  if (principal === null || typeof principal !== "object") return {};
+  const raw = principal as Record<string, unknown>;
+  const userId = nonEmptyIdentityString(raw["userId"]);
+  const orgId = nonEmptyIdentityString(raw["orgId"]);
+  if (userId !== undefined || orgId !== undefined) {
+    return {
+      userId: userId ?? `mcp-org:${orgId}`,
+      ...(orgId !== undefined ? { orgId } : {}),
+    };
+  }
+  for (const field of ["id", "subject", "sub"] as const) {
+    const subject = nonEmptyIdentityString(raw[field]);
+    if (subject !== undefined) return { userId: `mcp-subject:${subject}` };
+  }
+  const clientId = nonEmptyIdentityString(raw["clientId"]);
+  return clientId !== undefined ? { userId: `mcp-client:${clientId}` } : {};
+}
+
+function hasAgentIdentity(identity: McpAgentIdentity): boolean {
+  return identity.userId !== undefined || identity.orgId !== undefined || identity.apiKey !== undefined;
+}
+
+async function resolveAgentQueryIdentity(
+  opts: McpServerOptions | undefined,
+  context: McpAuthenticatedContext,
+  args: Record<string, unknown>,
+): Promise<McpAgentIdentity> {
+  const legacyIdentity = opts?.allowUntrustedIdentityArgs === true
+    ? untrustedAgentIdentity(args)
+    : {};
+  const trustedIdentity = opts?.agentIdentity !== undefined
+    ? normalizeMappedAgentIdentity(await opts.agentIdentity(context.principal, context))
+    : defaultAgentIdentity(context.principal);
+  const identity = { ...legacyIdentity, ...trustedIdentity };
+  const authenticated = opts?.authenticateConnection !== undefined || context.principal !== undefined;
+  if (authenticated && !hasAgentIdentity(identity)) {
+    throw new Error(
+      "Authenticated MCP agent calls require a stable principal identity; configure agentIdentity",
+    );
+  }
+  return identity;
 }
 
 // ---------------------------------------------------------------------------
@@ -249,9 +500,9 @@ function filterDestructiveTools(tools: Tool[], opts?: McpServerOptions): Tool[] 
  *
  * **Security — read before using in production:**
  *
- * - **No authentication.** This function does NOT authenticate connecting clients. Any client
- *   that can reach the MCP transport can call any registered tool. You MUST put the HTTP
- *   transport behind your own auth middleware (e.g. bearer-token, session cookie, mTLS).
+ * - **Authentication is opt-in for direct/stdio use.** Configure
+ *   `opts.authenticateConnection` to verify transport metadata. Streamable HTTP wrappers refuse
+ *   unauthenticated setup unless the unsafe local-development escape hatch is selected.
  *
  * - **No authorization by default.** All registered tools are callable by all clients unless
  *   you provide an `opts.authorize` hook. Use the hook to enforce per-call access control.
@@ -307,23 +558,15 @@ export function serveTools(
     isError: true,
   } as const;
 
-  async function checkAuth(req: unknown): Promise<boolean> {
-    if (opts?.authenticateConnection === undefined) return true;
-    try {
-      return await opts.authenticateConnection(req);
-    } catch {
-      return false;
-    }
-  }
-
-  server.setRequestHandler(LIST_SCHEMA, async (req: unknown) => {
+  server.setRequestHandler(LIST_SCHEMA, async (req: unknown, extra?: unknown) => {
     const startedAt = Date.now();
     const span = opts?.tracer?.startSpan("mcp.handle_request", { "mcp.method": "tools/list" });
-    if (!(await checkAuth(req))) {
+    const auth = await authenticateRequest(opts, toTransportContext(req, extra));
+    if (!auth.allowed) {
       const durationMs = Date.now() - startedAt;
       fireAudit(opts?.onAudit, {
         method: "tools/list",
-        principal: req,
+        principal: principalForAudit(auth.context.principal),
         startedAt,
         durationMs,
         outcome: "denied",
@@ -343,7 +586,7 @@ export function serveTools(
       })),
     };
     const durationMs = Date.now() - startedAt;
-    fireAudit(opts?.onAudit, { method: "tools/list", principal: req, startedAt, durationMs, outcome: "ok" });
+    fireAudit(opts?.onAudit, { method: "tools/list", principal: principalForAudit(auth.context.principal), startedAt, durationMs, outcome: "ok" });
     span?.setAttribute("mcp.duration_ms", durationMs);
     span?.setAttribute("mcp.outcome", "ok");
     span?.setStatus("ok");
@@ -351,7 +594,7 @@ export function serveTools(
     return result;
   });
 
-  server.setRequestHandler(CALL_SCHEMA, async (req: any) => {
+  server.setRequestHandler(CALL_SCHEMA, async (req: any, extra?: unknown) => {
     const startedAt = Date.now();
     const name: string = req?.params?.name ?? req?.name;
     const args: Record<string, unknown> = req?.params?.arguments ?? req?.arguments ?? {};
@@ -360,12 +603,13 @@ export function serveTools(
       ...(name ? { "mcp.tool.name": name } : {}),
     });
 
-    if (!(await checkAuth(req))) {
+    const auth = await authenticateRequest(opts, toTransportContext(req, extra));
+    if (!auth.allowed) {
       const durationMs = Date.now() - startedAt;
       fireAudit(opts?.onAudit, {
         method: "tools/call",
         toolName: name,
-        principal: req,
+        principal: principalForAudit(auth.context.principal),
         startedAt,
         durationMs,
         outcome: "denied",
@@ -385,7 +629,7 @@ export function serveTools(
       fireAudit(opts?.onAudit, {
         method: "tools/call",
         toolName: name,
-        principal: req,
+        principal: principalForAudit(auth.context.principal),
         startedAt,
         durationMs,
         outcome: "error",
@@ -405,7 +649,7 @@ export function serveTools(
     if (opts?.authorize !== undefined) {
       let allowed: boolean;
       try {
-        allowed = await opts.authorize(name, args);
+        allowed = await opts.authorize(name, args, auth.context);
       } catch {
         allowed = false;
       }
@@ -415,7 +659,7 @@ export function serveTools(
         fireAudit(opts?.onAudit, {
           method: "tools/call",
           toolName: name,
-          principal: req,
+          principal: principalForAudit(auth.context.principal),
           startedAt,
           durationMs,
           outcome: "denied",
@@ -440,7 +684,7 @@ export function serveTools(
       fireAudit(opts?.onAudit, {
         method: "tools/call",
         toolName: name,
-        principal: req,
+        principal: principalForAudit(auth.context.principal),
         startedAt,
         durationMs,
         outcome: "error",
@@ -456,15 +700,15 @@ export function serveTools(
       };
     }
 
-    const ctx: ToolContext = opts?.ctxFactory ? opts.ctxFactory() : {};
+    const ctx = toolContextFor(opts, auth.context);
 
     try {
-      const result = await tool.execute(parsed.value, ctx);
+      const result = sanitizeBoundaryValue(await tool.execute(parsed.value, ctx));
       const durationMs = Date.now() - startedAt;
       fireAudit(opts?.onAudit, {
         method: "tools/call",
         toolName: name,
-        principal: req,
+        principal: principalForAudit(auth.context.principal),
         startedAt,
         durationMs,
         outcome: "ok",
@@ -477,12 +721,12 @@ export function serveTools(
         content: [{ type: "text", text: JSON.stringify(result) }],
       };
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = sanitizeBoundaryText(e instanceof Error ? e.message : String(e), 500);
       const durationMs = Date.now() - startedAt;
       fireAudit(opts?.onAudit, {
         method: "tools/call",
         toolName: name,
-        principal: req,
+        principal: principalForAudit(auth.context.principal),
         startedAt,
         durationMs,
         outcome: "error",
@@ -515,9 +759,10 @@ export interface AgentLike {
  *
  * **Security — read before using in production:**
  *
- * This function does NOT authenticate or authorize calling clients. Any MCP client that can
- * reach the transport may invoke the agent. Put the transport behind your own auth middleware.
- * For per-call control, use `serveTools` or `mcpServer` with an `authorize` hook instead.
+ * Without `opts`, any MCP client that reaches the transport may invoke the agent. Configure
+ * `authenticateConnection` for transport authentication and `authorize` for per-call policy.
+ * Authenticated calls must also resolve to a stable Agent identity, either through a verified
+ * principal/client id or an explicit `agentIdentity` mapper.
  *
  * **Error terminals:** when the agent's final `result` event has a non-success `subtype`
  * (e.g. `"error"`, `"aborted"`, `"guardrail"`, `"max_tokens"`, `"max_turns"`, etc.), the
@@ -532,11 +777,26 @@ export function serveAgent(
   agentId: string,
   agent: AgentLike,
   description = `Agent ${agentId}`,
+  opts?: Pick<
+    McpServerOptions,
+    "authenticateConnection" | "authorize" | "agentIdentity" | "allowUntrustedIdentityArgs"
+  >,
 ): void {
   const LIST_SCHEMA = "tools/list" as unknown;
   const CALL_SCHEMA = "tools/call" as unknown;
 
-  server.setRequestHandler(LIST_SCHEMA, async (_req: unknown) => {
+  server.setRequestHandler(LIST_SCHEMA, async (req: unknown, extra?: unknown) => {
+    const auth = await authenticateRequest(opts, toTransportContext(req, extra));
+    if (!auth.allowed) {
+      return { content: [{ type: "text", text: "connection not authenticated" }], isError: true };
+    }
+    const identityProperties = opts?.allowUntrustedIdentityArgs === true
+      ? {
+          userId: { type: "string", description: "Deprecated caller-supplied user identity." },
+          orgId: { type: "string", description: "Deprecated caller-supplied organization identity." },
+          apiKey: { type: "string", description: "Deprecated caller-supplied API-key identity." },
+        }
+      : {};
     return {
       tools: [
         {
@@ -547,9 +807,7 @@ export function serveAgent(
             properties: {
               input: { type: "string", description: "The query to send to the agent." },
               sessionId: { type: "string", description: "Optional session/context id. Defaults to a fresh UUID." },
-              userId: { type: "string", description: "Optional user identity for session ownership." },
-              orgId: { type: "string", description: "Optional organization identity for session ownership." },
-              apiKey: { type: "string", description: "Optional API key identity for session ownership." },
+              ...identityProperties,
             },
             required: ["input"],
           },
@@ -558,7 +816,11 @@ export function serveAgent(
     };
   });
 
-  server.setRequestHandler(CALL_SCHEMA, async (req: any) => {
+  server.setRequestHandler(CALL_SCHEMA, async (req: any, extra?: unknown) => {
+    const auth = await authenticateRequest(opts, toTransportContext(req, extra));
+    if (!auth.allowed) {
+      return { content: [{ type: "text", text: "connection not authenticated" }], isError: true };
+    }
     const name: string = req?.params?.name ?? req?.name;
     if (name !== agentId) {
       return { content: [{ type: "text", text: `unknown tool '${name}'` }], isError: true };
@@ -566,12 +828,22 @@ export function serveAgent(
     const input: string = req?.params?.arguments?.input ?? req?.arguments?.input ?? "";
     const args = (req?.params?.arguments ?? req?.arguments ?? {}) as Record<string, unknown>;
     const sessionId = typeof args["sessionId"] === "string" && args["sessionId"].length > 0 ? args["sessionId"] : randomUUID();
+    if (opts?.authorize !== undefined) {
+      let allowed = false;
+      try {
+        allowed = await opts.authorize(name, args, auth.context);
+      } catch {
+        allowed = false;
+      }
+      if (!allowed) {
+        return { content: [{ type: "text", text: `tool call not authorized: '${name}'` }], isError: true };
+      }
+    }
     try {
+      const identity = await resolveAgentQueryIdentity(opts, auth.context, args);
       const result = await agent.query(input, {
         sessionId,
-        ...(typeof args["userId"] === "string" ? { userId: args["userId"] } : {}),
-        ...(typeof args["orgId"] === "string" ? { orgId: args["orgId"] } : {}),
-        ...(typeof args["apiKey"] === "string" ? { apiKey: args["apiKey"] } : {}),
+        ...identity,
       });
       // If it's an async iterable, drain it and take the last value.
       let finalOutput: unknown = result;
@@ -600,7 +872,7 @@ export function serveAgent(
 
       return { content: [{ type: "text", text }], ...(isAgentError ? { isError: true } : {}) };
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = sanitizeBoundaryText(e instanceof Error ? e.message : String(e), 500);
       return { content: [{ type: "text", text: msg }], isError: true };
     }
   });
@@ -680,10 +952,10 @@ export interface McpServerToolsOpts extends McpServerOptions {
  *
  * **Security — read before deploying:**
  *
- * - **No authentication.** `mcpServer` does NOT authenticate clients. Any client that
- *   can reach the transport can call any registered tool. For HTTP transport, you MUST
- *   put it behind your own auth middleware (bearer token, session, mTLS, etc.) before
- *   exposing it to untrusted networks.
+ * - **Authentication is opt-in for stdio.** Configure `authenticateConnection` when the
+ *   transport supplies verifiable caller metadata. Streamable HTTP refuses to start without
+ *   that hook unless `allowUnauthenticatedHttp: true` is explicitly selected for isolated
+ *   local development.
  *
  * - **No per-call authorization by default.** Provide an `authorize` hook to gate
  *   individual tool calls. Without it, all registered tools are callable by all clients.
@@ -703,7 +975,7 @@ export interface McpServerToolsOpts extends McpServerOptions {
  * await handle.serveStdio(); // blocks
  * ```
  *
- * Usage (HTTP — put behind auth middleware!):
+ * Usage (HTTP — configure `authenticateConnection` first):
  * ```ts
  * import { createServer } from "node:http";
  * const handle = await mcpServer({ tools });
@@ -735,18 +1007,24 @@ export async function mcpServer(opts: McpServerToolsOpts): Promise<McpServerHand
     // sideEffect is "destructive" — it will be filtered out unless the caller opts in.
     const aid = agentId;
     const adesc = agentDescription ?? `Agent ${aid}`;
+    const identityProperties = serverOpts.allowUntrustedIdentityArgs === true
+      ? {
+          userId: { type: "string", description: "Deprecated caller-supplied user identity." },
+          orgId: { type: "string", description: "Deprecated caller-supplied organization identity." },
+          apiKey: { type: "string", description: "Deprecated caller-supplied API-key identity." },
+        }
+      : {};
     allTools.push({
       id: aid,
       description: adesc,
       sideEffect: "destructive",
+      requiredSecrets: [],
       jsonSchema: {
         type: "object",
         properties: {
           input: { type: "string", description: "The query to send to the agent." },
           sessionId: { type: "string", description: "Optional session/context id. Defaults to a fresh UUID." },
-          userId: { type: "string", description: "Optional user identity for session ownership." },
-          orgId: { type: "string", description: "Optional organization identity for session ownership." },
-          apiKey: { type: "string", description: "Optional API key identity for session ownership." },
+          ...identityProperties,
         },
         required: ["input"],
       },
@@ -757,14 +1035,16 @@ export async function mcpServer(opts: McpServerToolsOpts): Promise<McpServerHand
         }
         return { ok: true as const, value: obj };
       },
-      execute: async (input: unknown): Promise<unknown> => {
+      execute: async (input: unknown, ctx?: ToolContext): Promise<unknown> => {
         const queryInput = (input as { input: string }).input;
-        const obj = input as { sessionId?: unknown; userId?: unknown; orgId?: unknown; apiKey?: unknown };
+        const obj = input as Record<string, unknown>;
+        const requestContext = contextFromToolContext(ctx);
+        const identity = requestContext
+          ? await resolveAgentQueryIdentity(serverOpts, requestContext, obj)
+          : {};
         const result = await agent.query(queryInput, {
           sessionId: typeof obj.sessionId === "string" && obj.sessionId.length > 0 ? obj.sessionId : randomUUID(),
-          ...(typeof obj.userId === "string" ? { userId: obj.userId } : {}),
-          ...(typeof obj.orgId === "string" ? { orgId: obj.orgId } : {}),
-          ...(typeof obj.apiKey === "string" ? { apiKey: obj.apiKey } : {}),
+          ...identity,
         });
         let finalOutput: unknown = result;
         if (result != null && typeof result === "object" && Symbol.asyncIterator in (result as object)) {
@@ -805,8 +1085,9 @@ export async function mcpServer(opts: McpServerToolsOpts): Promise<McpServerHand
  *
  * **Security — read before deploying:**
  *
- * - **No authentication.** Any MCP client that reaches the transport can call all registered
- *   tools. Put the HTTP transport behind your own auth middleware.
+ * - **Authentication is opt-in for stdio.** Configure `opts.authenticateConnection` when the
+ *   transport supplies verifiable caller metadata. Streamable HTTP fails closed without that
+ *   hook unless the unsafe local-development escape hatch is explicitly selected.
  * - **No per-call authorization by default.** Pass `opts.authorize` to gate individual calls.
  * - **Destructive tools are skipped by default** (with a warning). Pass `opts.allowDestructive`
  *   or `opts.authorize` to opt in. Do NOT expose destructive tools to untrusted clients.
@@ -822,7 +1103,7 @@ export async function mcpServer(opts: McpServerToolsOpts): Promise<McpServerHand
  * await serveStdio(); // blocks
  * ```
  *
- * Usage (HTTP — put behind auth middleware!):
+ * Usage (HTTP — configure `authenticateConnection` first):
  * ```ts
  * import { createServer } from "node:http";
  * const { serveHttp } = await createMcpServer(tools);
@@ -872,24 +1153,16 @@ export async function createMcpServer(
     isError: true,
   } as const;
 
-  async function checkAuthSdk(req: unknown): Promise<boolean> {
-    if (opts?.authenticateConnection === undefined) return true;
-    try {
-      return await opts.authenticateConnection(req);
-    } catch {
-      return false;
-    }
-  }
-
   // Register with REAL schema objects so the SDK validates request shapes.
-  server.setRequestHandler(ListToolsRequestSchema, async (req: unknown) => {
+  server.setRequestHandler(ListToolsRequestSchema, async (req: unknown, extra: unknown) => {
     const startedAt = Date.now();
     const span = opts?.tracer?.startSpan("mcp.handle_request", { "mcp.method": "tools/list" });
-    if (!(await checkAuthSdk(req))) {
+    const auth = await authenticateRequest(opts, toTransportContext(req, extra));
+    if (!auth.allowed) {
       const durationMs = Date.now() - startedAt;
       fireAudit(opts?.onAudit, {
         method: "tools/list",
-        principal: req,
+        principal: principalForAudit(auth.context.principal),
         startedAt,
         durationMs,
         outcome: "denied",
@@ -909,7 +1182,7 @@ export async function createMcpServer(
       })),
     };
     const durationMs = Date.now() - startedAt;
-    fireAudit(opts?.onAudit, { method: "tools/list", principal: req, startedAt, durationMs, outcome: "ok" });
+    fireAudit(opts?.onAudit, { method: "tools/list", principal: principalForAudit(auth.context.principal), startedAt, durationMs, outcome: "ok" });
     span?.setAttribute("mcp.duration_ms", durationMs);
     span?.setAttribute("mcp.outcome", "ok");
     span?.setStatus("ok");
@@ -917,7 +1190,7 @@ export async function createMcpServer(
     return result;
   });
 
-  server.setRequestHandler(CallToolRequestSchema, async (req: any) => {
+  server.setRequestHandler(CallToolRequestSchema, async (req: any, extra: unknown) => {
     const startedAt = Date.now();
     const name: string = req?.params?.name;
     const args: Record<string, unknown> = req?.params?.arguments ?? {};
@@ -926,12 +1199,13 @@ export async function createMcpServer(
       ...(name ? { "mcp.tool.name": name } : {}),
     });
 
-    if (!(await checkAuthSdk(req))) {
+    const auth = await authenticateRequest(opts, toTransportContext(req, extra));
+    if (!auth.allowed) {
       const durationMs = Date.now() - startedAt;
       fireAudit(opts?.onAudit, {
         method: "tools/call",
         toolName: name,
-        principal: req,
+        principal: principalForAudit(auth.context.principal),
         startedAt,
         durationMs,
         outcome: "denied",
@@ -951,7 +1225,7 @@ export async function createMcpServer(
       fireAudit(opts?.onAudit, {
         method: "tools/call",
         toolName: name,
-        principal: req,
+        principal: principalForAudit(auth.context.principal),
         startedAt,
         durationMs,
         outcome: "error",
@@ -971,7 +1245,7 @@ export async function createMcpServer(
     if (opts?.authorize !== undefined) {
       let allowed: boolean;
       try {
-        allowed = await opts.authorize(name, args);
+        allowed = await opts.authorize(name, args, auth.context);
       } catch {
         allowed = false;
       }
@@ -981,7 +1255,7 @@ export async function createMcpServer(
         fireAudit(opts?.onAudit, {
           method: "tools/call",
           toolName: name,
-          principal: req,
+          principal: principalForAudit(auth.context.principal),
           startedAt,
           durationMs,
           outcome: "denied",
@@ -1005,7 +1279,7 @@ export async function createMcpServer(
       fireAudit(opts?.onAudit, {
         method: "tools/call",
         toolName: name,
-        principal: req,
+        principal: principalForAudit(auth.context.principal),
         startedAt,
         durationMs,
         outcome: "error",
@@ -1021,15 +1295,15 @@ export async function createMcpServer(
       };
     }
 
-    const ctx: ToolContext = opts?.ctxFactory ? opts.ctxFactory() : {};
+    const ctx = toolContextFor(opts, auth.context);
 
     try {
-      const result = await tool.execute(parsed.value, ctx);
+      const result = sanitizeBoundaryValue(await tool.execute(parsed.value, ctx));
       const durationMs = Date.now() - startedAt;
       fireAudit(opts?.onAudit, {
         method: "tools/call",
         toolName: name,
-        principal: req,
+        principal: principalForAudit(auth.context.principal),
         startedAt,
         durationMs,
         outcome: "ok",
@@ -1042,12 +1316,12 @@ export async function createMcpServer(
         content: [{ type: "text", text: JSON.stringify(result) }],
       };
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = sanitizeBoundaryText(e instanceof Error ? e.message : String(e), 500);
       const durationMs = Date.now() - startedAt;
       fireAudit(opts?.onAudit, {
         method: "tools/call",
         toolName: name,
-        principal: req,
+        principal: principalForAudit(auth.context.principal),
         startedAt,
         durationMs,
         outcome: "error",
@@ -1073,6 +1347,11 @@ export async function createMcpServer(
     },
 
     serveHttp(httpOpts?: { sessionIdGenerator?: () => string }) {
+      if (opts?.authenticateConnection === undefined && opts?.allowUnauthenticatedHttp !== true) {
+        throw new Error(
+          "MCP Streamable HTTP requires authenticateConnection; set allowUnauthenticatedHttp: true only for an isolated local development transport",
+        );
+      }
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: httpOpts?.sessionIdGenerator,
       });

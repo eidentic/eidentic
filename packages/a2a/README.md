@@ -28,7 +28,38 @@ app.route("/", a2aRoutes({
     description: "Handles customer support queries.",
     version: "1.0.0",
   },
+  auth: {
+    verify: async (req) => verifyBearer(req.headers.get("authorization")),
+  },
+  maxBodyBytes: 1_048_576,
+  maxTextBytes: 262_144,
+  maxParts: 128,
+  maxOutputBytes: 1_048_576,
+  maxRunMs: 60_000,
+  maxConcurrentRuns: 32,
 }));
+```
+
+Return a stable verified principal object when possible (`{ id, userId, orgId }`). A verifier that
+returns a raw credential string remains supported, but the server hashes it to an opaque identity
+and never forwards the credential into `Agent.query`. The legacy raw behavior requires the explicit
+`allowRawCredentialIdentity: true` compatibility flag.
+
+The JSON-RPC endpoint is fail-closed when `auth` is omitted; the discovery card remains public.
+`unsafeAllowUnauthenticated: true` restores the old open endpoint only for a controlled migration.
+Agent runs receive an abort signal and are bounded by concurrent-run, wall-clock, and output-byte
+limits. Oversized results are neither stored nor returned.
+
+Server request limits are enforced on streamed UTF-8 bytes, not only `Content-Length`. The HTTP
+client applies a 30-second overall timeout and a 1 MiB decompressed response cap by default; both
+are configurable, and per-call `AbortSignal` values are propagated from tool execution:
+
+```ts
+const remote = httpA2ATransport("https://agent.example", {
+  timeoutMs: 15_000,
+  maxResponseBytes: 512_000,
+  headers: { Authorization: `Bearer ${token}` },
+});
 ```
 
 ### Call a remote A2A agent as a Eidentic tool

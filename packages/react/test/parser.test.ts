@@ -237,6 +237,88 @@ describe("result event", () => {
     const last = states[states.length - 1]!;
     expect(last.messages[0]!.streaming).toBe(false);
   });
+
+  it("preserves every public terminal result field", async () => {
+    const states = await parse([
+      [
+        "result",
+        {
+          subtype: "success",
+          output: "final text",
+          object: { answer: 42 },
+          details: { subtype: "success" },
+          cost: { usd: 0.012 },
+          usage: { inputTokens: 3, outputTokens: 4 },
+          numTurns: 2,
+          sessionId: "complete-result",
+        },
+      ],
+    ]);
+
+    expect(states.at(-1)?.result).toMatchObject({
+      output: "final text",
+      object: { answer: 42 },
+      details: { subtype: "success" },
+      cost: { usd: 0.012 },
+    });
+  });
+});
+
+describe("wire formats", () => {
+  it("parses raw NDJSON emitted by @eidentic/nextjs", async () => {
+    const lines = [
+      JSON.stringify({ type: "stream.delta", delta: { text: "ND" } }),
+      JSON.stringify({ type: "stream.delta", delta: { text: "JSON" } }),
+      JSON.stringify({
+        type: "result",
+        subtype: "success",
+        output: "NDJSON",
+        usage: { inputTokens: 1, outputTokens: 1 },
+        numTurns: 1,
+        sessionId: "ndjson-session",
+      }),
+    ].join("\n") + "\n";
+
+    const states = await collectStates([lines.slice(0, 17), lines.slice(17)]);
+    expect(states.at(-1)?.messages[0]?.content).toBe("NDJSON");
+    expect(states.at(-1)?.result?.output).toBe("NDJSON");
+  });
+
+  it("handles CRLF SSE and a final event without a trailing blank line", async () => {
+    const body = [
+      "event: result",
+      `data: ${JSON.stringify({ subtype: "success", usage: { inputTokens: 1, outputTokens: 1 }, numTurns: 1, sessionId: "crlf" })}`,
+    ].join("\r\n");
+    const states = await collectStates([body]);
+    expect(states.at(-1)?.result?.sessionId).toBe("crlf");
+  });
+
+  it("treats the SSE event field as authoritative over a conflicting data.type", async () => {
+    const states = await parse([["result", {
+      type: "session.init",
+      subtype: "success",
+      usage: { inputTokens: 1, outputTokens: 1 },
+      numTurns: 1,
+      sessionId: "authoritative-event",
+    }]]);
+    expect(states.at(-1)?.result?.sessionId).toBe("authoritative-event");
+    expect(states.at(-1)?.lastEvent?.type).toBe("result");
+  });
+
+  it("parses data-only SSE frames using the payload type", async () => {
+    const body = `data: ${JSON.stringify({
+      type: "result",
+      subtype: "success",
+      usage: { inputTokens: 1, outputTokens: 2 },
+      numTurns: 1,
+      sessionId: "data-only",
+    })}\n\n`;
+
+    const states = await collectStates([body]);
+
+    expect(states.at(-1)?.result?.sessionId).toBe("data-only");
+    expect(states.at(-1)?.lastEvent?.type).toBe("result");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -382,13 +464,18 @@ describe("split-across-chunk lines", () => {
 // ---------------------------------------------------------------------------
 
 describe("error resilience", () => {
-  it("skips malformed JSON lines without throwing", async () => {
-    // Build a body with an invalid JSON line.
-    const body = "event: stream.delta\ndata: not-json\n\nevent: stream.delta\ndata: {\"delta\":{\"text\":\"ok\"}}\n\n";
-    const states = await collectStates([body]);
-    // The valid event should still be parsed.
-    const last = states[states.length - 1]!;
-    expect(last.messages[0]!.content).toBe("ok");
+  it("fails closed on malformed JSON even when a valid terminal frame follows", async () => {
+    const body = [
+      "event: stream.delta\ndata: not-json\n\n",
+      `event: result\ndata: ${JSON.stringify({
+        subtype: "success",
+        usage: { inputTokens: 1, outputTokens: 1 },
+        numTurns: 1,
+        sessionId: "must-not-succeed",
+      })}\n\n`,
+    ].join("");
+
+    await expect(collectStates([body])).rejects.toThrow(/malformed|json|frame/i);
   });
 
   it("handles an unknown event type gracefully", async () => {

@@ -14,32 +14,50 @@ pnpm add @eidentic/skills
 ## Usage
 
 ```ts
-import { SkillBank, parseSkillMd, evolveSkill } from "@eidentic/skills";
+import { SkillBank, SkillSet, evolveSkill } from "@eidentic/skills";
+import type { ExecutableSkillDef } from "@eidentic/skills";
 import { AIModel } from "@eidentic/model";
 import { anthropic } from "@ai-sdk/anthropic";
 
-// Parse and register a SKILL.md
-const manifest = parseSkillMd(`
+// Load a prompt skill from SKILL.md.
+const skillMd = `
 ---
 name: summarize
 description: Summarize long documents concisely.
+allowed-tools: [read_document]
 ---
 When asked to summarize, produce a bullet-point list of key points...
-`);
+`;
+const promptSkills = SkillSet.fromManifests([
+  { content: skillMd, source: "inline:summarize" },
+]);
 
+// Agent core enforces this capability after skill_use activates the prompt skill.
+
+// Executable skills use a separate, test-gated bank.
+const executableSkill: ExecutableSkillDef = {
+  name: "summarize-text",
+  description: "Summarize text concisely.",
+  tests: [{ name: "returns text", input: "hello", check: out => typeof out === "string" }],
+  run: async input => String(input),
+};
 const bank = new SkillBank();
-await bank.register(manifest);
+await bank.register(executableSkill);
 
 // Approve for use in agents (agent-authored skills are quarantined until approved)
-bank.approve("summarize");
+bank.approve("summarize-text");
 
 // Evolve an executable skill using LLM-driven refinement
-import type { ExecutableSkillDef } from "@eidentic/skills";
-const result = await evolveSkill(executableSkill satisfies ExecutableSkillDef, {
+const result = await evolveSkill(executableSkill, {
   model: new AIModel(anthropic("claude-sonnet-4-5")),
   maxRounds: 3,
 });
 ```
+
+When `skill_use` activates a prompt skill, core enforces its `allowed-tools` in both the next model
+schema and runtime dispatch. Omitted/empty lists deny every non-`skill_*` tool; `*` is an explicit
+full-capability grant. The active capability is restored from session history on continuation or
+resume, so reconnecting cannot silently widen the skill's authority.
 
 ## Signed production banks
 

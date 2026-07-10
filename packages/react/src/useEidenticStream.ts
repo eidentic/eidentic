@@ -4,6 +4,7 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import { parseEidenticStream } from "./parser.js";
 import type { TextMessage, ToolCall, ToolResult, ResultEvent, ParsedStreamState } from "./parser.js";
 import type { StreamEvent } from "@eidentic/types";
+import type { SuspendDecision } from "@eidentic/types";
 
 export type StreamStatus = "idle" | "streaming" | "done" | "error" | "suspended";
 
@@ -39,12 +40,14 @@ export interface EidenticStreamState {
    * Resume after a suspension. POSTs to the resume endpoint with { sessionId, decision }.
    * Only valid when status === "suspended".
    *
-   * @param decision  "approve" | "reject" | any custom string/value.
+   * @param decision  "approve" | "reject" | boolean | { approved, data? }.
    */
-  resume: (decision: string | unknown) => void;
+  resume: (decision: ResumeDecisionInput) => void;
 
   /**
-   * Re-send the last user input (new turn). No-op if no previous input or a stream is in flight.
+   * Report that in-place regeneration is unsupported for append-only sessions.
+   * No-op if no previous input or a stream is in flight. Start a new/forked
+   * session explicitly instead of replaying a side-effecting turn.
    */
   regenerate: () => void;
 
@@ -54,11 +57,14 @@ export interface EidenticStreamState {
   setMessages: (msgs: TextMessage[]) => void;
 }
 
+/** Convenience inputs accepted by resume(); all are normalized to SuspendDecision on the wire. */
+export type ResumeDecisionInput = SuspendDecision | "approve" | "reject" | boolean;
+
 export interface RetryOnErrorOptions {
   /**
-   * Number of retry attempts on network-level stream failures.
-   * Does NOT retry terminal agent result events (result.subtype=error) — those are real
-   * agent outputs and must not be re-sent. Only transient fetch/stream failures are retried.
+   * Number of retry attempts on network-level stream failures. POST replay can duplicate
+   * server/tool side effects even when no response byte arrived; retries therefore remain
+   * disabled unless `allowUnsafePostRetry` is also explicitly enabled.
    */
   attempts: number;
   /**
@@ -71,7 +77,18 @@ export interface RetryOnErrorOptions {
 export interface EidenticStreamOptions {
   /** Pre-existing session ID. If omitted, one is generated lazily (SSR-safe: falls back to a timestamp-based id in environments without crypto.randomUUID). */
   sessionId?: string;
+  /**
+   * Legacy browser-supplied identity. Ignored unless allowUntrustedIdentityBody
+   * is true. Prefer an Authorization header and server-side principal mapping.
+   * @deprecated Browser request bodies are not a trusted identity source.
+   */
   userId?: string;
+  /**
+   * Allow userId/orgId/apiKey fields in browser POST bodies.
+   * @deprecated Identity must normally be derived by the server from auth.
+   * @default false
+   */
+  allowUntrustedIdentityBody?: boolean;
   headers?: Record<string, string>;
   /**
    * Initial messages to pre-populate the conversation with.
@@ -100,6 +117,13 @@ export interface EidenticStreamOptions {
    * Only retries fetch-level failures — NOT terminal result events (those are real agent outputs).
    */
   retryOnError?: RetryOnErrorOptions;
+  /**
+   * Permit retrying a query POST without server-backed atomic request idempotency.
+   * @deprecated This can duplicate tool side effects. Leave false until your server implements
+   * an atomic request idempotency key/claim contract.
+   * @default false
+   */
+  allowUnsafePostRetry?: boolean;
 }
 
 /**
@@ -135,6 +159,30 @@ async function waitMs(ms: number, signal: AbortSignal): Promise<void> {
     const tid = setTimeout(resolve, ms);
     signal.addEventListener("abort", () => { clearTimeout(tid); resolve(); }, { once: true });
   });
+}
+
+function normalizeResumeDecision(decision: ResumeDecisionInput): SuspendDecision {
+  if (typeof decision === "boolean") return { approved: decision };
+  if (decision === "approve") return { approved: true };
+  if (decision === "reject") return { approved: false };
+  if (
+    decision !== null &&
+    typeof decision === "object" &&
+    typeof decision.approved === "boolean"
+  ) {
+    return decision;
+  }
+  throw new TypeError("resume decision must be 'approve', 'reject', a boolean, or { approved: boolean, data? }");
+}
+
+class PartialStreamError extends Error {
+  readonly retryable = false;
+
+  constructor(cause: unknown) {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    super(`Stream failed after receiving data; request was not retried: ${message}`);
+    this.name = "PartialStreamError";
+  }
 }
 
 /**
@@ -181,8 +229,6 @@ export function useEidenticStream(
 
   /** Last user input — for regenerate(). */
   const lastInputRef = useRef<string | null>(null);
-  /** Extra body opts from last send() — for regenerate(). */
-  const lastSendOptsRef = useRef<{ body?: Record<string, unknown> } | undefined>(undefined);
 
   /** Current status kept in a ref so callbacks don't close over stale value. */
   const statusRef = useRef<StreamStatus>("idle");
@@ -211,19 +257,14 @@ export function useEidenticStream(
   }, []);
 
   // ---------------------------------------------------------------------------
-  // Track last result subtype to determine final status after stream.
-  // ---------------------------------------------------------------------------
-  const lastResultSubtypeRef = useRef<string | null>(null);
-
-  // ---------------------------------------------------------------------------
   // send()
   // ---------------------------------------------------------------------------
   const send = useCallback(
     (input: string, sendOpts?: { body?: Record<string, unknown> }) => {
       if (statusRef.current === "streaming") return;
+      statusRef.current = "streaming";
 
       lastInputRef.current = input;
-      lastSendOptsRef.current = sendOpts;
 
       const ctrl = new AbortController();
       abortRef.current = ctrl;
@@ -231,11 +272,12 @@ export function useEidenticStream(
       setStatus("streaming");
       setError(null);
       setSuspension(null);
-      lastResultSubtypeRef.current = null;
 
       (async () => {
         const retryOpts = optsRef.current.retryOnError;
-        const maxRetries = retryOpts ? retryOpts.attempts : 0;
+        const maxRetries = retryOpts && optsRef.current.allowUnsafePostRetry === true
+          ? retryOpts.attempts
+          : 0;
         const baseBackoff = retryOpts?.backoffMs ?? 500;
         let attempt = 0;
 
@@ -247,8 +289,15 @@ export function useEidenticStream(
             input,
             ...sendOpts?.body,
           };
+          if (optsRef.current.allowUntrustedIdentityBody !== true) {
+            delete body["userId"];
+            delete body["orgId"];
+            delete body["apiKey"];
+          }
           if (effectiveSessionId) body.sessionId = effectiveSessionId;
-          if (optsRef.current.userId) body.userId = optsRef.current.userId;
+          if (optsRef.current.allowUntrustedIdentityBody === true && optsRef.current.userId) {
+            body.userId = optsRef.current.userId;
+          }
 
           const res = await fetch(endpoint, {
             method: "POST",
@@ -270,57 +319,82 @@ export function useEidenticStream(
           }
 
           let lastResult: ResultEvent | null = null;
+          let sawEvent = false;
+          let sawResponseBytes = false;
+          const trackingReader = {
+            async read() {
+              const value = await reader.read();
+              if (value.value && value.value.byteLength > 0) sawResponseBytes = true;
+              return value;
+            },
+          } as ReadableStreamDefaultReader<Uint8Array>;
 
-          for await (const state of parseEidenticStream(reader)) {
-            if (!mountedRef.current) break;
+          try {
+            for await (const state of parseEidenticStream(trackingReader)) {
+              if (!mountedRef.current) break;
+              sawEvent = true;
 
-            // Fire raw-event callback.
-            if (state.lastEvent) {
-              optsRef.current.onEvent?.(state.lastEvent);
-            }
-
-            setMessages(state.messages);
-            setToolCalls(state.toolCalls);
-            setToolResults(state.toolResults);
-
-            if (state.result) {
-              lastResult = state.result;
-              setResult(state.result);
-              optsRef.current.onResult?.(state.result);
-
-              // Handle suspension.
-              if (state.result.subtype === "suspended" && state.result.callId) {
-                setSuspension({
-                  callId: state.result.callId,
-                  request: state.result.request ?? { reason: "Approval required" },
-                });
+              // Fire raw-event callback.
+              if (state.lastEvent) {
+                optsRef.current.onEvent?.(state.lastEvent);
               }
-            }
-            if (state.error) {
-              throw state.error;
-            }
 
-            const snapStatus: StreamStatus =
-              state.result?.subtype === "suspended" ? "suspended" : "streaming";
-            optsRef.current.onUpdate?.({
-              messages: state.messages,
-              toolCalls: state.toolCalls,
-              toolResults: state.toolResults,
-              result: state.result,
-              status: snapStatus,
-              error: null,
-              suspension: state.result?.subtype === "suspended" && state.result.callId
-                ? { callId: state.result.callId, request: state.result.request ?? { reason: "Approval required" } }
-                : null,
-            });
+              setMessages(state.messages);
+              setToolCalls(state.toolCalls);
+              setToolResults(state.toolResults);
+
+              if (state.result) {
+                lastResult = state.result;
+                setResult(state.result);
+                optsRef.current.onResult?.(state.result);
+
+                // Handle suspension.
+                if (state.result.subtype === "suspended" && state.result.callId) {
+                  setSuspension({
+                    callId: state.result.callId,
+                    request: state.result.request ?? { reason: "Approval required" },
+                  });
+                }
+              }
+              if (state.error) {
+                throw state.error;
+              }
+
+              const snapStatus: StreamStatus =
+                state.result?.subtype === "suspended" ? "suspended" : "streaming";
+              optsRef.current.onUpdate?.({
+                messages: state.messages,
+                toolCalls: state.toolCalls,
+                toolResults: state.toolResults,
+                result: state.result,
+                status: snapStatus,
+                error: null,
+                suspension: state.result?.subtype === "suspended" && state.result.callId
+                  ? { callId: state.result.callId, request: state.result.request ?? { reason: "Approval required" } }
+                  : null,
+              });
+            }
+          } catch (streamError) {
+            // A terminal result is authoritative even if the connection tears down
+            // immediately afterwards. Otherwise a partial response is unsafe to replay.
+            if (lastResult === null && (sawEvent || sawResponseBytes)) throw new PartialStreamError(streamError);
+            if (lastResult === null) throw streamError;
           }
 
           if (!mountedRef.current) return true;
 
+          if (lastResult === null) {
+            const incomplete = new Error("Stream ended before a terminal result event");
+            if (sawEvent || sawResponseBytes) throw new PartialStreamError(incomplete);
+            throw incomplete;
+          }
+
           // Set final status based on terminal result.
           if (lastResult?.subtype === "suspended") {
+            statusRef.current = "suspended";
             setStatus("suspended");
           } else {
+            statusRef.current = "done";
             setStatus("done");
           }
           // A terminal result was received — do not retry.
@@ -338,8 +412,9 @@ export function useEidenticStream(
               // Always re-throw AbortError — it means intentional stop/unmount.
               if ((e as { name?: string })?.name === "AbortError") throw e;
 
-              // Re-throw if we've exhausted retries.
-              if (attempt >= maxRetries) throw e;
+              // Replaying after any stream event could duplicate agent/tool side
+              // effects, so partial streams are never retried automatically.
+              if (e instanceof PartialStreamError || attempt >= maxRetries) throw e;
 
               attempt++;
               const backoff = baseBackoff * Math.pow(2, attempt - 1);
@@ -351,11 +426,13 @@ export function useEidenticStream(
         } catch (e: unknown) {
           if (!mountedRef.current) return;
           if ((e as { name?: string })?.name === "AbortError") {
+            statusRef.current = "idle";
             setStatus("idle");
             return;
           }
           const err = e instanceof Error ? e : new Error(String(e));
           setError(err);
+          statusRef.current = "error";
           setStatus("error");
           optsRef.current.onError?.(err);
         } finally {
@@ -373,9 +450,10 @@ export function useEidenticStream(
   // resume()
   // ---------------------------------------------------------------------------
   const resume = useCallback(
-    (decision: string | unknown) => {
+    (decision: ResumeDecisionInput) => {
       if (statusRef.current === "streaming") return;
       if (statusRef.current !== "suspended") return;
+      statusRef.current = "streaming";
 
       const resumeUrl =
         optsRef.current.resumeEndpoint ?? deriveResumeEndpoint(endpoint);
@@ -388,9 +466,11 @@ export function useEidenticStream(
 
       (async () => {
         try {
-          const body: Record<string, unknown> = { decision };
+          const body: Record<string, unknown> = { decision: normalizeResumeDecision(decision) };
           if (effectiveSessionId) body.sessionId = effectiveSessionId;
-          if (optsRef.current.userId) body.userId = optsRef.current.userId;
+          if (optsRef.current.allowUntrustedIdentityBody === true && optsRef.current.userId) {
+            body.userId = optsRef.current.userId;
+          }
 
           const res = await fetch(resumeUrl, {
             method: "POST",
@@ -418,9 +498,19 @@ export function useEidenticStream(
           const priorToolResults = toolResultsRef.current;
 
           let lastResult: ResultEvent | null = null;
+          let sawEvent = false;
+          let sawResponseBytes = false;
+          const trackingReader = {
+            async read() {
+              const value = await reader.read();
+              if (value.value && value.value.byteLength > 0) sawResponseBytes = true;
+              return value;
+            },
+          } as ReadableStreamDefaultReader<Uint8Array>;
 
-          for await (const state of parseEidenticStream(reader)) {
+          for await (const state of parseEidenticStream(trackingReader)) {
             if (!mountedRef.current) break;
+            sawEvent = true;
 
             // Fire raw-event callback.
             if (state.lastEvent) {
@@ -474,19 +564,29 @@ export function useEidenticStream(
 
           if (!mountedRef.current) return;
 
+          if (lastResult === null) {
+            const incomplete = new Error("Resume stream ended before a terminal result event");
+            if (sawEvent || sawResponseBytes) throw new PartialStreamError(incomplete);
+            throw incomplete;
+          }
+
           if (lastResult?.subtype === "suspended") {
+            statusRef.current = "suspended";
             setStatus("suspended");
           } else {
+            statusRef.current = "done";
             setStatus("done");
           }
         } catch (e: unknown) {
           if (!mountedRef.current) return;
           if ((e as { name?: string })?.name === "AbortError") {
+            statusRef.current = "idle";
             setStatus("idle");
             return;
           }
           const err = e instanceof Error ? e : new Error(String(e));
           setError(err);
+          statusRef.current = "error";
           setStatus("error");
           optsRef.current.onError?.(err);
         } finally {
@@ -508,16 +608,14 @@ export function useEidenticStream(
     if (!lastInput) return;
     if (statusRef.current === "streaming") return;
 
-    // Clear current results and re-send.
-    setMessages([]);
-    setToolCalls([]);
-    setToolResults([]);
-    setResult(null);
-    setSuspension(null);
-    setError(null);
-
-    send(lastInput, lastSendOptsRef.current);
-  }, [send]);
+    const err = new Error(
+      "Regeneration cannot replay a turn in an append-only session; start a new or forked session",
+    );
+    setError(err);
+    statusRef.current = "error";
+    setStatus("error");
+    optsRef.current.onError?.(err);
+  }, []);
 
   return {
     messages,

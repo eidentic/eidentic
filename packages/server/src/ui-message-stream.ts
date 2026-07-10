@@ -225,10 +225,7 @@ export function toUIMessageStream(
       }
     },
 
-    onError: (err: unknown) => {
-      const msg = err instanceof Error ? err.message : String(err);
-      return `Stream error: ${msg}`;
-    },
+    onError: () => "Stream error: agent run failed",
   });
 }
 

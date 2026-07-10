@@ -9,10 +9,10 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { createHmac } from "node:crypto";
 import { Agent } from "@eidentic/core";
 import { MockModel, InMemoryStore } from "@eidentic/types/testing";
-import type { ModelResponse } from "@eidentic/types";
+import type { ModelResponse, SafeEgressPort } from "@eidentic/types";
 import { createWorkflowRunRegistry } from "@eidentic/workflow";
 import type { WorkflowRunRegistry } from "@eidentic/workflow";
-import { createServer, ApiKeyAuth } from "@eidentic/server";
+import { createServer, ApiKeyAuth, serveNode } from "@eidentic/server";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -191,9 +191,13 @@ describe("Webhook callbacks", () => {
 
   it("returns 400 when callbackUrl resolves to a private host (SSRF guard)", async () => {
     const { agent } = makeAgent([textResponse("ok")]);
+    const egress: SafeEgressPort = {
+      validate: async () => { throw new Error("safe egress: blocked private address"); },
+      request: async () => ({ status: 200, safeUrl: "https://example.invalid/cb" }),
+    };
     const app = createServer({
       agents: { demo: agent },
-      webhooks: { signingSecret: "s" }, // allowPrivateHosts defaults to false
+      webhooks: { signingSecret: "s", egress, allowedHosts: ["example.com"] },
       preAuthRateLimiter: null,
     });
 
@@ -398,6 +402,16 @@ describe("Graceful drain (_draining flag via createServer internals)", () => {
     };
     return { setDraining: a._setDraining!, getAsyncRuns: a._getAsyncRuns! };
   }
+
+  it("accepts an explicit hostname without replacing the graceful drain handle", async () => {
+    const { agent } = makeAgent([]);
+    const app = createServer({ agents: { demo: agent }, preAuthRateLimiter: null });
+    const handle = await serveNode(app, { port: 0, hostname: "127.0.0.1" });
+
+    expect(typeof handle.close).toBe("function");
+    expect(typeof handle.drain).toBe("function");
+    await handle.drain(100);
+  });
 
   it("returns 503 with Retry-After on new /v1 requests while draining", async () => {
     const { agent } = makeAgent([]);

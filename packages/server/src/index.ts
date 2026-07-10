@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
-import type { Agent } from "@eidentic/core";
+import { credentialFingerprint, sanitizeBoundaryText, sanitizeBoundaryValue, type Agent } from "@eidentic/core";
 import type {
   AuditEvent,
   AuditSink,
@@ -14,29 +14,13 @@ import type {
   SuspendDecision,
   StoredEvent,
   ContentBlock,
+  EgressBoundaryPolicy,
+  SafeEgressPort,
 } from "@eidentic/types";
 import { createWorkflowRunRegistry, WorkflowRunError } from "@eidentic/workflow";
 import type { WorkflowResult, StepTrace, WorkflowRunOwner, WorkflowRunRegistry, RecordOptions } from "@eidentic/workflow";
 import { InMemoryTokenBucketLimiter } from "./rate-limit.js";
 import { InMemoryQuota, type QuotaReservation } from "./quota.js";
-
-// ---------------------------------------------------------------------------
-// Local type alias: QuotaPort extended with reserve-settle protocol.
-//
-// `@eidentic/types` `QuotaPort.record()` currently has signature:
-//   record(key, spend): void
-// A parallel branch adds `reservation?` to `record` and optional `release`.
-// Until that branch merges, we define this narrow alias locally so we can call
-// quota.record(key, spend, reservation) and quota.release?(reservation) WITHOUT
-// the ~14 `as unknown as { record: … }` casts that were previously needed.
-//
-// Once the types interface change lands, this alias becomes a no-op extension
-// and can be removed — all call sites already use the typed path.
-// ---------------------------------------------------------------------------
-interface QuotaWithReservation extends QuotaPort {
-  record(key: string, spend: { usd: number; tokens: number }, reservation?: QuotaReservation): Promise<void> | void;
-  release?(reservation: QuotaReservation): void;
-}
 
 // ---------------------------------------------------------------------------
 // Async run registry
@@ -51,7 +35,18 @@ interface QuotaWithReservation extends QuotaPort {
 // ---------------------------------------------------------------------------
 
 /** Status of an async run. */
-export type AsyncRunStatus = "running" | "completed" | "failed" | "aborted";
+export type AsyncRunStatus =
+  | "running"
+  | "completed"
+  | "failed"
+  | "aborted"
+  | "timed_out"
+  | "suspended"
+  | "guardrail"
+  | "max_cost"
+  | "max_tokens"
+  | "max_turns"
+  | "max_wall_clock";
 
 /**
  * Registry entry for one async run.
@@ -75,6 +70,8 @@ export interface AsyncRunEntry {
   };
   createdAt: number;
   settledAt?: number;
+  /** @internal Cooperative cancellation used by drain/timeout. */
+  abort?: () => void;
 }
 
 /**
@@ -84,9 +81,8 @@ export interface AsyncRunEntry {
  *
  * [M10] Bounded retention: once the registry reaches `maxRuns` entries, the
  * oldest *settled* runs (completed/failed/aborted) are evicted first.
- * In-flight runs (status="running") are never evicted under normal cap pressure.
- * If eviction of settled runs is not enough to make room (all runs are in-flight),
- * the new entry is still accepted — the cap is a best-effort bound, not a hard gate.
+ * In-flight runs (status="running") are never evicted. If every slot is running, `set()` returns
+ * false and the caller must reject the new run; the cap is hard.
  */
 export class AsyncRunRegistry {
   private readonly runs = new Map<string, AsyncRunEntry>();
@@ -94,13 +90,22 @@ export class AsyncRunRegistry {
 
   constructor(options?: { maxRuns?: number }) {
     this.maxRuns = options?.maxRuns ?? 1000;
+    if (!Number.isSafeInteger(this.maxRuns) || this.maxRuns <= 0) {
+      throw new Error("AsyncRunRegistry maxRuns must be a positive safe integer");
+    }
   }
 
-  set(entry: AsyncRunEntry): void {
+  set(entry: AsyncRunEntry): boolean {
+    if (this.runs.has(entry.runId)) {
+      this.runs.set(entry.runId, entry);
+      return true;
+    }
     if (this.runs.size >= this.maxRuns) {
       this._evictOldestSettled();
     }
+    if (this.runs.size >= this.maxRuns) return false;
     this.runs.set(entry.runId, entry);
+    return true;
   }
 
   get(runId: string): AsyncRunEntry | undefined {
@@ -362,6 +367,8 @@ export interface ServerOptions {
    * Defaults to 1000. Mirror of the workflow registry's bounded pattern.
    */
   maxAsyncRuns?: number;
+  /** Hard wall-clock timeout for one background run. Default: 300,000 ms. */
+  maxAsyncRunMs?: number;
   /**
    * Webhook delivery configuration for async runs started via `POST /v1/agents/:id/runs`.
    *
@@ -404,10 +411,17 @@ export interface ServerOptions {
   webhooks?: {
     /** HMAC-SHA256 signing secret. Used to sign every webhook delivery. */
     signingSecret: string;
+    /** Central DNS/IP/redirect-aware egress boundary. Required unless the unsafe test opt-in is set. */
+    egress?: SafeEgressPort;
+    /** Callback hosts allowed at exact or dot-boundary subdomain scope. Default: [] (deny all). */
+    allowedHosts?: readonly string[];
+    /** Permit cleartext HTTP through the safe boundary. Deprecated; production default is HTTPS-only. */
+    allowInsecureHttp?: boolean;
     /**
      * When `true`, private/loopback/link-local addresses are allowed as callback
      * hosts. Defaults to `false`. Only enable in controlled test environments.
      */
+    /** @deprecated Unsafe test-only compatibility path that bypasses DNS-aware egress validation. */
     allowPrivateHosts?: boolean;
   };
   /**
@@ -542,106 +556,20 @@ const BODY_LIMIT = 512 * 1024;
 // SSE resumability helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Event kinds that are persisted to the store (and therefore replayable).
- * These are the kinds where the loop calls session.append() before yielding
- * the corresponding StreamEvent, so we can track the seq in real-time.
- *
- * Mapping:
- *   "user"       → appended before session.init is yielded (seq = baseSeq)
- *   "assistant"  → appended before "assistant" StreamEvent is yielded
- *   "tool_result"→ appended before "tool.result" StreamEvent is yielded
- *   "compaction" → appended before "compaction" StreamEvent is yielded
- *   "suspension" → appended before "result{subtype:suspended}" is yielded
- */
-const STREAM_EVENT_TYPES_THAT_PERSIST = new Set<string>([
-  "assistant",
-  "tool.result",
-  "compaction",
-]);
-
-/**
- * Derive a per-run SSE `id` tracker.
- *
- * The loop always appends the "user" event (seq = baseSeq) BEFORE yielding
- * `session.init`. So we assign `id = baseSeq` to `session.init` (the first
- * yielded event corresponds to the user store-event). Subsequent persisted
- * events get `id = baseSeq + 1`, `baseSeq + 2`, …
- *
- * Non-persisted events (stream.delta, result) do NOT advance the id; the
- * browser EventSource will carry forward the last emitted `id` as
- * `Last-Event-ID` on auto-reconnect, which will always be a stored-event seq.
- */
-function makeSseIdTracker(baseSeq: number): {
-  idForSessionInit(): string;
-  idForPersistedEvent(): string;
-  currentId(): string;
-} {
-  // nextSeq starts at baseSeq; session.init "claims" baseSeq (the user event seq).
-  // Each persisted StreamEvent then claims baseSeq+1, baseSeq+2, …
-  let next = baseSeq;
-
-  return {
-    idForSessionInit(): string {
-      return String(next); // claims user-event seq; does NOT advance next
-    },
-    idForPersistedEvent(): string {
-      next += 1;
-      return String(next);
-    },
-    currentId(): string {
-      return String(next);
-    },
-  };
-}
-
-/**
- * Determine whether a completed session's stored events contain a final
- * assistant message (no pending tool calls). If so, return a synthesized
- * `result` StreamEvent payload; otherwise return null (run still in progress
- * or ended abnormally).
- *
- * We look at the last "assistant" event and check whether its content contains
- * any `tool_use` blocks. If the last assistant turn had no tool calls, the
- * agent run is considered complete and we reconstruct the text output.
- */
-function synthesizeResultFromStore(
+function latestPersistedTerminal(
   storedEvents: StoredEvent[],
   sessionId: string,
 ): Record<string, unknown> | null {
-  // Walk backwards to find the last assistant event.
+  const latestRun = [...storedEvents].reverse().find((event) => event.kind === "run_started");
+  if (!latestRun) return null;
   for (let i = storedEvents.length - 1; i >= 0; i--) {
-    const ev = storedEvents[i]!;
-    if (ev.kind === "assistant") {
-      const payload = ev.payload as { content?: ContentBlock[] };
-      const content = payload.content ?? [];
-      const hasToolUse = content.some((b) => b.type === "tool_use");
-      if (hasToolUse) {
-        // Last assistant turn had tool calls — run is suspended or still in progress.
-        return null;
-      }
-      // Extract text output.
-      const text = content
-        .filter((b): b is Extract<ContentBlock, { type: "text" }> => b.type === "text")
-        .map((b) => b.text)
-        .join("");
-      const usage = (ev.meta?.usage as { inputTokens: number; outputTokens: number }) ?? {
-        inputTokens: 0,
-        outputTokens: 0,
-      };
-      return {
-        type: "result",
-        subtype: "success",
-        output: text,
-        usage,
-        numTurns: storedEvents.filter((e) => e.kind === "assistant").length,
-        sessionId,
-      };
-    }
-    // suspension at the end → run is suspended (not complete)
-    if (ev.kind === "suspension") {
-      return null;
-    }
+    const event = storedEvents[i]!;
+    if (event.kind !== "terminal_result" || event.payload === null || typeof event.payload !== "object") continue;
+    const payload = event.payload as { version?: unknown; runId?: unknown; result?: unknown };
+    if (payload.version !== 1 || payload.runId !== latestRun.id || payload.result === null || typeof payload.result !== "object") continue;
+    const result = payload.result as Record<string, unknown>;
+    if (result["type"] !== "result" || typeof result["subtype"] !== "string") continue;
+    return { ...result, sessionId, eventSeq: event.seq };
   }
   return null;
 }
@@ -659,20 +587,27 @@ function storedEventToStreamPayload(
   switch (ev.kind) {
     case "assistant": {
       const payload = ev.payload as { content?: ContentBlock[] };
-      return { type: "assistant", content: payload.content ?? [] };
+      return {
+        type: "assistant",
+        content: payload.content ?? [],
+        usage: ev.meta?.usage ?? { inputTokens: 0, outputTokens: 0 },
+        eventSeq: ev.seq,
+      };
     }
     case "tool_result": {
       const payload = ev.payload as {
         callId: string;
         toolName: string;
         output: unknown;
+        isError?: boolean;
       };
       return {
         type: "tool.result",
         callId: payload.callId,
         toolName: payload.toolName,
         output: payload.output,
-        isError: false,
+        isError: payload.isError === true,
+        eventSeq: ev.seq,
       };
     }
     case "compaction": {
@@ -687,12 +622,35 @@ function storedEventToStreamPayload(
         before: payload.before,
         after: payload.after,
         stages: payload.stages,
+        eventSeq: ev.seq,
       };
     }
-    // "user", "checkpoint", "tool_call", "suspension" — not replayed
+    case "terminal_result": {
+      if (ev.payload === null || typeof ev.payload !== "object") return null;
+      const payload = ev.payload as { version?: unknown; result?: unknown };
+      if (payload.version !== 1 || payload.result === null || typeof payload.result !== "object") return null;
+      const result = payload.result as Record<string, unknown>;
+      if (result["type"] !== "result" || typeof result["subtype"] !== "string") return null;
+      return { ...result, sessionId: ev.sessionId, eventSeq: ev.seq };
+    }
+    // "user", "checkpoint", "tool_call", "suspension", "run_started" — not replayed
     default:
       return null;
   }
+}
+
+function sanitizeStreamPayload(payload: Record<string, unknown>): Record<string, unknown> {
+  if (payload["type"] !== "result" || payload["subtype"] !== "error") return payload;
+  let details = payload["details"];
+  if (details !== null && typeof details === "object") {
+    const { rawOutput: _rawOutput, ...safeDetails } = details as Record<string, unknown>;
+    details = safeDetails;
+  }
+  return {
+    ...payload,
+    output: "Agent run failed",
+    ...(details !== undefined ? { details } : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -714,6 +672,7 @@ function assertCallbackUrl(rawUrl: string, allowPrivateHosts: boolean): URL {
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     throw new Error("callbackUrl must use http or https");
   }
+  if (parsed.username || parsed.password) throw new Error("callbackUrl credentials are not allowed");
   if (!allowPrivateHosts && isCallbackHostBlocked(parsed.hostname)) {
     throw new Error("callbackUrl resolves to a blocked private/loopback/metadata host");
   }
@@ -808,6 +767,9 @@ async function deliverWebhook(
   payload: WebhookPayload,
   signingSecret: string,
   logger: { error: (...args: unknown[]) => void },
+  egress?: SafeEgressPort,
+  policy?: EgressBoundaryPolicy,
+  unsafeDirectFetch = false,
 ): Promise<void> {
   const body = JSON.stringify(payload);
   const timestamp = String(Date.now());
@@ -827,6 +789,14 @@ async function deliverWebhook(
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
   const signature = `sha256=${hexSig}`;
+  const safeCallback = (() => {
+    try {
+      const url = new URL(callbackUrl);
+      return `${url.protocol}//${url.host}${url.pathname}`;
+    } catch {
+      return "[invalid callback URL]";
+    }
+  })();
 
   const delays = [0, 1000, 2000]; // attempt 0 immediate, retry 1 after 1s, retry 2 after 2s
   for (let attempt = 0; attempt < delays.length; attempt++) {
@@ -837,30 +807,49 @@ async function deliverWebhook(
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 10_000);
       try {
-        const res = await fetch(callbackUrl, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "X-Eidentic-Signature": signature,
-            "X-Eidentic-Timestamp": timestamp,
-          },
-          body,
-          signal: controller.signal,
-          // Never follow redirects
-          redirect: "manual",
-        });
+        const headers = {
+          "content-type": "application/json",
+          "X-Eidentic-Signature": signature,
+          "X-Eidentic-Timestamp": timestamp,
+        };
+        const status = egress && policy
+          ? (await egress.request({
+              url: callbackUrl,
+              method: "POST",
+              headers,
+              body,
+              signal: controller.signal,
+              timeoutMs: 10_000,
+              maxRedirects: 0,
+              policy,
+            })).status
+          : unsafeDirectFetch
+            ? await (async () => {
+                const response = await fetch(callbackUrl, {
+                  method: "POST",
+                  headers,
+                  body,
+                  signal: controller.signal,
+                  redirect: "manual",
+                  credentials: "omit",
+                  referrerPolicy: "no-referrer",
+                });
+                void response.body?.cancel().catch(() => undefined);
+                return response.status;
+              })()
+            : 0;
         clearTimeout(timer);
-        if (res.status >= 200 && res.status < 300) return; // success
+        if (status >= 200 && status < 300) return; // success
         // Non-2xx — retry
-        logger.error(`[eidentic/server] webhook delivery attempt ${attempt + 1} failed: HTTP ${res.status} for ${callbackUrl}`);
+        logger.error(`[eidentic/server] webhook delivery attempt ${attempt + 1} failed: HTTP ${status} for ${safeCallback}`);
       } finally {
         clearTimeout(timer);
       }
     } catch (err: unknown) {
-      logger.error(`[eidentic/server] webhook delivery attempt ${attempt + 1} error:`, err);
+      logger.error(`[eidentic/server] webhook delivery attempt ${attempt + 1} error for ${safeCallback}: ${err instanceof Error ? err.name : "Error"}`);
     }
   }
-  logger.error(`[eidentic/server] webhook delivery exhausted retries for ${callbackUrl}`);
+  logger.error(`[eidentic/server] webhook delivery exhausted retries for ${safeCallback}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -955,12 +944,14 @@ export function createServer(opts: ServerOptions): EidenticServer {
   const getRateLimitKey = opts.rateLimitKey ?? defaultKey;
   const getQuotaKey = opts.quotaKey ?? defaultKey;
   const maxInputChars = opts.maxInputChars ?? 32_000;
-  // FIX C-P1-3: Use QuotaWithReservation so quota.record(key, spend, reservation) and
-  // quota.release?(reservation) are typed directly — no `as unknown as` casts needed.
-  // This depends on @eidentic/types QuotaPort gaining the `reservation?` param on record()
-  // and optional `release()`. Until that types-interface change merges, QuotaWithReservation
-  // (defined locally above createServer) extends QuotaPort and bridges the gap.
-  const quota: QuotaWithReservation | undefined = opts.quota as QuotaWithReservation | undefined;
+  if (!Number.isSafeInteger(maxInputChars) || maxInputChars <= 0) {
+    throw new Error("maxInputChars must be a positive safe integer");
+  }
+  const maxAsyncRunMs = opts.maxAsyncRunMs ?? 300_000;
+  if (!Number.isSafeInteger(maxAsyncRunMs) || maxAsyncRunMs <= 0) {
+    throw new Error("maxAsyncRunMs must be a positive safe integer");
+  }
+  const quota = opts.quota;
 
   // Pre-auth rate limiter (C3 fix). `null` explicitly disables; absent = use safe default.
   const preAuthLimiter: RateLimiterPort | null =
@@ -1069,14 +1060,17 @@ export function createServer(opts: ServerOptions): EidenticServer {
   // ---------------------------------------------------------------------------
 
   /** Match the canonical resource owner. User ownership takes precedence over org/apiKey. */
-  function checkOwnership(
+  async function checkOwnership(
     session: { userId?: string; orgId?: string; apiKey?: string },
     principal: AuthPrincipal,
-  ): boolean {
+  ): Promise<boolean> {
     if (noAuthMode) return true;
     if (session.userId !== undefined) return principal.userId === session.userId;
     if (session.orgId !== undefined) return principal.orgId === session.orgId;
-    if (session.apiKey !== undefined) return principal.apiKey === session.apiKey;
+    if (session.apiKey !== undefined) {
+      if (principal.apiKey === undefined) return false;
+      return session.apiKey === principal.apiKey || session.apiKey === await credentialFingerprint(principal.apiKey);
+    }
     return allowLegacyUnownedRecords;
   }
 
@@ -1096,6 +1090,7 @@ export function createServer(opts: ServerOptions): EidenticServer {
     type: string;
     subtype?: string;
     output?: unknown;
+    eventSeq?: number;
     usage: { inputTokens: number; outputTokens: number };
     cost?: { usd?: number };
     [k: string]: unknown;
@@ -1112,6 +1107,7 @@ export function createServer(opts: ServerOptions): EidenticServer {
    * @param getIterable   — factory called inside the SSE callback to produce the agent AsyncIterable
    * @param logTag        — identifies the route in server-side error logs (e.g. "agent.query")
    * @param emitSessionComment — when true, emit `: session=<id>` as the first SSE comment
+   * @param resumeRoute   — permits a persisted suspended terminal to continue via agent.resume
    */
   async function runAgentStream(
     c: import("hono").Context,
@@ -1122,6 +1118,7 @@ export function createServer(opts: ServerOptions): EidenticServer {
     getIterable: () => AgentIterable,
     logTag: string,
     emitSessionComment: boolean,
+    resumeRoute: boolean,
   ): Promise<Response> {
     // ---------------------------------------------------------------------------
     // SSE resumability: parse Last-Event-ID header (M9 fix: validate before use)
@@ -1166,18 +1163,14 @@ export function createServer(opts: ServerOptions): EidenticServer {
       // -----------------------------------------------------------------------
       // Replay path: client reconnected with Last-Event-ID
       // -----------------------------------------------------------------------
-      // storedEventsCache is populated here so the live path below can reuse it
-      // without a second store read (Fix 2: double readEvents on reconnect).
-      let storedEventsCache: StoredEvent[] | null = null;
-
       if (hasLastEventId) {
         const storedEvents = await agent.store.readEvents(sessionId);
-        storedEventsCache = storedEvents;
         const toReplay = storedEvents.filter((e) => e.seq > lastEventId!);
 
         for (const ev of toReplay) {
           if (signal.aborted) break;
-          const payload = storedEventToStreamPayload(ev);
+          const rawPayload = storedEventToStreamPayload(ev);
+          const payload = rawPayload === null ? null : sanitizeStreamPayload(rawPayload);
           if (payload !== null) {
             await stream.writeSSE({
               event: payload["type"] as string,
@@ -1187,13 +1180,14 @@ export function createServer(opts: ServerOptions): EidenticServer {
           }
         }
 
-        // If the run appears complete, synthesize a result event and close.
-        const syntheticResult = synthesizeResultFromStore(storedEvents, sessionId);
-        if (syntheticResult !== null) {
-          await stream.writeSSE({
-            event: "result",
-            data: JSON.stringify(syntheticResult),
-          });
+        // A persisted terminal is authoritative. It was replayed above when its seq was newer
+        // than the cursor; when already acknowledged we simply close without synthesizing a
+        // different result. Suspension alone falls through only on the explicit resume route.
+        const persistedTerminal = latestPersistedTerminal(storedEvents, sessionId);
+        if (
+          persistedTerminal !== null &&
+          !(resumeRoute && persistedTerminal["subtype"] === "suspended")
+        ) {
           // Release quota reservation — no new agent work was done.
           if (quota && streamQuotaReservation !== undefined) {
             quota.release?.(streamQuotaReservation);
@@ -1208,15 +1202,6 @@ export function createServer(opts: ServerOptions): EidenticServer {
       // Live streaming path (fresh connection or in-progress reconnect)
       // -----------------------------------------------------------------------
 
-      // Read existing stored events BEFORE starting the run so we know the starting seq.
-      // The agent loop appends the "user" event (seq = baseSeq) before yielding session.init,
-      // so baseSeq is the seq we assign to session.init. Subsequent persisted events
-      // get baseSeq+1, baseSeq+2, …
-      // Reuse storedEventsCache if the replay path already populated it.
-      const existingEvents = storedEventsCache ?? await agent.store.readEvents(sessionId);
-      const baseSeq = existingEvents.length === 0 ? 0 : existingEvents[existingEvents.length - 1]!.seq + 1;
-      const idTracker = makeSseIdTracker(baseSeq);
-
       // Track the last terminal result event so we can record spend after streaming.
       let terminalResult: { usage: { inputTokens: number; outputTokens: number }; cost?: { usd?: number } } | undefined;
 
@@ -1224,31 +1209,12 @@ export function createServer(opts: ServerOptions): EidenticServer {
         for await (const ev of getIterable()) {
           if (signal.aborted) break;
 
-          if (ev.type === "session.init") {
-            // session.init corresponds to the user event being appended (seq = baseSeq).
-            await stream.writeSSE({
-              event: ev.type,
-              data: JSON.stringify(ev),
-              id: idTracker.idForSessionInit(),
-            });
-          } else if (STREAM_EVENT_TYPES_THAT_PERSIST.has(ev.type)) {
-            // This event corresponds to a StoredEvent appended just before it was yielded.
-            await stream.writeSSE({
-              event: ev.type,
-              data: JSON.stringify(ev),
-              id: idTracker.idForPersistedEvent(),
-            });
-          } else {
-            // stream.delta, result, compaction-from-loop, etc. — not individually stored.
-            // Do NOT emit an id: the client retains the last seen id (last stored-event seq).
-            // M8 fix: sanitize result.subtype=error output — emit generic message, log internally.
-            let payload: typeof ev = ev;
-            if (ev.type === "result" && ev.subtype === "error") {
-              console.error(`[eidentic/server] ${logTag} run error:`, ev.output);
-              payload = { ...ev, output: "Agent run failed" };
-            }
-            await stream.writeSSE({ event: ev.type, data: JSON.stringify(payload) });
-          }
+          const payload = sanitizeStreamPayload(ev as unknown as Record<string, unknown>);
+          await stream.writeSSE({
+            event: ev.type,
+            data: JSON.stringify(payload),
+            ...(Number.isSafeInteger(ev.eventSeq) ? { id: String(ev.eventSeq) } : {}),
+          });
 
           // Capture terminal result for quota recording.
           if (ev.type === "result") {
@@ -1264,7 +1230,9 @@ export function createServer(opts: ServerOptions): EidenticServer {
         if (!signal.aborted) {
           // M8 fix: emit a generic message in the SSE payload; log the real error server-side.
           // This prevents provider keys/stack traces from leaking to clients.
-          console.error(`[eidentic/server] ${logTag} error:`, err);
+          console.error(`[eidentic/server] ${logTag} error`, {
+            name: err instanceof Error ? err.name : "Error",
+          });
           await stream.writeSSE({
             event: "result",
             data: JSON.stringify({
@@ -1365,7 +1333,7 @@ export function createServer(opts: ServerOptions): EidenticServer {
       // New sessions (no existing record) are fine; ownership is established on first write.
       if (typeof bodySessionId === "string" && bodySessionId.length > 0) {
         const sessionRecord = await agent.store.getSession(bodySessionId);
-        if (sessionRecord && !checkOwnership(sessionRecord, principal)) {
+        if (sessionRecord && !await checkOwnership(sessionRecord, principal)) {
           return c.json({ error: "Forbidden" }, 403);
         }
       }
@@ -1382,6 +1350,7 @@ export function createServer(opts: ServerOptions): EidenticServer {
         }) as AgentIterable,
         "agent.query",
         /* emitSessionComment */ true,
+        /* resumeRoute */ false,
       );
     },
   );
@@ -1416,16 +1385,16 @@ export function createServer(opts: ServerOptions): EidenticServer {
       ) {
         return c.json({ error: "Missing or invalid 'sessionId' field" }, 400);
       }
-      // M7 fix: cap string decision input length — check on raw body before SuspendDecision cast.
       const rawDecision = (body as Record<string, unknown>)["decision"];
-      if (typeof rawDecision === "string" && rawDecision.length > maxInputChars) {
-        return c.json({ error: `Decision input exceeds maximum length of ${maxInputChars} characters` }, 400);
+      if (rawDecision !== undefined && (
+        typeof rawDecision !== "object" || rawDecision === null || Array.isArray(rawDecision) ||
+        typeof (rawDecision as Record<string, unknown>)["approved"] !== "boolean"
+      )) {
+        return c.json({ error: "Invalid 'decision': expected { approved: boolean, data?: unknown }" }, 400);
       }
 
-      const { sessionId, decision } = body as {
-        sessionId: string;
-        decision?: SuspendDecision;
-      };
+      const sessionId = (body as { sessionId: string }).sessionId;
+      const decision = rawDecision as SuspendDecision | undefined;
 
       // Agent resolution — also before quota.check() so unknown-agent requests never
       // consume a reservation slot (Fix #4: quota reservation leak on early return paths).
@@ -1437,7 +1406,7 @@ export function createServer(opts: ServerOptions): EidenticServer {
 
       // Fix 3a — IDOR: verify session ownership before resuming.
       const sessionRecord = await agent.store.getSession(sessionId);
-      if (sessionRecord && !checkOwnership(sessionRecord, principal)) {
+      if (sessionRecord && !await checkOwnership(sessionRecord, principal)) {
         return c.json({ error: "Forbidden" }, 403);
       }
 
@@ -1452,6 +1421,7 @@ export function createServer(opts: ServerOptions): EidenticServer {
         }) as AgentIterable,
         "agent.resume",
         /* emitSessionComment */ false,
+        /* resumeRoute */ true,
       );
     },
   );
@@ -1516,6 +1486,7 @@ export function createServer(opts: ServerOptions): EidenticServer {
 
       // Validate callbackUrl — only allowed when webhooks are configured.
       let validatedCallbackUrl: string | undefined;
+      let validatedWebhookPolicy: EgressBoundaryPolicy | undefined;
       if (rawCallbackUrl !== undefined) {
         if (!opts.webhooks) {
           return c.json({ error: "Webhook callbacks are not configured on this server" }, 400);
@@ -1524,7 +1495,18 @@ export function createServer(opts: ServerOptions): EidenticServer {
           return c.json({ error: "callbackUrl must be a non-empty string" }, 400);
         }
         try {
-          const u = assertCallbackUrl(rawCallbackUrl, opts.webhooks.allowPrivateHosts ?? false);
+          const unsafePrivate = opts.webhooks.allowPrivateHosts === true;
+          const policy: EgressBoundaryPolicy = {
+            allowedHosts: opts.webhooks.allowedHosts ?? [],
+            requireHttps: opts.webhooks.allowInsecureHttp !== true,
+          };
+          if (!unsafePrivate) {
+            if (!opts.webhooks.egress) throw new Error("Webhook callbacks require a SafeEgressPort");
+            await opts.webhooks.egress.validate(rawCallbackUrl, policy);
+            validatedWebhookPolicy = policy;
+          }
+          const u = assertCallbackUrl(rawCallbackUrl, unsafePrivate);
+          u.hash = "";
           validatedCallbackUrl = u.href;
         } catch (err: unknown) {
           return c.json({ error: err instanceof Error ? err.message : "Invalid callbackUrl" }, 400);
@@ -1546,7 +1528,7 @@ export function createServer(opts: ServerOptions): EidenticServer {
       // Ownership: reject cross-tenant session reuse
       if (typeof bodySessionId === "string" && bodySessionId.length > 0) {
         const sessionRecord = await agent.store.getSession(bodySessionId);
-        if (sessionRecord && !checkOwnership(sessionRecord, principal)) {
+        if (sessionRecord && !await checkOwnership(sessionRecord, principal)) {
           return c.json({ error: "Forbidden" }, 403);
         }
       }
@@ -1567,7 +1549,9 @@ export function createServer(opts: ServerOptions): EidenticServer {
       // Register the run entry before starting the background Promise so the
       // status endpoint can observe it immediately (even as "running").
       const runId = crypto.randomUUID();
-      asyncRuns.set({
+      const runController = new AbortController();
+      const ownerApiKey = principal.apiKey !== undefined ? await credentialFingerprint(principal.apiKey) : undefined;
+      const accepted = asyncRuns.set({
         runId,
         sessionId,
         agentId,
@@ -1575,10 +1559,15 @@ export function createServer(opts: ServerOptions): EidenticServer {
         owner: {
           userId: principal.userId,
           orgId: principal.orgId,
-          apiKey: principal.apiKey,
+          apiKey: ownerApiKey,
         },
         createdAt: Date.now(),
+        abort: () => runController.abort(new Error("async run cancelled")),
       });
+      if (!accepted) {
+        if (quota && asyncQuotaReservation !== undefined) quota.release?.(asyncQuotaReservation);
+        return c.json({ error: "async_run_capacity", retryable: true }, 503);
+      }
 
       // Fire-and-forget: run the agent in the background.
       // Events are persisted to the store exactly as in the synchronous /query path.
@@ -1588,7 +1577,13 @@ export function createServer(opts: ServerOptions): EidenticServer {
         let terminalError: string | undefined;
         let terminalUsage: { inputTokens: number; outputTokens: number } | undefined;
         let terminalResult: { usage: { inputTokens: number; outputTokens: number }; cost?: { usd?: number } } | undefined;
+        let terminalSubtype: Exclude<AsyncRunStatus, "running" | "timed_out"> | undefined;
         let localReservation: QuotaReservation | undefined = asyncQuotaReservation;
+        let timedOut = false;
+        const runTimer = setTimeout(() => {
+          timedOut = true;
+          runController.abort(new Error("async run timed out"));
+        }, maxAsyncRunMs);
 
         try {
           for await (const ev of agent.query(input, {
@@ -1596,16 +1591,25 @@ export function createServer(opts: ServerOptions): EidenticServer {
             userId: principal.userId,
             orgId: principal.orgId,
             apiKey: principal.apiKey,
+            signal: runController.signal,
           })) {
             if (ev.type === "result") {
               terminalResult = { usage: ev.usage, cost: ev.cost };
               terminalUsage = ev.usage;
+              terminalSubtype = ev.subtype === "success" ? "completed"
+                : ev.subtype === "error" ? "failed"
+                  : ev.subtype;
               if (ev.subtype === "success") {
                 terminalOutput = typeof ev.output === "string" ? ev.output : ev.output !== undefined ? String(ev.output) : undefined;
-              } else if (ev.subtype === "error") {
-                terminalError = typeof ev.output === "string" ? ev.output : ev.output !== undefined ? String(ev.output) : undefined;
+              } else {
+                terminalError = ev.subtype === "error" ? "Agent run failed" : `Agent run terminated: ${ev.subtype}`;
               }
             }
+          }
+
+          if (!terminalSubtype) {
+            terminalSubtype = "failed";
+            terminalError = "Agent run ended without a terminal result";
           }
 
           // Record quota spend on success
@@ -1616,7 +1620,7 @@ export function createServer(opts: ServerOptions): EidenticServer {
             localReservation = undefined;
           }
 
-          const finalStatus: "completed" | "failed" = terminalError ? "failed" : "completed";
+          const finalStatus: AsyncRunStatus = timedOut ? "timed_out" : terminalSubtype;
           asyncRuns.settle(runId, {
             status: finalStatus,
             output: terminalOutput,
@@ -1628,12 +1632,20 @@ export function createServer(opts: ServerOptions): EidenticServer {
             const webhookPayload: WebhookPayload = {
               runId,
               agentId,
-              status: finalStatus,
+              status: finalStatus === "completed" ? "completed" : "failed",
               ...(terminalOutput !== undefined ? { output: terminalOutput } : {}),
               ...(terminalError !== undefined ? { error: terminalError } : {}),
               ...(terminalUsage !== undefined ? { usage: terminalUsage } : {}),
             };
-            void deliverWebhook(validatedCallbackUrl, webhookPayload, opts.webhooks.signingSecret, console);
+            void deliverWebhook(
+              validatedCallbackUrl,
+              webhookPayload,
+              opts.webhooks.signingSecret,
+              console,
+              opts.webhooks.egress,
+              validatedWebhookPolicy,
+              opts.webhooks.allowPrivateHosts === true,
+            );
           }
         } catch (err: unknown) {
           // Release quota reservation on error
@@ -1641,8 +1653,8 @@ export function createServer(opts: ServerOptions): EidenticServer {
             quota.release?.(localReservation);
             localReservation = undefined;
           }
-          const msg = err instanceof Error ? err.message : String(err);
-          asyncRuns.settle(runId, { status: "failed", error: msg });
+          const msg = timedOut ? "Agent run timed out" : "Agent run failed";
+          asyncRuns.settle(runId, { status: timedOut ? "timed_out" : "failed", error: msg });
 
           // Deliver webhook callback for failed run
           if (validatedCallbackUrl && opts.webhooks) {
@@ -1653,9 +1665,18 @@ export function createServer(opts: ServerOptions): EidenticServer {
               error: msg,
               ...(terminalUsage !== undefined ? { usage: terminalUsage } : {}),
             };
-            void deliverWebhook(validatedCallbackUrl, webhookPayload, opts.webhooks.signingSecret, console);
+            void deliverWebhook(
+              validatedCallbackUrl,
+              webhookPayload,
+              opts.webhooks.signingSecret,
+              console,
+              opts.webhooks.egress,
+              validatedWebhookPolicy,
+              opts.webhooks.allowPrivateHosts === true,
+            );
           }
         } finally {
+          clearTimeout(runTimer);
           // Safety net: release any unsettled reservation (e.g. aborted without terminalResult)
           if (quota && localReservation !== undefined && !terminalResult) {
             quota.release?.(localReservation);
@@ -1690,7 +1711,7 @@ export function createServer(opts: ServerOptions): EidenticServer {
     }
 
     // Ownership enforcement: only the starting principal may poll.
-    const ownerMatches = checkOwnership(entry.owner, principal);
+    const ownerMatches = await checkOwnership(entry.owner, principal);
 
     if (!ownerMatches) {
       return c.json({ error: "Forbidden" }, 403);
@@ -1731,7 +1752,7 @@ export function createServer(opts: ServerOptions): EidenticServer {
 
       // Fix 3a — IDOR: verify session ownership before reading events.
       const sessionRecord = await agent.store.getSession(sessionId);
-      if (sessionRecord && !checkOwnership(sessionRecord, principal)) {
+      if (sessionRecord && !await checkOwnership(sessionRecord, principal)) {
         return c.json({ error: "Forbidden" }, 403);
       }
 
@@ -1758,7 +1779,7 @@ export function createServer(opts: ServerOptions): EidenticServer {
   // ---------------------------------------------------------------------------
 
   /** Match workflow ownership using the same canonical rules as sessions and async runs. */
-  function checkWorkflowOwnership(rec: { owner?: { userId?: string; orgId?: string; apiKey?: string } }, principal: AuthPrincipal): boolean {
+  async function checkWorkflowOwnership(rec: { owner?: { userId?: string; orgId?: string; apiKey?: string } }, principal: AuthPrincipal): Promise<boolean> {
     const owner = rec.owner;
     return checkOwnership(owner ?? {}, principal);
   }
@@ -1769,10 +1790,9 @@ export function createServer(opts: ServerOptions): EidenticServer {
       return unauthorized(c);
     }
 
-    const summaries: WorkflowRunSummary[] = workflowRuns
-      .list()
-      .filter((rec) => checkWorkflowOwnership(rec, principal))
-      .map((rec) => ({
+    const visibleRuns: ReturnType<WorkflowRunRegistry["list"]> = [];
+    for (const rec of workflowRuns.list()) if (await checkWorkflowOwnership(rec, principal)) visibleRuns.push(rec);
+    const summaries: WorkflowRunSummary[] = visibleRuns.map((rec) => ({
         id: rec.id,
         name: rec.name,
         status: rec.status,
@@ -1794,7 +1814,7 @@ export function createServer(opts: ServerOptions): EidenticServer {
     const rec = workflowRuns.get(id);
     // H3 fix: Return 404 on ownership mismatch (no existence oracle — same as not-found).
     // Do not echo back the user-supplied id in the error body.
-    if (!rec || !checkWorkflowOwnership(rec, principal)) {
+    if (!rec || !await checkWorkflowOwnership(rec, principal)) {
       return c.json({ error: "Not found" }, 404);
     }
 
@@ -1806,8 +1826,8 @@ export function createServer(opts: ServerOptions): EidenticServer {
       durationMs: rec.durationMs,
       stepCount: rec.stepCount,
       trace: rec.trace,
-      ...(rec.output !== undefined ? { output: rec.output } : {}),
-      ...(rec.error !== undefined ? { error: rec.error } : {}),
+      ...(rec.output !== undefined ? { output: sanitizeBoundaryValue(rec.output) } : {}),
+      ...(rec.error !== undefined ? { error: sanitizeBoundaryText(rec.error, 1_000) } : {}),
     };
 
     return c.json(detail, 200);
@@ -1817,12 +1837,26 @@ export function createServer(opts: ServerOptions): EidenticServer {
   // `app.request(...)` behaviour AND `app.handle.recordWorkflow(...)` ingestion.
   const handle: ServerHandle = {
     recordWorkflow<O>(name: string, result: WorkflowResult<O>, owner?: WorkflowRunOwner, opts?: RecordOptions): string {
-      const rec = workflowRuns.record(name, result, owner, opts);
+      const safeResult: WorkflowResult<O> = {
+        output: sanitizeBoundaryValue(result.output) as O,
+        trace: result.trace.map((step) => ({
+          ...step,
+          ...(step.error !== undefined ? { error: sanitizeBoundaryText(step.error, 1_000) } : {}),
+        })),
+      };
+      const rec = workflowRuns.record(name, safeResult, owner, opts);
       return rec.id;
     },
     recordWorkflowError(err: WorkflowRunError, owner?: WorkflowRunOwner, opts?: RecordOptions): string {
-      const msg = err.cause instanceof Error ? err.cause.message : String(err.cause ?? err.message);
-      const rec = workflowRuns.recordError(err.workflowName, err.trace, msg, owner, opts);
+      const msg = sanitizeBoundaryText(
+        err.cause instanceof Error ? err.cause.message : String(err.cause ?? err.message),
+        1_000,
+      );
+      const trace = err.trace.map((step) => ({
+        ...step,
+        ...(step.error !== undefined ? { error: sanitizeBoundaryText(step.error, 1_000) } : {}),
+      }));
+      const rec = workflowRuns.recordError(err.workflowName, trace, msg, owner, opts);
       return rec.id;
     },
   };
@@ -1868,12 +1902,20 @@ export interface ServeNodeHandle {
  * - `drain(timeoutMs?)` — gracefully drain: stop accepting new connections,
  *   return 503 to new `/v1/*` requests, wait for in-flight async runs to settle,
  *   then close. Defaults to 30 s timeout.
+ *
+ * `opts.hostname` is forwarded to the Node listener. When omitted, the
+ * underlying runtime's default bind behavior is preserved.
  */
 export async function serveNode(
   app: Hono,
-  opts?: { port?: number },
+  opts?: { port?: number; hostname?: string },
 ): Promise<ServeNodeHandle> {
-  let nodeServer: { serve: (opts: { fetch: (req: Request) => unknown; port: number }) => { close(cb?: () => void): void } };
+  type NodeHttpServer = {
+    close(cb?: () => void): void;
+    closeIdleConnections?(): void;
+    closeAllConnections?(): void;
+  };
+  let nodeServer: { serve: (opts: { fetch: (req: Request) => unknown; port: number; hostname?: string }) => NodeHttpServer };
   try {
     nodeServer = await import("@hono/node-server") as typeof nodeServer;
   } catch {
@@ -1882,7 +1924,11 @@ export async function serveNode(
     );
   }
   const port = opts?.port ?? 3000;
-  const server = nodeServer.serve({ fetch: app.fetch, port });
+  const server = nodeServer.serve({
+    fetch: app.fetch,
+    port,
+    ...(opts?.hostname !== undefined ? { hostname: opts.hostname } : {}),
+  });
 
   // Access drain internals injected by createServer (if the app was created via createServer).
   const _setDraining = (app as unknown as { _setDraining?: (v: boolean) => void })._setDraining;
@@ -1893,14 +1939,20 @@ export async function serveNode(
       server.close();
     },
     async drain(timeoutMs = 30_000): Promise<void> {
+      if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0) {
+        throw new Error("drain timeoutMs must be a non-negative safe integer");
+      }
+      const deadline = Date.now() + timeoutMs;
       // Mark draining so new /v1 requests get 503.
       if (_setDraining) _setDraining(true);
 
-      // Stop accepting new connections.
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      // Stop accepting new connections immediately; do not wait for active SSE sockets before
+      // starting the deadline.
+      let closed = false;
+      const closePromise = new Promise<void>((resolve) => server.close(() => { closed = true; resolve(); }));
+      server.closeIdleConnections?.();
 
       // Wait for all in-flight async runs to settle, or until timeout.
-      const deadline = Date.now() + timeoutMs;
       while (Date.now() < deadline) {
         if (_getAsyncRuns) {
           const running = _getAsyncRuns().values().filter((e) => e.status === "running");
@@ -1908,7 +1960,21 @@ export async function serveNode(
         } else {
           break;
         }
-        await new Promise((r) => setTimeout(r, 100));
+        await new Promise((r) => setTimeout(r, Math.min(50, Math.max(1, deadline - Date.now()))));
+      }
+
+      const running = _getAsyncRuns?.().values().filter((entry) => entry.status === "running") ?? [];
+      if (running.length > 0) {
+        for (const entry of running) entry.abort?.();
+      }
+
+      const remaining = Math.max(0, deadline - Date.now());
+      if (!closed && remaining > 0) {
+        await Promise.race([closePromise, new Promise<void>((resolve) => setTimeout(resolve, remaining))]);
+      }
+      if (!closed) {
+        server.closeAllConnections?.();
+        await Promise.race([closePromise, new Promise<void>((resolve) => setTimeout(resolve, 25))]);
       }
     },
   };

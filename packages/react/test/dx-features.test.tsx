@@ -112,7 +112,7 @@ describe("useEidenticStream retryOnError — transient failure then success", ()
     vi.restoreAllMocks();
   });
 
-  it("retries once on network error and succeeds on second attempt", async () => {
+  it("does not replay a failed POST without an explicit unsafe opt-in", async () => {
     let fetchCallCount = 0;
 
     const successSSE = buildSSE([
@@ -145,13 +145,11 @@ describe("useEidenticStream retryOnError — transient failure then success", ()
       await new Promise((r) => setTimeout(r, 200));
     });
 
-    // Should have retried and succeeded.
-    expect(fetchCallCount).toBe(2);
+    expect(fetchCallCount).toBe(1);
     await waitFor(() => {
-      expect(result.current.status).toBe("done");
+      expect(result.current.status).toBe("error");
     });
-    expect(result.current.error).toBeNull();
-    expect(result.current.messages[0]?.content).toBe("Hello from retry");
+    expect(result.current.error?.message).toContain("Network error");
   });
 
   it("surfaces error status after exhausting all retries", async () => {
@@ -166,6 +164,7 @@ describe("useEidenticStream retryOnError — transient failure then success", ()
     const { result } = renderHook(() =>
       useEidenticStream("http://localhost/v1/agents/test/query", {
         retryOnError: { attempts: 2, backoffMs: 10 },
+        allowUnsafePostRetry: true,
       }),
     );
 
@@ -180,6 +179,167 @@ describe("useEidenticStream retryOnError — transient failure then success", ()
       expect(result.current.status).toBe("error");
     });
     expect(result.current.error?.message).toContain("Persistent network error");
+  });
+
+  it("never retries after the stream has emitted an event", async () => {
+    let fetchCallCount = 0;
+    const encoder = new TextEncoder();
+    const partial = buildSSE([["stream.delta", { delta: { text: "already executed" } }]]);
+    const mockFetch = vi.fn(async () => {
+      fetchCallCount++;
+      return {
+        ok: true,
+        body: new ReadableStream<Uint8Array>({
+          pull(controller) {
+            if (!(controller as unknown as { emitted?: boolean }).emitted) {
+              (controller as unknown as { emitted?: boolean }).emitted = true;
+              controller.enqueue(encoder.encode(partial));
+            } else {
+              controller.error(new Error("connection reset mid-stream"));
+            }
+          },
+        }),
+      } as Response;
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const { result } = renderHook(() =>
+      useEidenticStream("http://localhost/v1/agents/test/query", {
+        retryOnError: { attempts: 3, backoffMs: 1 },
+        allowUnsafePostRetry: true,
+      }),
+    );
+    await act(async () => {
+      result.current.send("side effecting request");
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    });
+
+    expect(fetchCallCount).toBe(1);
+    expect(result.current.status).toBe("error");
+    expect(result.current.messages[0]?.content).toBe("already executed");
+  });
+});
+
+describe("useEidenticStream resume DTO", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("normalizes approve/reject shortcuts to the server SuspendDecision shape", async () => {
+    const suspended = buildSSE([["result", {
+      subtype: "suspended",
+      request: { reason: "approve?" },
+      callId: "call-1",
+      usage: { inputTokens: 1, outputTokens: 1 },
+      numTurns: 1,
+      sessionId: "resume-session",
+    }]]);
+    const resumed = buildSSE([["result", {
+      subtype: "success",
+      usage: { inputTokens: 2, outputTokens: 2 },
+      numTurns: 2,
+      sessionId: "resume-session",
+    }]]);
+    const mockFetch = vi.fn(async () => ({
+      ok: true,
+      body: makeStreamBody(mockFetch.mock.calls.length === 1 ? suspended : resumed),
+    }) as Response);
+    vi.stubGlobal("fetch", mockFetch);
+
+    const { result } = renderHook(() =>
+      useEidenticStream("http://localhost/v1/agents/test/query", { sessionId: "resume-session" }),
+    );
+    await act(async () => {
+      result.current.send("run");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(result.current.status).toBe("suspended");
+
+    await act(async () => {
+      result.current.resume("approve");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    const resumeBody = JSON.parse(mockFetch.mock.calls[1]?.[1]?.body as string);
+    expect(resumeBody).toMatchObject({
+      sessionId: "resume-session",
+      decision: { approved: true },
+    });
+  });
+
+  it("treats a malformed resume stream without a terminal result as an error", async () => {
+    const suspended = buildSSE([["result", {
+      subtype: "suspended",
+      request: { reason: "approve?" },
+      callId: "call-broken",
+      usage: { inputTokens: 1, outputTokens: 1 },
+      numTurns: 1,
+      sessionId: "broken-resume",
+    }]]);
+    const mockFetch = vi.fn(async () => ({
+      ok: true,
+      body: makeStreamBody(mockFetch.mock.calls.length === 1 ? suspended : "not-json\n"),
+    }) as Response);
+    vi.stubGlobal("fetch", mockFetch);
+    const { result } = renderHook(() =>
+      useEidenticStream("http://localhost/v1/agents/test/query", { sessionId: "broken-resume" }),
+    );
+
+    await act(async () => {
+      result.current.send("run");
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+    expect(result.current.status).toBe("suspended");
+    await act(async () => {
+      result.current.resume(true);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+
+    expect(result.current.status).toBe("error");
+    expect(result.current.error?.message).toMatch(/malformed|terminal result|resume stream/i);
+  });
+});
+
+describe("useEidenticStream regenerate safety", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("does not replay the last input into the same append-only session", async () => {
+    const terminal = buildSSE([
+      ["stream.delta", { delta: { text: "original" } }],
+      ["result", {
+        subtype: "success",
+        usage: { inputTokens: 1, outputTokens: 1 },
+        numTurns: 1,
+        sessionId: "append-only-session",
+      }],
+    ]);
+    const mockFetch = vi.fn(async () => ({
+      ok: true,
+      body: makeStreamBody(terminal),
+    }) as Response);
+    const onError = vi.fn();
+    vi.stubGlobal("fetch", mockFetch);
+
+    const { result } = renderHook(() => useEidenticStream("/query", {
+      sessionId: "append-only-session",
+      onError,
+    }));
+    await act(async () => {
+      result.current.send("side effecting input");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(result.current.status).toBe("done");
+
+    act(() => result.current.regenerate());
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(result.current.status).toBe("error");
+    expect(result.current.error?.message).toMatch(/append-only|new session|fork/i);
+    expect(result.current.messages[0]?.content).toBe("original");
+    expect(onError).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -214,6 +374,7 @@ describe("useEidenticStream retryOnError — terminal result.subtype=error is NO
     const { result } = renderHook(() =>
       useEidenticStream("http://localhost/v1/agents/test/query", {
         retryOnError: { attempts: 3, backoffMs: 10 },
+        allowUnsafePostRetry: true,
       }),
     );
 

@@ -110,6 +110,18 @@ export interface WithEidenticOptions {
    * ```
    */
   identify?: (req: Request) => { userId?: string; orgId?: string; apiKey?: string } | Promise<{ userId?: string; orgId?: string; apiKey?: string }>;
+
+  /**
+   * Restore the legacy behavior that accepts userId/orgId/apiKey from the JSON
+   * body when `identify` is not configured.
+   *
+   * @deprecated Request bodies are untrusted and identity fields are spoofable.
+   * Use `identify(req)` to derive a verified principal from cookies/JWT/session.
+   * @default false
+   */
+  allowUntrustedIdentityBody?: boolean;
+  /** @deprecated Explicitly restore an ownerless single-tenant endpoint when no identify hook exists. */
+  unsafeAllowAnonymous?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -117,6 +129,12 @@ export interface WithEidenticOptions {
 // ---------------------------------------------------------------------------
 
 interface EidenticRequestBody {
+  /** AI SDK chat id. Used as the stable session id when sessionId is absent. */
+  id?: string;
+  /** AI SDK send trigger. Regeneration is rejected because sessions are append-only. */
+  trigger?: "submit-message" | "regenerate-message" | string;
+  /** AI SDK message targeted by a regeneration request. */
+  messageId?: string;
   /** The user message as a plain string. */
   input?: string;
   /** Alias for `input`. */
@@ -131,13 +149,16 @@ interface EidenticRequestBody {
   /** Optional session identifier.  A new UUID is minted when absent. */
   sessionId?: string;
   /**
-   * Optional user identifier forwarded to the agent for memory scoping.
+   * Legacy user identifier. Ignored unless allowUntrustedIdentityBody is true.
    *
    * WARNING: This value comes from the client and MUST NOT be trusted for
    * access control. Use the `identify` option to derive the userId server-side
    * from your authenticated session instead.
    */
   userId?: string;
+  /** Legacy untrusted identity fields; ignored unless allowUntrustedIdentityBody is true. */
+  orgId?: string;
+  apiKey?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -191,9 +212,9 @@ const DEFAULT_MAX_BODY_BYTES = 1_048_576;
  *
  * 1. Authenticate the caller BEFORE the handler runs (e.g. via Next.js middleware,
  *    or an `identify` option that reads your session cookie / JWT).
- * 2. Derive `userId` and `sessionId` from your application's authenticated session,
- *    NOT from the request body (`body.userId` / `body.sessionId` are caller-controlled
- *    and can be forged). Use the `identify` option for this.
+ * 2. Derive identity with `identify`; body `userId`/`orgId`/`apiKey` values are ignored by
+ *    default. A body session/chat id is conversation context, not proof of identity, and the
+ *    authenticated principal must own any resumed session.
  * 3. Never expose this handler on a public route without protecting it.
  *
  * @example
@@ -228,17 +249,18 @@ const DEFAULT_MAX_BODY_BYTES = 1_048_576;
  * | `input`     | `string`       | yes*     | The user message                                     |
  * | `message`   | `string`       | yes*     | Alias for `input`                                    |
  * | `messages`  | `UIMessage[]`  | yes*     | A `useChat` history — the newest user message is used |
+ * | `id`        | `string`       | no       | AI SDK chat id; stable session fallback               |
  * | `sessionId` | `string`       | no       | Resume an existing session                           |
- * | `userId`    | `string`       | no       | User ID for memory scoping (see WARNING)             |
+ * | `userId`    | `string`       | no       | Ignored legacy identity (see WARNING)                 |
  *
  * *One of `input`, `message`, or a non-empty `messages` array must be present. The `messages`
  * form is what Vercel's `useChat` POSTs by default, so the route works with `useChat` out of the
  * box — no client-side request transform (e.g. `prepareSendMessagesRequest`) is needed. The agent
  * reloads prior turns from the store via `sessionId`, so only the newest user message is read.
  *
- * WARNING: `userId` and `sessionId` in the request body are caller-controlled.
- * Always derive identity server-side via the `identify` option in multi-tenant
- * deployments — do not rely on client-supplied values for access control.
+ * WARNING: body identity and session/chat ids are caller-controlled. Body identity is ignored
+ * unless the unsafe compatibility flag is enabled; always derive access-control identity with
+ * `identify` and rely on the agent store's owner checks for an existing session.
  *
  * ### Protocol: `"ai-sdk-ui"` (default)
  *
@@ -311,16 +333,19 @@ export function withEidentic(
             chunks.push(value);
           }
         }
-        rawText = decoder.decode(
-          chunks.length === 1
-            ? chunks[0]
-            : chunks.reduce((acc, c) => {
-                const merged = new Uint8Array(acc.byteLength + c.byteLength);
-                merged.set(acc, 0);
-                merged.set(c, acc.byteLength);
-                return merged;
-              }, new Uint8Array(0)),
-        );
+        if (chunks.length === 1) {
+          rawText = decoder.decode(chunks[0]);
+        } else {
+          // Allocate once and copy each chunk once. Repeatedly growing a buffer
+          // makes chunked request parsing quadratic for adversarial tiny chunks.
+          const merged = new Uint8Array(totalBytes);
+          let offset = 0;
+          for (const chunk of chunks) {
+            merged.set(chunk, offset);
+            offset += chunk.byteLength;
+          }
+          rawText = decoder.decode(merged);
+        }
       }
     } catch {
       return new Response(
@@ -330,13 +355,31 @@ export function withEidentic(
     }
 
     // Parse body
-    let body: EidenticRequestBody;
+    let parsedBody: unknown;
     try {
-      body = JSON.parse(rawText) as EidenticRequestBody;
+      parsedBody = JSON.parse(rawText) as unknown;
     } catch {
       return new Response(
         JSON.stringify({ error: "Invalid JSON body" }),
         { status: 400, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (parsedBody === null || typeof parsedBody !== "object" || Array.isArray(parsedBody)) {
+      return new Response(
+        JSON.stringify({ error: "JSON body must be an object" }),
+        { status: 400, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    const body = parsedBody as EidenticRequestBody;
+
+    if (body.trigger === "regenerate-message") {
+      return new Response(
+        JSON.stringify({
+          error:
+            "Message regeneration is not supported on an append-only Eidentic session; start a forked chat/session instead",
+          ...(typeof body.messageId === "string" ? { messageId: body.messageId } : {}),
+        }),
+        { status: 409, headers: { "Content-Type": "application/json" } },
       );
     }
 
@@ -351,29 +394,54 @@ export function withEidentic(
       );
     }
 
-    const sessionId =
+    const requestedSessionId =
       typeof body.sessionId === "string" && body.sessionId.length > 0
         ? body.sessionId
-        : crypto.randomUUID();
+        : typeof body.id === "string" && body.id.length > 0
+          ? body.id
+          : undefined;
+    const sessionId = requestedSessionId ?? crypto.randomUUID();
 
     // Fix #8b — derive identity server-side via `identify` when provided.
-    // The server-side identity OVERRIDES any body-supplied userId/orgId so that
-    // the client cannot spoof their identity.
+    // Identity comes from the trusted server-side hook. Body identity is ignored
+    // unless the explicit legacy compatibility option is enabled.
     let userId: string | undefined;
     let orgId: string | undefined;
     let apiKey: string | undefined;
     if (opts.identify) {
-      const principal = await opts.identify(req);
-      userId = principal.userId;
-      orgId = principal.orgId;
-      apiKey = principal.apiKey;
-    } else {
-      // Fall back to body-supplied userId (single-tenant / no auth path).
-      // WARNING: body.userId is caller-controlled; use `identify` in multi-tenant deployments.
+      const principal = await opts.identify(req) as
+        | { userId?: unknown; orgId?: unknown; apiKey?: unknown }
+        | null
+        | undefined;
+      const validField = (value: unknown): value is string =>
+        typeof value === "string" && value.trim().length > 0;
+      if (
+        principal == null ||
+        (![principal.userId, principal.orgId, principal.apiKey].some(validField)) ||
+        [principal.userId, principal.orgId, principal.apiKey]
+          .some((value) => value !== undefined && !validField(value))
+      ) {
+        return new Response(
+          JSON.stringify({ error: "Unauthenticated: identify(req) returned no valid principal identity" }),
+          { status: 401, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      userId = validField(principal.userId) ? principal.userId : undefined;
+      orgId = validField(principal.orgId) ? principal.orgId : undefined;
+      apiKey = validField(principal.apiKey) ? principal.apiKey : undefined;
+    } else if (opts.allowUntrustedIdentityBody === true) {
+      // Explicit compatibility mode only. These values are caller-controlled.
       userId =
         typeof body.userId === "string" && body.userId.length > 0
           ? body.userId
           : undefined;
+      orgId = typeof body.orgId === "string" && body.orgId.length > 0 ? body.orgId : undefined;
+      apiKey = typeof body.apiKey === "string" && body.apiKey.length > 0 ? body.apiKey : undefined;
+    } else if (opts.unsafeAllowAnonymous !== true) {
+      return new Response(
+        JSON.stringify({ error: "Unauthenticated: configure identify(req)" }),
+        { status: 401, headers: { "Content-Type": "application/json" } },
+      );
     }
 
     const signal = req.signal;
@@ -401,15 +469,14 @@ export function withEidentic(
             if (signal.aborted) break;
             controller.enqueue(encoder.encode(JSON.stringify(ev) + "\n"));
           }
-        } catch (err: unknown) {
+        } catch {
           if (!signal.aborted) {
-            const msg = err instanceof Error ? err.message : String(err);
             controller.enqueue(
               encoder.encode(
                 JSON.stringify({
                   type: "result",
                   subtype: "error",
-                  output: msg,
+                  output: "Agent run failed",
                   usage: { inputTokens: 0, outputTokens: 0 },
                   numTurns: 0,
                   sessionId,

@@ -1,4 +1,4 @@
-import { createTool } from "@eidentic/core";
+import { createTool, sanitizeBoundaryText, sanitizeBoundaryValue } from "@eidentic/core";
 import type { Tool } from "@eidentic/core";
 import { z } from "zod";
 import type { A2AAgentCard } from "./server.js";
@@ -15,7 +15,20 @@ export interface A2ATransport {
    * Send a JSON-RPC request to the remote A2A agent and return the parsed result.
    * Should throw (or return `{ error }`) on protocol errors; `a2aTool` handles both.
    */
-  send(method: string, params: unknown): Promise<unknown>;
+  send(method: string, params: unknown, opts?: A2ASendOptions): Promise<unknown>;
+}
+
+export interface A2ASendOptions {
+  /** Abort this individual transport call. */
+  signal?: AbortSignal;
+}
+
+export interface A2AHttpOptions extends A2ASendOptions {
+  headers?: Record<string, string>;
+  /** Overall fetch + response-body deadline. @default 30_000 */
+  timeoutMs?: number;
+  /** Maximum decompressed response bytes read before aborting. @default 1_048_576 */
+  maxResponseBytes?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -94,7 +107,7 @@ export function a2aTool(transport: A2ATransport, opts?: A2AToolOptions): Tool {
     description: opts?.description ?? "Call a remote A2A agent via the Agent-to-Agent (A2A) protocol.",
     inputSchema: z.object({ message: z.string().describe("The message to send to the remote A2A agent.") }),
     sideEffect: "destructive", // remote agent calls are side-effecting by default
-    execute: async ({ input }) => {
+    execute: async ({ input, ctx }) => {
       const contextId =
         opts?.sessionId ??
         `ctx_${Date.now().toString(36)}_${(_toolCallSeq++).toString(36)}`;
@@ -113,9 +126,9 @@ export function a2aTool(transport: A2ATransport, opts?: A2AToolOptions): Tool {
 
       let raw: unknown;
       try {
-        raw = await transport.send("message/send", params);
+        raw = await transport.send("message/send", params, { signal: ctx?.signal });
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
+        const msg = sanitizeBoundaryText(e instanceof Error ? e.message : String(e), 500);
         return { error: `A2A transport error: ${msg}` };
       }
 
@@ -124,7 +137,9 @@ export function a2aTool(transport: A2ATransport, opts?: A2AToolOptions): Tool {
         const r = raw as Record<string, unknown>;
         if (r["error"] != null) {
           const err = r["error"] as Record<string, unknown>;
-          const msg = typeof err["message"] === "string" ? err["message"] : JSON.stringify(err);
+          const msg = typeof err["message"] === "string"
+            ? sanitizeBoundaryText(err["message"], 500)
+            : JSON.stringify(sanitizeBoundaryValue(err));
           return { error: `A2A error: ${msg}` };
         }
         // Unwrap JSON-RPC result envelope if present: { jsonrpc, id, result }
@@ -143,26 +158,132 @@ export function a2aTool(transport: A2ATransport, opts?: A2AToolOptions): Tool {
 // httpA2ATransport — fetch-based A2ATransport for a real remote A2A base URL
 // ---------------------------------------------------------------------------
 
+const DEFAULT_HTTP_TIMEOUT_MS = 30_000;
+const DEFAULT_MAX_RESPONSE_BYTES = 1_048_576;
+
+function positiveIntegerOption(name: string, value: number | undefined, fallback: number): number {
+  const resolved = value ?? fallback;
+  if (!Number.isSafeInteger(resolved) || resolved <= 0) {
+    throw new TypeError(`${name} must be a positive safe integer`);
+  }
+  return resolved;
+}
+
+function createAbortContext(
+  timeoutMs: number,
+  signals: Array<AbortSignal | undefined>,
+): { signal: AbortSignal; cleanup(): void } {
+  const controller = new AbortController();
+  const listeners: Array<{ signal: AbortSignal; listener: () => void }> = [];
+  const forward = (source: AbortSignal) => {
+    if (!controller.signal.aborted) {
+      controller.abort(source.reason ?? new Error("A2A request aborted"));
+    }
+  };
+  for (const signal of signals) {
+    if (signal === undefined) continue;
+    if (signal.aborted) {
+      forward(signal);
+      break;
+    }
+    const listener = () => forward(signal);
+    signal.addEventListener("abort", listener, { once: true });
+    listeners.push({ signal, listener });
+  }
+  const timer = setTimeout(() => {
+    if (!controller.signal.aborted) {
+      controller.abort(new Error(`A2A request timed out after ${timeoutMs}ms`));
+    }
+  }, timeoutMs);
+  return {
+    signal: controller.signal,
+    cleanup() {
+      clearTimeout(timer);
+      for (const entry of listeners) {
+        entry.signal.removeEventListener("abort", entry.listener);
+      }
+    },
+  };
+}
+
+async function cancelResponseBody(res: Response): Promise<void> {
+  await res.body?.cancel().catch(() => undefined);
+}
+
+async function readJsonResponse(
+  res: Response,
+  maxBytes: number,
+  label: string,
+): Promise<unknown> {
+  const contentLength = res.headers.get("content-length");
+  if (contentLength !== null) {
+    const declared = Number(contentLength);
+    if (Number.isFinite(declared) && declared > maxBytes) {
+      await cancelResponseBody(res);
+      throw new Error(`${label} response is too large (max ${maxBytes} bytes)`);
+    }
+  }
+  const reader = res.body?.getReader();
+  if (reader === undefined) throw new Error(`${label} response body is missing`);
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value === undefined || value.byteLength === 0) continue;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      throw new Error(`${label} response is too large (max ${maxBytes} bytes)`);
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+  } catch {
+    throw new Error(`${label} returned invalid JSON`);
+  }
+}
+
 export function httpA2ATransport(
   baseUrl: string,
-  init?: { headers?: Record<string, string> },
+  init: A2AHttpOptions = {},
 ): A2ATransport {
   const url = baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
+  const timeoutMs = positiveIntegerOption("timeoutMs", init.timeoutMs, DEFAULT_HTTP_TIMEOUT_MS);
+  const maxResponseBytes = positiveIntegerOption(
+    "maxResponseBytes",
+    init.maxResponseBytes,
+    DEFAULT_MAX_RESPONSE_BYTES,
+  );
   return {
-    async send(method: string, params: unknown): Promise<unknown> {
+    async send(method: string, params: unknown, opts?: A2ASendOptions): Promise<unknown> {
       const body = JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method, params });
-      const res = await fetch(url + "/", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(init?.headers ?? {}),
-        },
-        body,
-      });
-      if (!res.ok) {
-        throw new Error(`A2A HTTP error: ${res.status} ${res.statusText}`);
+      const abort = createAbortContext(timeoutMs, [init.signal, opts?.signal]);
+      try {
+        const res = await fetch(url + "/", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(init.headers ?? {}),
+          },
+          body,
+          signal: abort.signal,
+        });
+        if (!res.ok) {
+          await cancelResponseBody(res);
+          throw new Error(`A2A HTTP error: ${res.status} ${res.statusText}`);
+        }
+        return await readJsonResponse(res, maxResponseBytes, "A2A");
+      } finally {
+        abort.cleanup();
       }
-      return res.json();
     },
   };
 }
@@ -171,15 +292,37 @@ export function httpA2ATransport(
 // fetchAgentCard — GET /.well-known/agent-card.json from a remote A2A server
 // ---------------------------------------------------------------------------
 
-export async function fetchAgentCard(baseUrl: string): Promise<A2AAgentCard> {
+export async function fetchAgentCard(
+  baseUrl: string,
+  opts: A2AHttpOptions = {},
+): Promise<A2AAgentCard> {
   const url = baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
-  const res = await fetch(`${url}/.well-known/agent-card.json`);
-  if (!res.ok) {
-    throw new Error(`fetchAgentCard: HTTP ${res.status} ${res.statusText}`);
+  const timeoutMs = positiveIntegerOption("timeoutMs", opts.timeoutMs, DEFAULT_HTTP_TIMEOUT_MS);
+  const maxResponseBytes = positiveIntegerOption(
+    "maxResponseBytes",
+    opts.maxResponseBytes,
+    DEFAULT_MAX_RESPONSE_BYTES,
+  );
+  const abort = createAbortContext(timeoutMs, [opts.signal]);
+  let card: unknown;
+  try {
+    const res = await fetch(`${url}/.well-known/agent-card.json`, {
+      headers: opts.headers,
+      signal: abort.signal,
+    });
+    if (!res.ok) {
+      await cancelResponseBody(res);
+      throw new Error(`fetchAgentCard: HTTP ${res.status} ${res.statusText}`);
+    }
+    card = await readJsonResponse(res, maxResponseBytes, "fetchAgentCard");
+  } finally {
+    abort.cleanup();
   }
-  const card = (await res.json()) as Record<string, unknown>;
   // Validate minimal required fields
-  if (typeof card["name"] !== "string") {
+  if (card === null || typeof card !== "object" || Array.isArray(card)) {
+    throw new Error("fetchAgentCard: response must be a JSON object");
+  }
+  if (typeof (card as Record<string, unknown>)["name"] !== "string") {
     throw new Error("fetchAgentCard: response missing required field 'name'");
   }
   return card as unknown as A2AAgentCard;

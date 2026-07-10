@@ -14,7 +14,7 @@
 import { describe, it, expect } from "vitest";
 import { Agent } from "@eidentic/core";
 import { MockModel, InMemoryStore } from "@eidentic/types/testing";
-import { createStudio, createStudioApi, serveStudio, StudioServeOptions } from "@eidentic/studio";
+import { createStudio, createStudioApi, serveStudio, ApiKeyAuth, StudioServeOptions } from "@eidentic/studio";
 import type { ModelResponse } from "@eidentic/types";
 
 function textResponse(text: string): ModelResponse {
@@ -72,6 +72,35 @@ describe("createStudio — combined app", () => {
     const miss = await app.request("/api/agents/no-such-agent/blocks");
     expect(miss.status).toBe(404);
   });
+
+  it("blocks remote NoAuth access to combined run routes in local-only mode", async () => {
+    const agent = await makeAgent();
+    const app = createStudio({ agents: { [AGENT_ID]: agent } });
+    const res = await app.request(`http://studio.example/v1/agents/${AGENT_ID}/query`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ input: "remote" }),
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("does not silently grant a Studio admin credential access to NoAuth run routes", async () => {
+    const agent = await makeAgent();
+    const app = createStudio({
+      agents: { [AGENT_ID]: agent },
+      adminAuth: ApiKeyAuth({ "admin-key": { userId: "admin" } }),
+    });
+    const headers = { authorization: "Bearer admin-key" };
+
+    const admin = await app.request("http://studio.example/api/agents", { headers });
+    const run = await app.request(`http://studio.example/v1/agents/${AGENT_ID}/query`, {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({ input: "remote" }),
+    });
+    expect(admin.status).toBe(200);
+    expect(run.status).toBe(401);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -87,5 +116,13 @@ describe("serveStudio export", () => {
     // This just ensures the type is importable and usable
     const opts: StudioServeOptions = { agents: {} };
     expect(typeof opts).toBe("object");
+  });
+
+  it("refuses a non-loopback NoAuth bind before opening a socket", async () => {
+    const agent = await makeAgent();
+    await expect(serveStudio(
+      { agents: { [AGENT_ID]: agent } },
+      { port: 0, hostname: "0.0.0.0" },
+    )).rejects.toThrow(/loopback|adminAuth/i);
   });
 });

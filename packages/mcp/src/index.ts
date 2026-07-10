@@ -8,6 +8,11 @@ export type {
   McpServerToolsOpts,
   AgentLike,
   McpAuditEvent,
+  McpTransportContext,
+  McpAuthenticatedContext,
+  McpAuthenticationSuccess,
+  McpAuthenticationResult,
+  McpAgentIdentity,
 } from "./server.js";
 export { serveTools, serveAgent, createMcpServer, mcpServer } from "./server.js";
 
@@ -154,6 +159,7 @@ export async function mcpTools(client: McpClientLike, opts: McpToolsOptions = {}
       id,
       description: t.description ?? `MCP tool ${t.name}`,
       sideEffect,
+      requiredSecrets: [],
       jsonSchema: (t.inputSchema ?? {}) as Record<string, unknown>,
       // Pass-through: the MCP server validates arguments server-side. We accept any object.
       parse: (input) => ({ ok: true, value: input }),

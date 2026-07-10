@@ -35,11 +35,17 @@ export const runtime = "nodejs";
 
 const agent = new Agent({
   id: "support",
+  instructions: "You are a helpful support assistant.",
   model: new AIModel(anthropic("claude-sonnet-4-5")),
   store: new LibsqlStore("file:eidentic.db"),
 });
 
-export const POST = withEidentic(agent);
+export const POST = withEidentic(agent, {
+  async identify(req) {
+    const session = await requireSession(req);
+    return { userId: session.user.id, orgId: session.org.id };
+  },
+});
 ```
 
 ```tsx
@@ -48,12 +54,21 @@ import { useChat } from "@ai-sdk/react";
 
 export function Chat() {
   // `useChat` POSTs `{ messages: [...] }`; `withEidentic` reads the newest user message out of the
-  // box — no `prepareSendMessagesRequest` / request transform needed. Pass a stable `sessionId`
-  // (via the transport body) so the agent persists and recalls the conversation across reloads.
+  // box — no `prepareSendMessagesRequest` / request transform needed. The AI SDK's top-level chat
+  // `id` becomes the stable Eidentic session id unless an explicit `sessionId` is supplied.
   const { messages, sendMessage } = useChat();
   return null; // render `messages`; send with `sendMessage({ text })`
 }
 ```
+
+Request-body `userId`, `orgId`, and `apiKey` values are ignored by default. Identity must come from
+the trusted `identify(req)` hook; omitting it returns HTTP 401. `allowUntrustedIdentityBody: true`
+restores spoofable body identity, while `unsafeAllowAnonymous: true` restores ownerless sessions.
+Both options exist only for a controlled single-tenant migration.
+
+AI SDK `regenerate-message` requests return HTTP 409. Eidentic sessions are append-only; replaying
+an old user message into the same session would retain the stale assistant answer and duplicate
+history. Start a new/forked chat id when implementing regeneration.
 
 ## Links
 

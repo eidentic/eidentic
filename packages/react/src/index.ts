@@ -18,6 +18,7 @@ export type {
   EidenticStreamOptions,
   StreamStatus,
   SuspensionState,
+  ResumeDecisionInput,
 } from "./useEidenticStream.js";
 
 export { useAgent } from "./useAgent.js";

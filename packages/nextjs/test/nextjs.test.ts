@@ -6,11 +6,14 @@ import { describe, it, expect } from "vitest";
 import { Agent } from "@eidentic/core";
 import { MockModel, InMemoryStore } from "@eidentic/types/testing";
 import type { ModelResponse } from "@eidentic/types";
-import { withEidentic, eidenticNextConfig } from "@eidentic/nextjs";
+import { withEidentic as guardedWithEidentic, eidenticNextConfig } from "@eidentic/nextjs";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+const withEidentic: typeof guardedWithEidentic = (agent, opts = {}) =>
+  guardedWithEidentic(agent, { unsafeAllowAnonymous: true, ...opts });
 
 function textResponse(text: string): ModelResponse {
   return {
@@ -30,7 +33,7 @@ function makeAgent(responses: ModelResponse[]) {
   return { agent, store };
 }
 
-function makeRequest(body: Record<string, unknown>, signal?: AbortSignal): Request {
+function makeRequest(body: unknown, signal?: AbortSignal): Request {
   return new Request("http://localhost/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -170,6 +173,19 @@ describe("withEidentic — ai-sdk-ui protocol (default)", () => {
     expect(body.error).toMatch(/json/i);
   });
 
+  it.each([null, [], "text", 42])(
+    "returns 400 for a non-object JSON body (%j)",
+    async (invalidBody) => {
+      const { agent } = makeAgent([textResponse("hi")]);
+      const res = await withEidentic(agent)(makeRequest(invalidBody));
+
+      expect(res.status).toBe(400);
+      await expect(res.json()).resolves.toMatchObject({
+        error: expect.stringMatching(/object|json/i),
+      });
+    },
+  );
+
   it("passes sessionId from body to the agent", async () => {
     const { agent, store } = makeAgent([textResponse("OK")]);
     const handler = withEidentic(agent);
@@ -197,6 +213,53 @@ describe("withEidentic — ai-sdk-ui protocol (default)", () => {
     const sessions = await store.listSessions({ agentId: "nextjs-test-agent" });
     expect(sessions.length).toBe(1);
     expect(sessions[0]?.id).toBeTruthy();
+  });
+
+  it("uses the AI SDK top-level chat id as a stable session across message-history posts", async () => {
+    const { agent, store } = makeAgent([textResponse("one"), textResponse("two")]);
+    const handler = withEidentic(agent);
+
+    const first = await handler(makeRequest({
+      id: "chat-stable-1",
+      messages: [{ role: "user", parts: [{ type: "text", text: "first" }] }],
+    }));
+    await first.text();
+    const second = await handler(makeRequest({
+      id: "chat-stable-1",
+      messages: [
+        { role: "user", parts: [{ type: "text", text: "first" }] },
+        { role: "assistant", parts: [{ type: "text", text: "one" }] },
+        { role: "user", parts: [{ type: "text", text: "second" }] },
+      ],
+    }));
+    await second.text();
+
+    const sessions = await store.listSessions({ agentId: "nextjs-test-agent" });
+    expect(sessions.map((session) => session.id)).toEqual(["chat-stable-1"]);
+    const events = await store.readEvents("chat-stable-1");
+    expect(events.filter((event) => event.kind === "user")).toHaveLength(2);
+  });
+
+  it("rejects AI SDK regeneration before it appends duplicate/stale history", async () => {
+    const { agent, store } = makeAgent([textResponse("must not run")]);
+    const handler = withEidentic(agent);
+
+    const response = await handler(makeRequest({
+      id: "chat-regenerate",
+      trigger: "regenerate-message",
+      messageId: "assistant-previous",
+      messages: [
+        { role: "user", parts: [{ type: "text", text: "original prompt" }] },
+        { role: "assistant", parts: [{ type: "text", text: "stale answer" }] },
+      ],
+    }));
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: expect.stringMatching(/regenerat|fork|append-only/i),
+      messageId: "assistant-previous",
+    });
+    expect(await store.listSessions({ agentId: "nextjs-test-agent" })).toEqual([]);
   });
 
   it("merges extra headers into the response", async () => {
@@ -439,9 +502,41 @@ describe("withEidentic — body-size guard (Finding #8a)", () => {
     expect(res.status).toBe(200);
     await res.text();
   });
+
+  it("parses a body split across many tiny chunks", async () => {
+    const { agent } = makeAgent([textResponse("hi")]);
+    const body = JSON.stringify({ input: "many chunks" });
+    const bytes = new TextEncoder().encode(body);
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const byte of bytes) controller.enqueue(Uint8Array.of(byte));
+        controller.close();
+      },
+    });
+    const req = new Request("http://localhost/api/chat", {
+      method: "POST",
+      // @ts-expect-error Node requires duplex for streaming request bodies.
+      duplex: "half",
+      body: stream,
+    });
+
+    const res = await withEidentic(agent, { maxBodyBytes: 1024 })(req);
+    expect(res.status).toBe(200);
+    await res.text();
+  });
 });
 
 describe("withEidentic — identify override (Finding #8b)", () => {
+  it("fails closed when no identify hook is configured", async () => {
+    const { agent, store } = makeAgent([textResponse("SHOULD NOT RUN")]);
+    const res = await guardedWithEidentic(agent)(makeRequest({
+      input: "hi",
+      sessionId: "anonymous-denied",
+    }));
+    expect(res.status).toBe(401);
+    expect(await store.getSession("anonymous-denied")).toBeNull();
+  });
+
   it("identify() return value overrides body-supplied userId", async () => {
     const { agent, store } = makeAgent([textResponse("ok")]);
     const handler = withEidentic(agent, {
@@ -459,7 +554,7 @@ describe("withEidentic — identify override (Finding #8b)", () => {
     expect(session?.userId).toBe("server-determined-user");
   });
 
-  it("identify() with no userId falls back to undefined (no owner on session)", async () => {
+  it("fails closed when identify() returns an empty principal", async () => {
     const { agent, store } = makeAgent([textResponse("ok")]);
     const handler = withEidentic(agent, {
       identify: async () => ({}),
@@ -467,24 +562,51 @@ describe("withEidentic — identify override (Finding #8b)", () => {
 
     const req = makeRequest({ input: "hi", userId: "should-be-ignored", sessionId: "no-owner-sess" });
     const res = await handler(req);
-    expect(res.status).toBe(200);
-    await res.text();
+    expect(res.status).toBe(401);
+    expect(await res.json()).toMatchObject({ error: expect.stringMatching(/unauthenticated|principal/i) });
 
     const session = await store.getSession("no-owner-sess");
-    // No userId from identify → session has no owner.
-    expect(session?.userId).toBeUndefined();
+    expect(session).toBeNull();
   });
 
-  it("without identify, body-supplied userId is used (single-tenant fallback)", async () => {
+  it("explicit unsafe anonymous mode still ignores body-supplied identity", async () => {
     const { agent, store } = makeAgent([textResponse("ok")]);
     const handler = withEidentic(agent);
 
-    const req = makeRequest({ input: "hi", userId: "body-user", sessionId: "body-user-sess" });
+    const req = makeRequest({
+      input: "hi",
+      userId: "body-user",
+      orgId: "body-org",
+      apiKey: "body-secret",
+      sessionId: "body-user-sess",
+    });
     const res = await handler(req);
     expect(res.status).toBe(200);
     await res.text();
 
     const session = await store.getSession("body-user-sess");
-    expect(session?.userId).toBe("body-user");
+    expect(session?.userId).toBeUndefined();
+    expect(session?.orgId).toBeUndefined();
+    expect(session?.apiKey).toBeUndefined();
+  });
+
+  it("keeps legacy body identity behind an explicit unsafe compatibility opt-in", async () => {
+    const { agent, store } = makeAgent([textResponse("ok")]);
+    const handler = withEidentic(agent, { allowUntrustedIdentityBody: true });
+
+    const res = await handler(makeRequest({
+      input: "hi",
+      userId: "legacy-user",
+      orgId: "legacy-org",
+      apiKey: "legacy-key",
+      sessionId: "legacy-body-identity",
+    }));
+    await res.text();
+
+    const session = await store.getSession("legacy-body-identity");
+    expect(session?.userId).toBe("legacy-user");
+    expect(session?.orgId).toBe("legacy-org");
+    expect(session?.apiKey).toMatch(/^eidentic\.credential\.sha256:[0-9a-f]{64}$/);
+    expect(session?.apiKey).not.toContain("legacy-key");
   });
 });

@@ -859,37 +859,41 @@ describe("SSE stream resumability (Last-Event-ID)", () => {
     return readResponseText(res);
   }
 
-  it("fresh connection: all events carry an SSE id field", async () => {
+  it("fresh connection: only durably persisted visible events carry their exact SSE id", async () => {
     const { agent } = makeAgent([textResponse("hi there")]);
     const app = createServer({ agents: { demo: agent } });
 
     const text = await runQuery(app, "sse-id-sess-1");
     const events = parseSseEvents(text);
 
-    // Every event except stream.delta and result should have an id
+    // session.init is not a stored event and must not claim another record's cursor.
     const sessionInitEvents = events.filter((e) => e.event === "session.init");
     expect(sessionInitEvents.length).toBeGreaterThan(0);
-    expect(sessionInitEvents[0]!.id).toBeDefined();
-    expect(sessionInitEvents[0]!.id).toMatch(/^\d+$/);
+    expect(sessionInitEvents[0]!.id).toBeUndefined();
 
     const assistantEvents = events.filter((e) => e.event === "assistant");
     expect(assistantEvents.length).toBeGreaterThan(0);
     expect(assistantEvents[0]!.id).toBeDefined();
     expect(assistantEvents[0]!.id).toMatch(/^\d+$/);
+    expect((assistantEvents[0]!.data as { eventSeq?: number }).eventSeq).toBe(
+      Number(assistantEvents[0]!.id),
+    );
+
+    const resultEvent = events.find((event) => event.event === "result");
+    expect(resultEvent?.id).toMatch(/^\d+$/);
+    expect((resultEvent?.data as { eventSeq?: number }).eventSeq).toBe(Number(resultEvent?.id));
   });
 
-  it("fresh connection: stream.delta events do NOT carry an SSE id", async () => {
-    // MockModel does not emit stream.delta; just verify result has no id
+  it("fresh connection: terminal result carries its persisted terminal_result id", async () => {
     const { agent } = makeAgent([textResponse("hi")]);
     const app = createServer({ agents: { demo: agent } });
 
     const text = await runQuery(app, "sse-id-delta-sess");
     const events = parseSseEvents(text);
 
-    // result event should have no id
     const resultEvents = events.filter((e) => e.event === "result");
     expect(resultEvents.length).toBeGreaterThan(0);
-    expect(resultEvents[0]!.id).toBeUndefined();
+    expect(resultEvents[0]!.id).toMatch(/^\d+$/);
   });
 
   it("fresh connection: SSE ids are monotonically increasing for persisted events", async () => {
@@ -963,7 +967,7 @@ describe("SSE stream resumability (Last-Event-ID)", () => {
     expect((resultEvent?.data as { subtype: string }).subtype).toBe("success");
   });
 
-  it("reconnect with Last-Event-ID equal to last stored seq: receives only result (nothing to replay)", async () => {
+  it("reconnect with Last-Event-ID equal to last stored seq emits no duplicate events", async () => {
     const store = new InMemoryStore();
     const { agent } = makeAgent([textResponse("short response")], store);
     const app = createServer({ agents: { demo: agent } });
@@ -981,13 +985,24 @@ describe("SSE stream resumability (Last-Event-ID)", () => {
     });
     const reconnectEvents = parseSseEvents(reconnectText);
 
-    // Should only receive the synthesized result (no stored events to replay)
-    const assistantEvents = reconnectEvents.filter((e) => e.event === "assistant");
-    expect(assistantEvents.length).toBe(0); // nothing to replay
+    expect(reconnectEvents).toEqual([]);
+  });
 
-    const resultEvent = reconnectEvents.find((e) => e.event === "result");
-    expect(resultEvent).toBeDefined();
-    expect((resultEvent?.data as { subtype: string }).subtype).toBe("success");
+  it("replays byte-equivalent persisted assistant and terminal events", async () => {
+    const store = new InMemoryStore();
+    const { agent } = makeAgent([textResponse("exact replay")], store);
+    const app = createServer({ agents: { demo: agent } });
+    const fresh = parseSseEvents(await runQuery(app, "exact-replay-sess"));
+    const freshPersisted = fresh.filter((event) =>
+      event.event === "assistant" || event.event === "result"
+    );
+    const firstVisibleSeq = Number(freshPersisted[0]?.id);
+
+    const replayed = parseSseEvents(await runQuery(app, "exact-replay-sess", "ignored", {
+      "last-event-id": String(firstVisibleSeq - 1),
+    }));
+
+    expect(replayed).toEqual(freshPersisted);
   });
 
   it("replay: replayed events carry the correct stored seq as their SSE id", async () => {

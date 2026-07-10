@@ -16,7 +16,19 @@
 // ---------------------------------------------------------------------------
 
 export { a2aRoutes, drainIterableAgent, drainPromiseResult } from "./server.js";
-export type { A2AAgentCard, A2ASkill, A2AServerOptions, AgentLike } from "./server.js";
+export type {
+  A2AAgentCard,
+  A2ASkill,
+  A2AServerOptions,
+  A2AAuthPrincipal,
+  A2AAuthVerifier,
+  AgentLike,
+} from "./server.js";
 
 export { a2aTool, httpA2ATransport, fetchAgentCard } from "./client.js";
-export type { A2ATransport, A2AToolOptions } from "./client.js";
+export type {
+  A2AHttpOptions,
+  A2ASendOptions,
+  A2ATransport,
+  A2AToolOptions,
+} from "./client.js";

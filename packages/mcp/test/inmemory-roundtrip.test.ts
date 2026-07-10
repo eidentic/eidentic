@@ -134,6 +134,40 @@ describe("createMcpServer — in-memory SDK round-trip", () => {
     const err = await pair.client.callTool({ name: "boom", arguments: {} });
     expect(err.isError).toBe(true);
   });
+
+  it("receives real SDK RequestHandlerExtra transport context in auth and authorization hooks", async () => {
+    const authContexts: unknown[] = [];
+    const authorizePrincipals: unknown[] = [];
+    const principal = { subject: "sdk-client" };
+    const pair = await buildPair([addTool], {
+      authenticateConnection: (context) => {
+        authContexts.push(context);
+        return { principal };
+      },
+      authorize: (_name, _input, context) => {
+        authorizePrincipals.push(context.principal);
+        return true;
+      },
+    });
+    handle = pair.handle;
+
+    const result = await pair.client.callTool({ name: "add", arguments: { a: 1, b: 2 } });
+    expect(result.isError).toBeFalsy();
+    expect(authContexts.at(-1)).toEqual(expect.objectContaining({
+      request: expect.objectContaining({ params: expect.objectContaining({ name: "add" }) }),
+      transport: expect.any(Object),
+    }));
+    expect(authorizePrincipals).toContain(principal);
+  });
+
+  it("refuses unauthenticated Streamable HTTP unless explicitly opted in", async () => {
+    handle = await createMcpServer([addTool]);
+    expect(() => handle!.serveHttp()).toThrow(/requires authenticateConnection/i);
+    await handle.server.close();
+
+    handle = await createMcpServer([addTool], { allowUnauthenticatedHttp: true });
+    expect(() => handle!.serveHttp()).not.toThrow();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -210,6 +244,42 @@ describe("mcpServer (opts API) — in-memory SDK round-trip", () => {
     expect(result.isError).toBeFalsy();
     // Tool results are JSON.stringify'd by createMcpServer, so a string becomes a quoted string.
     expect((result.content[0] as any).text).toBe(JSON.stringify("agent says: hello"));
+  });
+
+  it("maps a verified principal for a real SDK agent tool and ignores spoofed identity args", async () => {
+    const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+    const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    let captured: unknown;
+    const fakeAgent: AgentLike = {
+      async query(_input, options) {
+        captured = options;
+        return "ok";
+      },
+    };
+
+    handle = await mcpServer({
+      tools: [],
+      agent: fakeAgent,
+      agentId: "secure_agent",
+      allowDestructive: true,
+      authenticateConnection: () => ({ principal: { subject: "verified" } }),
+      agentIdentity: (principal) => ({ userId: (principal as { subject: string }).subject }),
+    });
+    await handle.server.connect(serverTransport);
+    const client = new Client({ name: "test-client", version: "0.0.0" });
+    await client.connect(clientTransport);
+
+    const listed = await client.listTools();
+    const schema = listed.tools[0]?.inputSchema as { properties?: Record<string, unknown> };
+    expect(schema.properties).not.toHaveProperty("userId");
+    await client.callTool({
+      name: "secure_agent",
+      arguments: { input: "hello", userId: "spoofed", apiKey: "raw-secret" },
+    });
+    expect(captured).toEqual(expect.objectContaining({ userId: "verified" }));
+    expect(JSON.stringify(captured)).not.toContain("spoofed");
+    expect(JSON.stringify(captured)).not.toContain("raw-secret");
   });
 
   it("throws if agentId is missing when agent is provided", async () => {

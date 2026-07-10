@@ -19,16 +19,23 @@ eidentic studio
 ## Usage
 
 ```ts
-import { createStudio, serveNode } from "@eidentic/studio";
+import { serveStudio, ApiKeyAuth } from "@eidentic/studio";
 
-const studio = createStudio({
+await serveStudio({
   agents: { support: myAgent },
-  // auth: ApiKeyAuth({ "dev-key": { userId: "dev" } }), // optional
+  // Required before binding Studio beyond loopback:
+  // adminAuth: ApiKeyAuth({ "dev-key": { userId: "studio-admin" } }),
 });
-
-await serveNode(studio, { port: 4000 });
-// Open http://localhost:4000 in your browser
+// Safe default: http://127.0.0.1:3535
 ```
+
+`serveStudio` binds to `127.0.0.1` by default. A non-loopback hostname requires `adminAuth` (or the
+explicitly unsafe `allowRemoteNoAuth: true` migration flag). Use `authorizeAdmin` when only a subset
+of authenticated principals may inspect or mutate Studio data. Management responses redact
+credential fields, bearer/basic values, URL userinfo, and sensitive URL query parameters. `adminAuth`
+does not grant agent run access, and `auth` never grants Studio admin access by default. Configure
+both when `/v1` run routes and the management API must be networked. The deprecated
+`allowRunAuthAsAdmin: true` option exists only to migrate legacy shared credentials.
 
 The Studio dashboard provides:
 
