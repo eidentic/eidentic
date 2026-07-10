@@ -12,6 +12,7 @@ All errors extend `EidenticError` (in `@eidentic/types`), carrying a stable `cod
 `retryable` flag, a `class`, and structured context (never raw secrets):
 
 ```ts
+// docs-check-skip: conceptual error taxonomy, not an exported implementation
 abstract class EidenticError extends Error {
   code: string                 // stable, documented, e.g. 'provider.rate_limited'
   class: ErrorClass

@@ -12,6 +12,7 @@
     "test:watch": "vitest",
     "typecheck": "turbo run typecheck",
     "check:readme": "node scripts/check-readme-examples.mjs",
+    "test:packed": "node scripts/packed-consumer-smoke.mjs",
     "perf:budget": "node scripts/perf-budget.mjs",
     "changeset": "changeset",
     "version": "changeset version",

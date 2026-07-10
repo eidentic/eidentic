@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Type-check the TypeScript code examples embedded in every package README against the REAL
+ * Type-check the TypeScript code examples embedded in public Markdown docs against the REAL
  * built `@eidentic/*` types, so README snippets cannot drift from the actual API (wrong option
  * names, wrong call signatures, removed exports, etc.).
  *
@@ -12,11 +12,10 @@
  *      top-level await works, and an undefined reference falls back to a global `any` stub.
  *   2. Provide global `any` stubs for the common example variable names + a few optional peer deps.
  *   3. Run `tsc` with strict checks but `noImplicitAny: false` (untyped example params are fine).
- *   4. IGNORE the "fragment noise" diagnostics — cannot-find-name (2304/2552) and cannot-find-module
- *      (2307) — and FAIL only on the diagnostics that mean genuine API drift: unknown/!assignable
- *      object-literal properties, wrong argument counts, missing properties, bad imports, etc.
+ *   4. IGNORE only unresolved fragment names/modules and FAIL on syntax errors, assignability,
+ *      unknown properties, wrong argument counts, missing exports, and other API drift.
  *
- * A code block can opt out of checking by starting with a `// docs-check-skip` comment line.
+ * Intentional pseudocode can opt out by starting with `// docs-check-skip: <reason>`.
  *
  * Requires the packages to be built first (their `dist/*.d.ts` are what we type-check against), so
  * CI runs this AFTER `pnpm -r build`.
@@ -43,7 +42,6 @@ const IGNORE_CODES = new Set([
   2307, // Cannot find module 'x'                  — uninstalled optional peer dep
   2580, // Cannot find name 'require'/'process'    — env noise
   18004, // No value exists in scope for shorthand property 'x' — undefined shorthand (`{ model }`)
-  2345, // Argument of type … not assignable      — usually a cascade of the above undefined vars
   2300, // Duplicate identifier — a block showing two alternative `import` lines for the same symbol
   2440, // Import declaration conflicts with local — same dual-illustration pattern
   2451, // Cannot redeclare block-scoped variable — a block showing two construction variants (`const store` ×2)
@@ -59,7 +57,7 @@ const STUB_MODULES = [
   "better-sqlite3", "pg", "@electric-sql/pglite", "@libsql/client", "convex", "convex/server",
   "convex/browser", "convex/values", "@lancedb/lancedb", "apache-arrow", "@qdrant/js-client-rest",
   "@pinecone-database/pinecone", "@e2b/code-interpreter", "@huggingface/transformers",
-  "@modelcontextprotocol/sdk", "@modelcontextprotocol/sdk/*",
+  "@modelcontextprotocol/sdk", "@modelcontextprotocol/sdk/*", "react/jsx-runtime",
 ];
 
 const stubs = [
@@ -81,34 +79,55 @@ const tsconfig = {
     target: "ES2022",
     module: "ESNext",
     moduleResolution: "Bundler",
+    jsx: "react-jsx",
     esModuleInterop: true,
     resolveJsonModule: true,
     types: ["node"],
     lib: ["ES2022", "DOM", "DOM.Iterable"],
   },
-  include: ["*.ts", "stubs.d.ts"],
+  include: ["*.ts", "*.tsx", "stubs.d.ts"],
 };
 
-/** Extract ```ts / ```typescript fenced blocks with their 1-based start line. */
+/** Extract TypeScript fences with their 1-based start line. */
 function extractTsBlocks(md) {
   const blocks = [];
-  const re = /```(ts|typescript)[^\n]*\n([\s\S]*?)```/g;
+  const re = /```(ts|tsx|typescript)[^\n]*\n([\s\S]*?)```/g;
   let m;
   while ((m = re.exec(md)) !== null) {
     const startLine = md.slice(0, m.index).split("\n").length;
-    blocks.push({ code: m[2], startLine });
+    blocks.push({ code: m[2], language: m[1], startLine });
   }
   return blocks;
 }
 
-// ── collect READMEs ──────────────────────────────────────────────────────────
-const readmes = [];
+function collectMarkdown(directory, target) {
+  if (!existsSync(directory)) return;
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) collectMarkdown(path, target);
+    else if (entry.isFile() && entry.name.endsWith(".md")) target.push(path);
+  }
+}
+
+function needsTsx(block) {
+  if (block.language === "tsx") return true;
+  return /<([A-Z][A-Za-z0-9_.]*|[a-z]+)(?:\s|\/?>)/u.test(block.code) &&
+    /(?:return\s*\(|=>\s*\(|=\s*\()[\s\S]*</u.test(block.code);
+}
+
+// ── collect user-facing Markdown ─────────────────────────────────────────────
+const documents = [];
 const pkgDir = join(ROOT, "packages");
 for (const name of readdirSync(pkgDir).sort()) {
   const p = join(pkgDir, name, "README.md");
-  if (existsSync(p)) readmes.push({ key: name, path: p });
+  if (existsSync(p)) documents.push(p);
 }
-if (existsSync(join(ROOT, "README.md"))) readmes.push({ key: "root", path: join(ROOT, "README.md") });
+for (const name of ["README.md", "CONTRIBUTING.md", "STABILITY.md"]) {
+  const path = join(ROOT, name);
+  if (existsSync(path)) documents.push(path);
+}
+collectMarkdown(join(ROOT, "docs"), documents);
+const uniqueDocuments = [...new Set(documents)].sort();
 
 // ── write each block as its own module ───────────────────────────────────────
 rmSync(OUT, { recursive: true, force: true });
@@ -119,14 +138,17 @@ writeFileSync(join(OUT, "tsconfig.json"), JSON.stringify(tsconfig, null, 2));
 const fileMap = new Map(); // generated filename -> { readme, blockIndex, startLine }
 let blockCount = 0;
 let skipped = 0;
-for (const { key, path } of readmes) {
+for (const path of uniqueDocuments) {
   const md = readFileSync(path, "utf8");
   extractTsBlocks(md).forEach((b, i) => {
-    if (/^\s*\/\/\s*docs-check-skip/m.test(b.code.split("\n").slice(0, 1).join("\n"))) {
+    const firstMeaningfulLine = b.code.split("\n").find((line) => line.trim().length > 0) ?? "";
+    if (/^\s*\/\/\s*docs-check-skip:\s*\S.+$/u.test(firstMeaningfulLine)) {
       skipped++;
       return;
     }
-    const fname = `${key}__${i}.ts`;
+    const extension = needsTsx(b) ? "tsx" : "ts";
+    const key = relative(ROOT, path).replace(/[^a-zA-Z0-9_-]+/gu, "_");
+    const fname = `${key}__${i}.${extension}`;
     // Append `export {}` so every block is an ES module: enables top-level await and isolates
     // its declarations from sibling blocks.
     writeFileSync(join(OUT, fname), `${b.code}\nexport {};\n`);
@@ -137,7 +159,7 @@ for (const { key, path } of readmes) {
 
 // ── run tsc + parse diagnostics ──────────────────────────────────────────────
 // Lines look like:  .readme-typecheck/core__1.ts(4,3): error TS2353: Object literal may only …
-const diagRe = /([^\s(]+__\d+\.ts)\((\d+),(\d+)\): error TS(\d+): (.+)/;
+const diagRe = /([^\s(]+__\d+\.tsx?)\((\d+),(\d+)\): error TS(\d+): (.+)/;
 function runTsc() {
   let raw = "";
   try {
@@ -165,32 +187,36 @@ function runTsc() {
 // ```ts, an options-shape pseudocode block, …) would silently hide all real drift. Find those
 // files and drop them, then re-check the syntactically-clean remainder.
 let diags = runTsc();
-let unparseable = 0;
 const syntaxFiles = new Set(diags.filter((d) => d.code >= 1000 && d.code < 2000).map((d) => d.fname));
+const syntaxDrift = diags
+  .filter((d) => d.code >= 1000 && d.code < 2000)
+  .map((d) => ({ ...fileMap.get(d.fname), ...d }));
 for (const fname of syntaxFiles) {
   rmSync(join(OUT, fname), { force: true });
   fileMap.delete(fname);
-  unparseable++;
 }
 // Pass 2: now that nothing blocks the semantic pass, the real API-drift diagnostics surface.
 if (syntaxFiles.size > 0) diags = runTsc();
 
-const drift = diags
-  .filter((d) => d.code >= 2000 && !IGNORE_CODES.has(d.code) && fileMap.has(d.fname))
-  .map((d) => ({ ...fileMap.get(d.fname), ...d }));
+const drift = [
+  ...syntaxDrift,
+  ...diags
+    .filter((d) => d.code >= 2000 && !IGNORE_CODES.has(d.code) && fileMap.has(d.fname))
+    .map((d) => ({ ...fileMap.get(d.fname), ...d })),
+];
 
 // ── report ───────────────────────────────────────────────────────────────────
 if (!process.env.KEEP_READMECHECK) rmSync(OUT, { recursive: true, force: true });
 
 if (drift.length === 0) {
   console.log(
-    `✓ README examples: ${blockCount} TypeScript blocks across ${readmes.length} READMEs, no API drift ` +
-      `(${unparseable} non-compilable fragments + ${skipped} opt-out skipped).`,
+    `✓ Documentation examples: ${blockCount} TypeScript blocks across ${uniqueDocuments.length} Markdown files, no API drift ` +
+      `(${skipped} explicit pseudocode opt-out${skipped === 1 ? "" : "s"}).`,
   );
   process.exit(0);
 }
 
-console.error(`✗ README examples: ${drift.length} API-drift error(s) found — a README snippet no longer matches the real API:\n`);
+console.error(`✗ Documentation examples: ${drift.length} compile/API-drift error(s) found:\n`);
 const byReadme = new Map();
 for (const d of drift) {
   if (!byReadme.has(d.readme)) byReadme.set(d.readme, []);
@@ -203,5 +229,5 @@ for (const [readme, ds] of byReadme) {
   }
   console.error("");
 }
-console.error("Fix the README snippet to match the source API, or add a `// docs-check-skip` first line to a deliberately-pseudocode block.");
+console.error("Fix the snippet, or add a first meaningful line `// docs-check-skip: <reason>` only when the block is intentionally pseudocode.");
 process.exit(1);

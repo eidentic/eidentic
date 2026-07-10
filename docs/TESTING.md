@@ -130,4 +130,10 @@ the package's test suite:
 | `@eidentic/mcp` | a live MCP server URL | real MCP transport round-trip |
 
 Run a single package's tests: `npx vitest run packages/<pkg>/test/`.
-Full suite: `npx vitest run` (≈1175 tests; the gated live ones skip without their env vars).
+Full suite: `pnpm test` (the command prints the current test count; gated live tests skip unless
+their explicit environment variable is set).
+
+Before publishing or requesting a release review, also run `pnpm release:check -- --skip-install`.
+The release gate compiles generated CLI templates and documentation examples, enforces performance
+budgets, and installs packed tarballs into an isolated consumer to verify ESM/CJS runtime loading
+and Node16/NodeNext declaration resolution.

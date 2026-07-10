@@ -105,6 +105,7 @@ Credentials are injected by the dispatcher from a vault — the model never sees
 A tool can suspend for human input/approval and resume durably:
 
 ```ts
+// docs-check-skip: conceptual tool-execution pseudocode
 execute: async ({ input, ctx }) => {
   if (input.amountCents > 10_000) {
     const decision = await ctx.suspend({ reason: 'large refund approval', present: input })

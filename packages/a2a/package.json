@@ -16,9 +16,14 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
     }
   },
   "sideEffects": false,
@@ -33,20 +38,8 @@
   },
   "dependencies": {
     "@eidentic/core": "workspace:*",
-    "@eidentic/types": "workspace:*",
     "hono": "^4.12.25",
     "zod": "^4.0.0"
-  },
-  "peerDependencies": {
-    "@a2a-js/sdk": ">=0.3"
-  },
-  "peerDependenciesMeta": {
-    "@a2a-js/sdk": {
-      "optional": true
-    }
-  },
-  "devDependencies": {
-    "@a2a-js/sdk": "^0.3.13"
   },
   "description": "Agent-to-Agent (A2A) interoperability for Eidentic — expose an agent as an A2A endpoint or call a remote A2A agent as a tool.",
   "keywords": [

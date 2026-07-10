@@ -253,6 +253,7 @@ trainable controller can sit behind this interface; not in core, per non-goals.)
 ## 6.12 API sketch
 
 ```ts
+// docs-check-skip: aspirational memory configuration sketch
 const memory = memory({
   scope: 'user',                                  // shorthand → { kind:'user', userId from ctx }
   blocks: { persona: '…', human: '' },            // seed blocks

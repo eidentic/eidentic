@@ -16,44 +16,84 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
     },
     "./schema": {
-      "types": "./dist/schema.d.ts",
-      "import": "./dist/schema.js",
-      "require": "./dist/schema.cjs"
+      "import": {
+        "types": "./dist/schema.d.ts",
+        "default": "./dist/schema.js"
+      },
+      "require": {
+        "types": "./dist/schema.d.cts",
+        "default": "./dist/schema.cjs"
+      }
     },
     "./server": {
-      "types": "./dist/server.d.ts",
-      "import": "./dist/server.js",
-      "require": "./dist/server.cjs"
+      "import": {
+        "types": "./dist/server.d.ts",
+        "default": "./dist/server.js"
+      },
+      "require": {
+        "types": "./dist/server.d.cts",
+        "default": "./dist/server.cjs"
+      }
     },
     "./convex.config.js": {
-      "types": "./dist/component/convex.config.d.ts",
-      "import": "./dist/component/convex.config.js",
-      "require": "./dist/component/convex.config.cjs"
+      "import": {
+        "types": "./dist/component/convex.config.d.ts",
+        "default": "./dist/component/convex.config.js"
+      },
+      "require": {
+        "types": "./dist/component/convex.config.d.cts",
+        "default": "./dist/component/convex.config.cjs"
+      }
     },
     "./component": {
-      "types": "./dist/component.d.ts",
-      "import": "./dist/component.js",
-      "require": "./dist/component.cjs"
+      "import": {
+        "types": "./dist/component.d.ts",
+        "default": "./dist/component.js"
+      },
+      "require": {
+        "types": "./dist/component.d.cts",
+        "default": "./dist/component.cjs"
+      }
     },
     "./app-functions": {
-      "types": "./dist/app-functions/index.d.ts",
-      "import": "./dist/app-functions/index.js",
-      "require": "./dist/app-functions/index.cjs"
+      "import": {
+        "types": "./dist/app-functions/index.d.ts",
+        "default": "./dist/app-functions/index.js"
+      },
+      "require": {
+        "types": "./dist/app-functions/index.d.cts",
+        "default": "./dist/app-functions/index.cjs"
+      }
     },
     "./app-functions/schema": {
-      "types": "./dist/app-functions/schema.d.ts",
-      "import": "./dist/app-functions/schema.js",
-      "require": "./dist/app-functions/schema.cjs"
+      "import": {
+        "types": "./dist/app-functions/schema.d.ts",
+        "default": "./dist/app-functions/schema.js"
+      },
+      "require": {
+        "types": "./dist/app-functions/schema.d.cts",
+        "default": "./dist/app-functions/schema.cjs"
+      }
     },
     "./app-functions/server": {
-      "types": "./dist/app-functions/server.d.ts",
-      "import": "./dist/app-functions/server.js",
-      "require": "./dist/app-functions/server.cjs"
+      "import": {
+        "types": "./dist/app-functions/server.d.ts",
+        "default": "./dist/app-functions/server.js"
+      },
+      "require": {
+        "types": "./dist/app-functions/server.d.cts",
+        "default": "./dist/app-functions/server.cjs"
+      }
     }
   },
   "sideEffects": false,

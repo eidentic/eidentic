@@ -14,9 +14,9 @@ guide covers local setup and workflow conventions.
 
 ```bash
 pnpm install          # installs deps and compiles native addons
-pnpm -r build         # build all packages (emits dist/)
-npx vitest run        # run the full test suite
-pnpm -r typecheck     # typecheck every package
+pnpm build            # build all packages (emits dist/)
+pnpm test             # run the full test suite
+pnpm typecheck        # typecheck every package
 ```
 
 Run the end-to-end demo (no API key needed — uses a scripted mock model):
@@ -26,19 +26,17 @@ pnpm --filter eidentic-examples hello
 ```
 
 > **Note on native-addon examples:** some examples (e.g. `hello:stateful`, `hello:stream`,
-> `hello:memory`) use `SqliteStore` which depends on the `better-sqlite3` native addon.
-> These require a real Node.js process (not tsx ESM mode with `--conditions`) and a
-> compiled native module (`pnpm install` builds it automatically on supported platforms).
-> If you see `Dynamic require of "better-sqlite3" is not supported`, run those examples
-> with `node --loader tsx` or build the packages first with `pnpm -r build`.
+> `hello:memory`) use `SqliteStore`, which depends on the `better-sqlite3` native addon.
+> `pnpm install` builds it automatically on supported Node.js platforms. Browser, edge, and
+> serverless-bundled applications should use the libSQL adapter instead.
 
 ## Repository layout
 
 ```
-packages/        32 published packages (see root README for full list)
+packages/        33 published packages (see root README for full list)
   types/         @eidentic/types   — zero-dep contracts, message protocol, ports, test fakes
   core/          @eidentic/core    — agent loop, tools, session, Agent
-  model/         @eidentic/model   — ModelPort on Vercel AI SDK v6
+  model/         @eidentic/model   — ModelPort on Vercel AI SDK v7
   sqlite/        @eidentic/sqlite  — StorePort on better-sqlite3
   memory/        @eidentic/memory  — four-tier memory engine
   … (see packages/)
@@ -67,6 +65,15 @@ Start with [`00-decisions.md`](docs/design/00-decisions.md).
   with a test.
 - **Changesets:** for any change to a published `@eidentic/*` package, run `pnpm changeset` and
   describe the change + bump level. Releases are versioned from accumulated changesets.
+
+Before requesting review, run the coordinated local gate:
+
+```bash
+pnpm release:check -- --skip-install
+```
+
+It includes generated-template compilation, documentation examples, performance budgets, and
+packed ESM/CJS plus Node16/NodeNext consumer checks in addition to build, test, and typecheck.
 
 ## Design principles (the short version)
 

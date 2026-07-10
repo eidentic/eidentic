@@ -1,109 +1,88 @@
-# Stability Policy
+# Stability policy
 
-Eidentic's coordinated repository release is v1.0. npm packages in this monorepo are
-independently versioned, so some package versions may still be below 1.0; the stability
-tiers below define what you can rely on, at what boundary breaking changes may occur,
-and which parts of the API are still being refined.
-
----
+Eidentic packages are independently versioned, but releases from this repository are coordinated.
+This document describes the compatibility promise for public exports; internal files, undocumented
+`dist/` paths, database tables, and event-store implementation details are never public API.
 
 ## Versioning contract
 
-### From the v1 release line
+| Tier | Compatibility promise |
+| --- | --- |
+| **Stable** | Breaking changes require a major/coordinated breaking release and migration notes. |
+| **Stabilizing** | Breaking changes may ship in a minor release, with migration notes. Patch releases remain compatible. |
+| **Experimental** | Shape may change in any release. Do not depend on it without accepting that risk. |
 
-| Change type | Allowed in |
-| ----------- | ---------- |
-| Breaking changes to **Stable** APIs | Explicit coordinated breaking release only, with migration notes |
-| Breaking changes to **Stabilizing** APIs | MINOR releases, with migration notes |
-| Breaking changes to **Experimental** APIs | Any release (MINOR or PATCH) |
-| New features (non-breaking) | MINOR or PATCH |
-| Bug fixes | PATCH |
-| Security fixes | PATCH (or out-of-band) |
+Additive fields on object types and events are non-breaking: consumers should ignore fields they do
+not understand. Security fixes may tighten validation or make formerly ambiguous identity/configuration
+fail closed. Those changes are documented in the release changeset.
 
-**PATCH releases never contain breaking changes to Stable or Stabilizing APIs.**
+Deprecations are normally announced before removal. A faster removal is reserved for an actively
+exploitable vulnerability or for an API explicitly marked experimental.
 
-Every release that contains a breaking change ships a changelog entry with migration notes
-that describe exactly what changed and how to update call sites. We aim for mechanical,
-find-and-replace migrations wherever possible.
+## Stable APIs
 
-Deprecations are announced at least **2 MINOR versions before removal** and, where the
-runtime shape allows it, ship a `console.warn` deprecation notice so call sites are visible
-in logs without requiring a code audit.
+These are the load-bearing framework contracts:
 
----
+| Area | Public surface |
+| --- | --- |
+| Agent loop | `Agent`, `agent.query()`, `agent.resume()`, `agent.eraseScope()`, and the `StreamEvent` union (`@eidentic/core`, `@eidentic/types`) |
+| Model port | `ModelPort.complete()`, optional `ModelPort.stream()`, and `ModelRequest`/`ModelResponse` (`@eidentic/types`) |
+| Store port | Session, event, block, memory, listing, migration, closure, and exact-scope erasure methods on `StorePort` (`@eidentic/types`) |
+| Vector port | `upsert`, `search`, `delete`, `eraseScope`, and optional `list` on `VectorPort` (`@eidentic/types`) |
+| Memory port | `MemoryPort.getAlwaysInContext()`, `retrieve()`, `ingest()`, plus the editing methods on `EditableMemoryPort` (`@eidentic/types`) |
+| Memory engine | `Memory` retrieval/ingestion, block editing, governance export/consent, graph operations, and scope erasure (`@eidentic/memory`) |
+| Server | `createServer`, `POST /v1/agents/:agentId/query`, `POST /resume`, async `POST /runs`, `GET /runs/:runId/status`, and `GET /health` (`@eidentic/server`) |
+| Eval harness | `evaluate`, `assertPassRate`, `compareReports`, `renderReportMarkdown`, and their exported report types (`@eidentic/eval`) |
 
-## Stability tiers
+`GET /v1/agents/:agentId/sessions/:sessionId/events` is opt-in via `exposeEvents` and is subject
+to the configured principal/ownership policy. It is not enabled by default.
 
-### Stable
+## Stabilizing APIs
 
-The contracts below are the most load-bearing parts of the framework. They will not change
-without an explicit breaking-change notice and migration guide.
+These are supported and tested, but their ergonomics may still evolve:
 
-| Area | Key symbols / packages |
-| ---- | ---------------------- |
-| Core agent loop | `Agent`, `agent.query()`, `AgentEvent` stream shape (`@eidentic/core`) |
-| Store contract | `StorePort` interface — `append`, `list`, `erase`, `migrate` (`@eidentic/types`) |
-| Vector contract | `VectorPort` interface — `upsert`, `query`, `delete`, `clear` (`@eidentic/types`) |
-| Model contract | `ModelPort` interface — `call`, `stream` (`@eidentic/types`) |
-| Server REST surface | `POST /v1/agents/:id/query`, `POST /v1/agents/:id/runs`, `GET /health` (`@eidentic/server`) |
-| Memory API | `agent.memory.*` — `remember`, `recall`, `erase`, `consolidate` (`@eidentic/memory`) |
-| Eval harness | `evaluate`, `assertPassRate`, `EvalReport`, `compareReports`, `renderReportMarkdown` (`@eidentic/eval`) |
+| Area | Public surface |
+| --- | --- |
+| Workflows and HITL | `workflow`, `step`, combinators, `resumeWorkflow`, run registries, and `fileWorkflowRunStore` (`@eidentic/workflow`) |
+| Async callbacks | The optional `callbackUrl` on an async run and `ServerOptions.webhooks` delivery policy (`@eidentic/server`); there is no standalone webhook route or `WebhookPort` |
+| React client | `useEidenticStream`, `useAgent`, `useAsyncRun`, `useRunStatus`, `useWorkflowList`, and `useWorkflowRun` (`@eidentic/react`) |
+| MCP | `mcpTools`, `streamableHttpClient`, `stdioClient`, `serveTools`, `serveAgent`, `createMcpServer`, and `mcpServer` (`@eidentic/mcp`) |
+| Server operations | `BatchRunner`, `Scheduler`, workflow listing endpoints, and programmatic run registries (`@eidentic/server`) |
+| Provider adapters | Constructor/configuration APIs for SQL, vector, model-provider, observability, sandbox, and framework adapters |
 
-### Stabilizing
-
-These APIs are functionally complete and used in production, but their shape may still
-evolve based on real-world usage feedback. Breaking changes require a MINOR bump and
-migration notes.
-
-| Area | Key symbols / packages |
-| ---- | ---------------------- |
-| Workflow suspend/resume + durable store | `createWorkflow`, `WorkflowRun`, `suspend`, `resume`, durable file/DB store (`@eidentic/workflow`) |
-| Webhooks | `POST /v1/agents/:id/webhooks`, `WebhookPort` (`@eidentic/server`) |
-| React hooks | `useAgent`, `useWorkflowRun`, `useAsyncRun`, `useRunStatus` (`@eidentic/react`) |
-| Batch runner + scheduler | `batchRunner`, `scheduler` (`@eidentic/server`) |
-| MCP integration | `MCPClient`, `MCPServer`, OAuth adapter (`@eidentic/mcp`) |
-
-### Experimental
-
-These areas are under active development. Their shape may change in any release, including
-PATCH, and they may be renamed, merged, or removed without deprecation notice. Do not build
-production dependencies on them without accepting this risk.
+## Experimental APIs
 
 | Area | Notes |
-| ---- | ----- |
-| Skill self-evolution / optimizer | `evolve`, `SkillOptimizer` (`@eidentic/skills`) — optimizer strategy is in flux |
-| Agent-to-Agent (A2A) protocol | `@eidentic/a2a` — spec compliance is evolving with the upstream protocol draft |
+| --- | --- |
+| Skill self-evolution | Optimizer/evolution strategy and executable-skill policy are still being refined (`@eidentic/skills`). |
+| Agent-to-Agent protocol | `@eidentic/a2a` follows an evolving upstream protocol and may change with it. |
 
----
+## Adapter conformance
 
-## Conformance suite promise
+`@eidentic/types/testing` exports shared suites:
 
-Every store adapter (SQLite, libSQL, Postgres, LanceDB, pgvector, Qdrant, Pinecone) is
-validated against a **shared conformance test suite** before release. The suite exercises
-the full `StorePort` and `VectorPort` contracts including edge cases (concurrent writes,
-erase fan-out, migrate idempotency).
+- `storeConformanceCases` is exercised by the in-memory reference store and the SQLite, libSQL,
+  Postgres, and Convex store adapters.
+- `vectorConformanceCases` is exercised by the Convex, LanceDB, pgvector, Qdrant, and Pinecone
+  vector adapters. Live-service variants are gated by explicit test environment variables.
 
-**What this means for you:** if you implement a custom `StorePort` or `VectorPort` adapter,
-you can import and run the same conformance cases against your implementation:
+Custom adapters can run the same cases:
 
 ```ts
 import { storeConformanceCases } from "@eidentic/types/testing";
 
-for (const c of storeConformanceCases) {
-  it(c.name, () => c.run(myAdapter));
+for (const testCase of storeConformanceCases(() => makeStore())) {
+  await testCase.run();
 }
 ```
 
-Any adapter that passes the conformance suite is guaranteed to work correctly as a drop-in
-replacement for the built-in stores. We will not change the conformance cases in a way that
-invalidates passing adapters without an explicit migration release and migration notes.
+Passing the suite demonstrates conformance to the cases in that installed SDK version. It is not a
+blanket guarantee for provider outages, transaction/isolation modes outside the test configuration,
+or optional live-service behavior. Changes to stable conformance requirements follow the same
+versioning rules as the corresponding port.
 
----
+## Upgrade guidance
 
-## Questions and upgrade guidance
-
-- **Changelog:** breaking changes and migration notes are generated from changesets at each
-  release. See [GitHub releases](https://github.com/eidentic/eidentic/releases) for the
-  history from v1.0 onward.
-- **Questions:** open a discussion or file an issue on GitHub — stability concerns are
-  treated as high-priority.
+Each published change includes a Changesets entry. Breaking releases include explicit migration
+notes and, when storage formats change, compatibility readers or a tested migration path. Release
+history is available from the repository's GitHub releases page.

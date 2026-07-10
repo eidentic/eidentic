@@ -46,11 +46,26 @@ jobs:
       - name: Typecheck
         run: pnpm -r typecheck
 
-      # Type-check the ```ts examples in every package README against the built types so docs
-      # can't drift from the real API. Runs once (node 22 leg); needs the build above for dist types.
-      - name: Check README examples
+      # Generated projects are a second public API. Compile the templates rather than only the
+      # CLI implementation so dependency and tsconfig drift cannot ship.
+      - name: Typecheck CLI templates
+        if: matrix.node == '22'
+        run: pnpm --filter @eidentic/cli typecheck:templates
+
+      # Type-check TypeScript examples in all public Markdown against built package declarations.
+      - name: Check documentation examples
         if: matrix.node == '22'
         run: pnpm check:readme
+
+      - name: Check performance budgets
+        if: matrix.node == '22'
+        run: pnpm perf:budget
+
+      # Test the tarballs, not workspace symlinks: ESM and CJS runtime loading plus Node16 and
+      # NodeNext declaration resolution for every public export.
+      - name: Test packed consumers
+        if: matrix.node == '22'
+        run: pnpm test:packed
 
       - name: Security audit
         if: matrix.node == '22'

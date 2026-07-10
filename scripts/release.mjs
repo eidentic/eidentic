@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readdirSync } from "node:fs";
 import { join } from "node:path";
 
 const args = process.argv.slice(2);
@@ -66,45 +65,31 @@ function ensurePublishContext() {
   }
 }
 
-function packWorkspacePackages() {
-  const destination = mkdtempSync(join(tmpdir(), "eidentic-pack-"));
-  try {
-    run("pnpm", [
-      "--filter",
-      "./packages/**",
-      "exec",
-      "pnpm",
-      "pack",
-      "--pack-destination",
-      destination,
-    ]);
-  } finally {
-    rmSync(destination, { recursive: true, force: true });
-  }
-}
-
-function qualityGate({ skipInstall = false, publishDryRun = false } = {}) {
+function qualityGate({ skipInstall = false } = {}) {
   if (!skipInstall) run("pnpm", ["install", "--frozen-lockfile"]);
   run("pnpm", ["run", "build"]);
   run("pnpm", ["test"]);
   run("pnpm", ["run", "typecheck"]);
+  run("pnpm", ["--filter", "@eidentic/cli", "run", "typecheck:templates"]);
   run("pnpm", ["run", "check:readme"]);
+  run("pnpm", ["run", "perf:budget"]);
+  // Pack and consume the exact artifacts that would be published. This catches broken export
+  // maps, missing declarations, ESM/CJS runtime drift, and Node16/NodeNext resolution failures
+  // that a workspace build cannot see.
+  run("pnpm", ["run", "test:packed"]);
   run("pnpm", ["audit", "--audit-level", "low"]);
-  if (publishDryRun) packWorkspacePackages();
 }
 
 switch (command) {
   case "check":
     qualityGate({
       skipInstall: flags.has("--skip-install"),
-      publishDryRun: flags.has("--pack"),
     });
     break;
 
   case "dry-run":
     qualityGate({
       skipInstall: flags.has("--skip-install"),
-      publishDryRun: true,
     });
     break;
 
