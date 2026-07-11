@@ -140,6 +140,21 @@ describe("loadProject directory mode", () => {
     expect(events.at(-1)).toMatchObject({ type: "result", output: "hello" });
   });
 
+  it("exposes a lifecycle hook that closes the directory store", async () => {
+    writeFileSync(join(root, "agent", "instructions.md"), "Close cleanly.");
+    writeFileSync(join(root, "agent", "agent.ts"), "export default {};\n");
+    const store = new InMemoryStore();
+    let closed = false;
+    store.close = async () => { closed = true; };
+
+    const config = await loadProject(resolveProject(root)!, {
+      importDirectoryModule: async () => ({ model: new MockModel([response]), store }),
+    });
+    await config.close?.();
+
+    expect(closed).toBe(true);
+  });
+
   it("rejects empty instructions", async () => {
     writeFileSync(join(root, "agent", "instructions.md"), " \n\t");
     writeFileSync(join(root, "agent", "agent.ts"), "export default {};\n");

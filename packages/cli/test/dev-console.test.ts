@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { consumeDevInput, formatDevEvent } from "../src/dev-console.js";
+import { consumeDevInput, formatDevEvent, watchAgentDirectory } from "../src/dev-console.js";
 import { textBlock, toolUseBlock, type StreamEvent } from "@eidentic/types";
+import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 describe("formatDevEvent", () => {
   it("shows the selected model and available tools at session start", () => {
@@ -46,6 +49,25 @@ describe("formatDevEvent", () => {
       type: "assistant", content: [textBlock("final answer")], usage: { inputTokens: 1, outputTokens: 1 },
     };
     expect(formatDevEvent(event)).toEqual(["final answer"]);
+  });
+});
+
+describe("watchAgentDirectory", () => {
+  it("debounces filesystem bursts into one reload", async () => {
+    const root = mkdtempSync(join(tmpdir(), "eidentic-watch-"));
+    const file = join(root, "instructions.md");
+    writeFileSync(file, "one");
+    let reloads = 0;
+    const watcher = watchAgentDirectory(root, () => { reloads += 1; }, 20);
+    try {
+      appendFileSync(file, "two");
+      appendFileSync(file, "three");
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      expect(reloads).toBe(1);
+    } finally {
+      watcher.close();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

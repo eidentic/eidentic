@@ -12,9 +12,9 @@ import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import { doctor, resolveProject, loadProject, buildServer, initProject, INIT_PROVIDERS, runEval, addSkill, makeDirResolver, addComponent, COMPONENT_NAMES, COMPONENT_DESCRIPTIONS } from "./commands.js";
-import { consumeDevInput } from "./dev-console.js";
-import type { Provider } from "./commands.js";
-import { serveNode, NoAuth } from "@eidentic/server";
+import { consumeDevInput, watchAgentDirectory, type AgentDirectoryWatcher } from "./dev-console.js";
+import type { EidenticConfig, Provider } from "./commands.js";
+import { serveNode, NoAuth, type ServeNodeHandle } from "@eidentic/server";
 
 // ---------------------------------------------------------------------------
 // Version
@@ -91,7 +91,7 @@ const devCmd = defineCommand({
       process.exit(1);
     }
 
-    let config;
+    let config: EidenticConfig;
     try {
       config = await loadProject(project);
     } catch (err) {
@@ -102,7 +102,7 @@ const devCmd = defineCommand({
     const app = buildServer(config);
     const listenPort = port ?? config.port ?? 3000;
 
-    let handle;
+    let handle: ServeNodeHandle;
     try {
       handle = await serveNode(app, { port: listenPort });
     } catch (err) {
@@ -111,34 +111,85 @@ const devCmd = defineCommand({
     }
 
     const agentIds = Object.keys(config.agents);
+    const consoleAgents = { ...config.agents };
+    let consoleBusy = false;
+    let resolveConsoleIdle: (() => void) | undefined;
+    const waitForConsoleIdle = (): Promise<void> => consoleBusy
+      ? new Promise<void>((resolve) => { resolveConsoleIdle = resolve; })
+      : Promise.resolve();
+    let readline: ReturnType<typeof createInterface> | undefined;
+    let directoryWatcher: AgentDirectoryWatcher | undefined;
+    let stopping = false;
+    const shutdown = async (): Promise<void> => {
+      if (stopping) return;
+      stopping = true;
+      directoryWatcher?.close();
+      readline?.close();
+      await handle.drain(5_000);
+      await config.close?.();
+    };
     consola.success(
       `eidentic dev server running at ${pc.cyan(`http://localhost:${listenPort}`)}`,
     );
     consola.info(`Agents: ${pc.bold(agentIds.join(", "))}`);
     consola.info(process.stdin.isTTY ? "Chat below. Type /help for commands or press Ctrl+C to stop." : "Press Ctrl+C to stop.");
 
-    let readline: ReturnType<typeof createInterface> | undefined;
     if (process.stdin.isTTY && process.stdout.isTTY) {
       readline = createInterface({ input: process.stdin, output: process.stdout });
       async function* prompts(): AsyncIterable<string> {
         while (true) yield await readline!.question(pc.cyan("you › "));
       }
       void consumeDevInput(prompts(), {
-        agents: config.agents,
+        agents: consoleAgents,
         write: (line) => consola.log(line),
+        onActivityChange: (active) => {
+          consoleBusy = active;
+          if (!active) {
+            resolveConsoleIdle?.();
+            resolveConsoleIdle = undefined;
+          }
+        },
       }).catch((error: unknown) => {
         if ((error as NodeJS.ErrnoException).code !== "ABORT_ERR") {
           consola.error(`Dev console stopped: ${(error as Error).message}`);
         }
       }).finally(() => {
-        readline?.close();
-        handle.close();
+        void shutdown();
       });
     }
 
-    process.on("SIGINT", () => {
-      readline?.close();
-      handle.close();
+    if (project.kind === "directory") {
+      directoryWatcher = watchAgentDirectory(project.agentRoot, async () => {
+        try {
+          const nextProject = resolveProject(project.root, explicitPath);
+          if (!nextProject || nextProject.kind !== "directory") throw new Error("agent directory is no longer valid");
+          const nextConfig = await loadProject(nextProject);
+          const nextApp = buildServer(nextConfig);
+          await waitForConsoleIdle();
+          const previousConfig = config;
+          const previousApp = buildServer(previousConfig);
+          await handle.drain(5_000);
+          try {
+            handle = await serveNode(nextApp, { port: listenPort });
+          } catch (error) {
+            handle = await serveNode(previousApp, { port: listenPort });
+            await nextConfig.close?.();
+            throw error;
+          }
+          config = nextConfig;
+          for (const id of Object.keys(consoleAgents)) delete consoleAgents[id];
+          Object.assign(consoleAgents, nextConfig.agents);
+          await previousConfig.close?.();
+          consola.success("Agent reloaded.");
+        } catch (error) {
+          consola.error(`Reload failed: ${(error as Error).message}`);
+        }
+      });
+      consola.info("Watching agent/ for changes.");
+    }
+
+    process.on("SIGINT", async () => {
+      await shutdown();
       process.exit(0);
     });
   },

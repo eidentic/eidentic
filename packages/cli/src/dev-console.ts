@@ -1,5 +1,6 @@
 import { isText, isToolUse, type StreamEvent } from "@eidentic/types";
 import { randomUUID } from "node:crypto";
+import { watch, type FSWatcher } from "node:fs";
 
 const MAX_TERMINAL_TEXT = 8_192;
 
@@ -57,6 +58,7 @@ export interface DevConsoleOptions {
   agents: Record<string, QueryableAgent>;
   write: (line: string) => void;
   createSessionId?: () => string;
+  onActivityChange?: (active: boolean) => void;
 }
 
 /** Consume terminal lines serially so a session cannot accidentally run concurrent turns. */
@@ -71,6 +73,12 @@ export async function consumeDevInput(
   let sessionId = createSessionId();
 
   for await (const rawLine of input) {
+    if (!Object.hasOwn(options.agents, activeAgentId)) {
+      const fallback = Object.keys(options.agents)[0];
+      if (!fallback) throw new Error("No agents are available after reload");
+      activeAgentId = fallback;
+      options.write(`● agent  ${safeTerminalText(fallback)}`);
+    }
     const line = rawLine.trim();
     if (!line) continue;
     if (line === "/exit") return;
@@ -98,6 +106,7 @@ export async function consumeDevInput(
       continue;
     }
 
+    options.onActivityChange?.(true);
     try {
       for await (const event of options.agents[activeAgentId]!.query(line, { sessionId })) {
         for (const outputLine of formatDevEvent(event)) options.write(outputLine);
@@ -105,6 +114,56 @@ export async function consumeDevInput(
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
       options.write(`✗ error  ${safeTerminalText(message)}`);
+    } finally {
+      options.onActivityChange?.(false);
     }
   }
+}
+
+export interface AgentDirectoryWatcher {
+  close(): void;
+}
+
+/** Debounced, serialized reload notifications for an agent directory. */
+export function watchAgentDirectory(
+  agentRoot: string,
+  onReload: () => void | Promise<void>,
+  debounceMs = 120,
+): AgentDirectoryWatcher {
+  let timer: NodeJS.Timeout | undefined;
+  let closed = false;
+  let running = false;
+  let pending = false;
+
+  const run = async (): Promise<void> => {
+    if (closed) return;
+    if (running) {
+      pending = true;
+      return;
+    }
+    running = true;
+    try {
+      await onReload();
+    } finally {
+      running = false;
+      if (pending && !closed) {
+        pending = false;
+        await run();
+      }
+    }
+  };
+
+  const watcher: FSWatcher = watch(agentRoot, { recursive: true, persistent: false }, () => {
+    if (closed) return;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => void run().catch(() => undefined), debounceMs);
+  });
+
+  return {
+    close() {
+      closed = true;
+      if (timer) clearTimeout(timer);
+      watcher.close();
+    },
+  };
 }

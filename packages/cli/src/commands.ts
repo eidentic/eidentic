@@ -38,6 +38,8 @@ export interface EidenticConfig {
   basePath?: string;
   exposeEvents?: boolean;
   skillBanks?: Record<string, SkillBankLike>;
+  /** Optional lifecycle hook used by development reload/shutdown. */
+  close?: () => void | Promise<void>;
 }
 
 export interface DoctorCheck {
@@ -520,14 +522,14 @@ export async function loadProject(
     if (!project.agentModulePath) {
       throw new Error("Directory agent requires agent.ts with model and store runtime configuration");
     }
-    const jiti = createJiti(import.meta.url);
+    const jiti = createJiti(import.meta.url, { moduleCache: false });
     rawDefinition = await jiti.import<unknown>(project.agentModulePath, { default: true });
   }
   const definition = validateDirectoryDefinition(rawDefinition, project.agentModulePath);
   const id = definition.id?.trim() || basename(project.agentRoot);
   const discoveredTools: Tool[] = [];
   if (project.toolModulePaths?.length) {
-    const jiti = opts.importToolModule ? undefined : createJiti(import.meta.url);
+    const jiti = opts.importToolModule ? undefined : createJiti(import.meta.url, { moduleCache: false });
     for (const modulePath of project.toolModulePaths) {
       const rawTool = opts.importToolModule
         ? await opts.importToolModule(modulePath)
@@ -542,7 +544,7 @@ export async function loadProject(
     seenToolIds.add(tool.id);
   }
   const agent = new Agent({ ...definition, id, instructions, ...(tools.length > 0 ? { tools } : {}) });
-  return { agents: { [id]: agent } };
+  return { agents: { [id]: agent }, close: () => definition.store.close() };
 }
 
 /**
