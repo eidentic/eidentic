@@ -319,15 +319,18 @@ export function doctor(
       : `None of ${PROVIDER_KEYS.join(", ")} found in environment`,
   });
 
-  // 3. eidentic.config.{ts,js,mjs} exists in cwd
-  const configPath = resolveConfigPath(cwd);
-  const configOk = configPath !== null;
+  // 3. A supported Eidentic project exists in cwd.
+  let project: EidenticProject | null = null;
+  try { project = resolveProject(cwd); } catch { /* invalid/missing project is reported below */ }
+  const projectOk = project !== null;
   checks.push({
-    name: "eidentic.config file",
-    ok: configOk,
-    detail: configOk
-      ? `Found ${configPath}`
-      : `No eidentic.config.{ts,js,mjs} in ${cwd}`,
+    name: "Eidentic project",
+    ok: projectOk,
+    detail: project?.kind === "config"
+      ? `Found ${project.configPath}`
+      : project?.kind === "directory"
+        ? `Found ${relative(project.root, project.instructionsPath)}`
+        : `No eidentic.config.* or agent/instructions.md in ${cwd}`,
   });
 
   // 4. .env file present in cwd (informational — always ok:true)

@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
-import { doctor, resolveConfigPath, loadConfig, buildServer, initProject, INIT_PROVIDERS, runEval, addSkill, makeDirResolver, addComponent, COMPONENT_NAMES, COMPONENT_DESCRIPTIONS } from "./commands.js";
+import { doctor, resolveProject, loadProject, buildServer, initProject, INIT_PROVIDERS, runEval, addSkill, makeDirResolver, addComponent, COMPONENT_NAMES, COMPONENT_DESCRIPTIONS } from "./commands.js";
 import type { Provider } from "./commands.js";
 import { serveNode, NoAuth } from "@eidentic/server";
 
@@ -60,12 +60,12 @@ const devCmd = defineCommand({
   meta: {
     name: "dev",
     description:
-      "Start a local dev server. Loads eidentic.config.{ts,js,mjs} from the current directory (or an explicit path).",
+      "Start a local dev server from eidentic.config.* or an agent directory.",
   },
   args: {
     config: {
       type: "positional",
-      description: "Path to eidentic config file (optional)",
+      description: "Path to an Eidentic config file or agent directory (optional)",
       required: false,
     },
     port: {
@@ -78,12 +78,12 @@ const devCmd = defineCommand({
     const explicitPath = args.config as string | undefined;
     const port = args.port ? parseInt(String(args.port), 10) : undefined;
 
-    const configPath = resolveConfigPath(process.cwd(), explicitPath);
+    const project = resolveProject(process.cwd(), explicitPath);
 
-    if (!configPath) {
-      consola.error("No eidentic.config.{ts,js,mjs} found.");
+    if (!project) {
+      consola.error("No eidentic.config.* or agent/instructions.md found.");
       consola.info(
-        "Create a eidentic.config.ts in the current directory, or pass the path explicitly.",
+        "Create agent/instructions.md or eidentic.config.ts, or pass a path explicitly.",
       );
       consola.info("Run `eidentic doctor` for a full environment check.");
       process.exit(1);
@@ -91,7 +91,7 @@ const devCmd = defineCommand({
 
     let config;
     try {
-      config = await loadConfig(configPath);
+      config = await loadProject(project);
     } catch (err) {
       consola.error(`Error loading config: ${(err as Error).message}`);
       process.exit(1);
@@ -151,12 +151,12 @@ const studioCmd = defineCommand({
   meta: {
     name: "studio",
     description:
-      "Start Eidentic Studio (dev tool) on port 3535. Loads eidentic.config.{ts,js,mjs} from the current directory.",
+      "Start Eidentic Studio from eidentic.config.* or an agent directory.",
   },
   args: {
     config: {
       type: "positional",
-      description: "Path to eidentic config file (optional)",
+      description: "Path to an Eidentic config file or agent directory (optional)",
       required: false,
     },
     port: {
@@ -169,19 +169,19 @@ const studioCmd = defineCommand({
     const explicitPath = args.config as string | undefined;
     const port = args.port ? parseInt(String(args.port), 10) : 3535;
 
-    const configPath = resolveConfigPath(process.cwd(), explicitPath);
+    const project = resolveProject(process.cwd(), explicitPath);
 
-    if (!configPath) {
-      consola.error("No eidentic.config.{ts,js,mjs} found.");
+    if (!project) {
+      consola.error("No eidentic.config.* or agent/instructions.md found.");
       consola.info(
-        "Create a eidentic.config.ts in the current directory, or pass the path explicitly.",
+        "Create agent/instructions.md or eidentic.config.ts, or pass a path explicitly.",
       );
       process.exit(1);
     }
 
     let config;
     try {
-      config = await loadConfig(configPath);
+      config = await loadProject(project);
     } catch (err) {
       consola.error(`Error loading config: ${(err as Error).message}`);
       process.exit(1);
