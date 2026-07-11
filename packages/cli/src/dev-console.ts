@@ -1,4 +1,5 @@
 import { isText, isToolUse, type StreamEvent } from "@eidentic/types";
+import { randomUUID } from "node:crypto";
 
 const MAX_TERMINAL_TEXT = 8_192;
 
@@ -45,5 +46,65 @@ export function formatDevEvent(event: StreamEvent): string[] {
       return [`◐ context compacted   ${event.before} → ${event.after} tokens`];
     case "stream.delta":
       return [];
+  }
+}
+
+interface QueryableAgent {
+  query(input: string, options: { sessionId: string }): AsyncIterable<StreamEvent>;
+}
+
+export interface DevConsoleOptions {
+  agents: Record<string, QueryableAgent>;
+  write: (line: string) => void;
+  createSessionId?: () => string;
+}
+
+/** Consume terminal lines serially so a session cannot accidentally run concurrent turns. */
+export async function consumeDevInput(
+  input: AsyncIterable<string> | Iterable<string>,
+  options: DevConsoleOptions,
+): Promise<void> {
+  const agentIds = Object.keys(options.agents);
+  if (agentIds.length === 0) throw new Error("The dev console requires at least one agent");
+  const createSessionId = options.createSessionId ?? randomUUID;
+  let activeAgentId = agentIds[0]!;
+  let sessionId = createSessionId();
+
+  for await (const rawLine of input) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    if (line === "/exit") return;
+    if (line === "/help") {
+      options.write("Commands: /help, /new, /agent <id>, /exit");
+      continue;
+    }
+    if (line === "/new") {
+      sessionId = createSessionId();
+      options.write(`● session ${sessionId}`);
+      continue;
+    }
+    if (line.startsWith("/agent ")) {
+      const requested = line.slice(7).trim();
+      if (!Object.hasOwn(options.agents, requested)) {
+        options.write(`Unknown agent: ${safeTerminalText(requested)}`);
+        continue;
+      }
+      activeAgentId = requested;
+      options.write(`● agent  ${safeTerminalText(requested)}`);
+      continue;
+    }
+    if (line.startsWith("/")) {
+      options.write("Unknown command. Type /help.");
+      continue;
+    }
+
+    try {
+      for await (const event of options.agents[activeAgentId]!.query(line, { sessionId })) {
+        for (const outputLine of formatDevEvent(event)) options.write(outputLine);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      options.write(`✗ error  ${safeTerminalText(message)}`);
+    }
   }
 }

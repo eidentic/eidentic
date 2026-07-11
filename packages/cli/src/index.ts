@@ -10,7 +10,9 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
+import { createInterface } from "node:readline/promises";
 import { doctor, resolveProject, loadProject, buildServer, initProject, INIT_PROVIDERS, runEval, addSkill, makeDirResolver, addComponent, COMPONENT_NAMES, COMPONENT_DESCRIPTIONS } from "./commands.js";
+import { consumeDevInput } from "./dev-console.js";
 import type { Provider } from "./commands.js";
 import { serveNode, NoAuth } from "@eidentic/server";
 
@@ -113,9 +115,29 @@ const devCmd = defineCommand({
       `eidentic dev server running at ${pc.cyan(`http://localhost:${listenPort}`)}`,
     );
     consola.info(`Agents: ${pc.bold(agentIds.join(", "))}`);
-    consola.info("Press Ctrl+C to stop.");
+    consola.info(process.stdin.isTTY ? "Chat below. Type /help for commands or press Ctrl+C to stop." : "Press Ctrl+C to stop.");
+
+    let readline: ReturnType<typeof createInterface> | undefined;
+    if (process.stdin.isTTY && process.stdout.isTTY) {
+      readline = createInterface({ input: process.stdin, output: process.stdout });
+      async function* prompts(): AsyncIterable<string> {
+        while (true) yield await readline!.question(pc.cyan("you › "));
+      }
+      void consumeDevInput(prompts(), {
+        agents: config.agents,
+        write: (line) => consola.log(line),
+      }).catch((error: unknown) => {
+        if ((error as NodeJS.ErrnoException).code !== "ABORT_ERR") {
+          consola.error(`Dev console stopped: ${(error as Error).message}`);
+        }
+      }).finally(() => {
+        readline?.close();
+        handle.close();
+      });
+    }
 
     process.on("SIGINT", () => {
+      readline?.close();
       handle.close();
       process.exit(0);
     });
