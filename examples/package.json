@@ -58,7 +58,7 @@
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.0",
-    "@ai-sdk/openai": "^4.0.0",
+    "@ai-sdk/openai": "^4.0.11",
     "@eidentic/a2a": "workspace:*",
     "@eidentic/bench": "workspace:*",
     "@eidentic/better-auth": "workspace:*",
@@ -94,6 +94,6 @@
     "@eidentic/qdrant": "workspace:*",
     "@eidentic/rag": "workspace:*",
     "@eidentic/react": "workspace:*",
-    "tsx": "^4.19.0"
+    "tsx": "^4.23.0"
   }
 }

@@ -32,7 +32,7 @@
     "typecheck:templates": "tsc --noEmit -p tsconfig.templates.json"
   },
   "dependencies": {
-    "@clack/prompts": "^1.5.1",
+    "@clack/prompts": "^1.7.0",
     "@eidentic/eval": "workspace:*",
     "@eidentic/server": "workspace:*",
     "@eidentic/studio": "workspace:*",

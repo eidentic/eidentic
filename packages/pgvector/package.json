@@ -49,7 +49,7 @@
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.4.6",
-    "pg": "^8.21.0",
+    "pg": "^8.22.0",
     "@types/pg": "^8.11.0"
   },
   "description": "pgvector adapter for Eidentic — vector search over PostgreSQL (pg / pglite) using the pgvector extension.",

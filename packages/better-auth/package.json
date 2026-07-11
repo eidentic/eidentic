@@ -40,7 +40,7 @@
     "@eidentic/types": "workspace:*"
   },
   "peerDependencies": {
-    "better-auth": "^1.6.19"
+    "better-auth": "^1.6.23"
   },
   "peerDependenciesMeta": {
     "better-auth": {
@@ -48,7 +48,7 @@
     }
   },
   "devDependencies": {
-    "better-auth": "^1.6.19",
+    "better-auth": "^1.6.23",
     "@eidentic/server": "workspace:*",
     "@eidentic/core": "workspace:*"
   },
