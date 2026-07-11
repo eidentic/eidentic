@@ -33,6 +33,7 @@
   },
   "dependencies": {
     "@clack/prompts": "^1.5.1",
+    "@eidentic/core": "workspace:*",
     "@eidentic/eval": "workspace:*",
     "@eidentic/server": "workspace:*",
     "@eidentic/studio": "workspace:*",
@@ -42,7 +43,6 @@
     "picocolors": "^1.1.1"
   },
   "devDependencies": {
-    "@eidentic/core": "workspace:*",
     "@eidentic/react": "workspace:*",
     "@eidentic/skills": "workspace:^",
     "@eidentic/types": "workspace:*",

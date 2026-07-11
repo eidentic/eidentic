@@ -13,10 +13,10 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { join, resolve, relative, sep, isAbsolute, dirname, extname } from "node:path";
+import { join, resolve, relative, sep, isAbsolute, dirname, extname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createJiti } from "jiti";
-import type { Agent } from "@eidentic/core";
+import { Agent, type AgentConfig } from "@eidentic/core";
 import type { AuthPort } from "@eidentic/server";
 import { createServer } from "@eidentic/server";
 import type { Hono } from "hono";
@@ -358,6 +358,16 @@ export type EidenticProject =
       agentModulePath?: string;
     };
 
+export type DirectoryAgentDefinition = Omit<AgentConfig, "id" | "instructions"> & {
+  id?: string;
+};
+
+export interface LoadProjectOptions {
+  importDirectoryModule?: (modulePath?: string) => Promise<unknown>;
+}
+
+const MAX_INSTRUCTIONS_BYTES = 256 * 1024;
+
 function assertProjectPath(root: string, candidate: string, label: string): string {
   const resolved = realpathSync(candidate);
   const rel = relative(root, resolved);
@@ -399,6 +409,57 @@ export function resolveProject(cwd: string, explicit?: string): EidenticProject 
   const configPath = resolveConfigPath(root);
   if (configPath !== null) return { kind: "config", root, configPath };
   return directoryProject(root, join(root, "agent"));
+}
+
+function validateDirectoryDefinition(raw: unknown, modulePath?: string): DirectoryAgentDefinition {
+  if (!raw || typeof raw !== "object") {
+    throw new Error(`${modulePath ?? "directory runtime"} must export an agent runtime object`);
+  }
+  const definition = raw as Record<string, unknown>;
+  if (Object.prototype.hasOwnProperty.call(definition, "instructions")) {
+    throw new Error("Directory agent instructions must come from instructions.md, not agent.ts");
+  }
+  if (!definition["model"] || typeof definition["model"] !== "object") {
+    throw new Error(`${modulePath ?? "directory runtime"} must provide a model`);
+  }
+  if (!definition["store"] || typeof definition["store"] !== "object") {
+    throw new Error(`${modulePath ?? "directory runtime"} must provide a store`);
+  }
+  if (definition["id"] !== undefined && (typeof definition["id"] !== "string" || definition["id"].trim() === "")) {
+    throw new Error(`${modulePath ?? "directory runtime"} id must be a non-empty string`);
+  }
+  return definition as unknown as DirectoryAgentDefinition;
+}
+
+/** Compile either project format to the existing server/Studio configuration contract. */
+export async function loadProject(
+  project: EidenticProject,
+  opts: LoadProjectOptions = {},
+): Promise<EidenticConfig> {
+  if (project.kind === "config") return loadConfig(project.configPath);
+
+  const instructionStat = statSync(project.instructionsPath);
+  if (!instructionStat.isFile()) throw new Error("Directory agent instructions.md must be a regular file");
+  if (instructionStat.size > MAX_INSTRUCTIONS_BYTES) {
+    throw new Error(`Directory agent instructions.md is too large (maximum ${MAX_INSTRUCTIONS_BYTES} bytes)`);
+  }
+  const instructions = readFileSync(project.instructionsPath, "utf8").trim();
+  if (instructions === "") throw new Error("Directory agent instructions.md is empty");
+
+  let rawDefinition: unknown;
+  if (opts.importDirectoryModule) {
+    rawDefinition = await opts.importDirectoryModule(project.agentModulePath);
+  } else {
+    if (!project.agentModulePath) {
+      throw new Error("Directory agent requires agent.ts with model and store runtime configuration");
+    }
+    const jiti = createJiti(import.meta.url);
+    rawDefinition = await jiti.import<unknown>(project.agentModulePath, { default: true });
+  }
+  const definition = validateDirectoryDefinition(rawDefinition, project.agentModulePath);
+  const id = definition.id?.trim() || basename(project.agentRoot);
+  const agent = new Agent({ ...definition, id, instructions });
+  return { agents: { [id]: agent } };
 }
 
 /**
