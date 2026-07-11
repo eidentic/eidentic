@@ -221,21 +221,26 @@ describe("Session", () => {
     expect((await store.getSession("legacy-key"))?.apiKey).not.toContain("raw-secret");
   });
 
-  it("Finding #1 — session with no owner (legacy) is openable by any identity (back-compat)", async () => {
+  it("Finding #1 — authenticated callers cannot take over ownerless legacy sessions by default", async () => {
     const store = new InMemoryStore();
     await store.migrate();
 
     // Create a legacy session with no userId/orgId.
     await store.createSession({ id: "legacy-sess", agentId: "a1", createdAt: "t0" });
 
-    // Bob can open it — back-compat path.
-    const s = await Session.open(store, {
-      sessionId: "legacy-sess",
-      agentId: "a1",
-      now: () => "t1",
-      newId: () => "id1",
-      userId: "bob",
-    });
-    expect(s.id).toBe("legacy-sess");
+    await expect(Session.open(store, {
+      sessionId: "legacy-sess", agentId: "a1", now: () => "t1", newId: () => "id1", userId: "bob",
+    })).rejects.toThrow(/no recorded owner/);
+
+    // Ownerless trusted/single-tenant use remains compatible.
+    await expect(Session.open(store, {
+      sessionId: "legacy-sess", agentId: "a1", now: () => "t1", newId: () => "id2",
+    })).resolves.toMatchObject({ id: "legacy-sess" });
+
+    // Operators can opt in only after performing an independent authorization check.
+    await expect(Session.open(store, {
+      sessionId: "legacy-sess", agentId: "a1", now: () => "t1", newId: () => "id3",
+      userId: "bob", unsafeAllowOwnerlessSessionAccess: true,
+    })).resolves.toMatchObject({ id: "legacy-sess" });
   });
 });

@@ -14,6 +14,11 @@ export interface SessionDeps {
   orgId?: string;
   /** H1 fix: API key recorded into SessionRecord so apiKey-only principals own their sessions. */
   apiKey?: string;
+  /**
+   * Unsafe migration escape hatch for opening legacy ownerless sessions as an authenticated
+   * principal. Keep disabled unless the caller has independently authorized the session id.
+   */
+  unsafeAllowOwnerlessSessionAccess?: boolean;
 }
 
 type SessionOwner = { userId?: string; orgId?: string; apiKey?: string };
@@ -41,7 +46,7 @@ export function matchesSessionOwner(owner: SessionOwner, caller: SessionOwner): 
   if (owner.userId !== undefined) return caller.userId === owner.userId;
   if (owner.orgId !== undefined) return caller.orgId === owner.orgId;
   if (owner.apiKey !== undefined) return caller.apiKey === owner.apiKey;
-  return true;
+  return caller.userId === undefined && caller.orgId === undefined && caller.apiKey === undefined;
 }
 
 export class Session {
@@ -76,10 +81,13 @@ export class Session {
       // This covers core/nextjs/A2A/MCP entry points that bypass the HTTP server ownership check.
       //
       // Rules:
-      //  - If the session has no recorded userId/orgId/apiKey (legacy/NoAuth), always allow (back-compat).
+      //  - Ownerless sessions remain available to ownerless trusted/single-tenant callers.
+      //  - An authenticated principal may claim an ownerless id only through the explicitly unsafe
+      //    migration escape hatch after independent authorization.
       //  - userId is canonical when present; orgId cannot override a user mismatch.
       //  - otherwise orgId is canonical, then apiKey as the legacy fallback.
       const sessionOwned = session.userId !== undefined || session.orgId !== undefined || session.apiKey !== undefined;
+      const callerOwned = caller.userId !== undefined || caller.orgId !== undefined || caller.apiKey !== undefined;
       // A verified use of a legacy plaintext row upgrades it with compare-and-swap. New writes
       // above always contain only the fingerprint.
       if (session.apiKey !== undefined && deps.apiKey !== undefined && session.apiKey === deps.apiKey) {
@@ -90,6 +98,11 @@ export class Session {
       if (sessionOwned && !matchesSessionOwner(session, caller)) {
         throw new StoreConflictError(
           `session ${deps.sessionId} is owned by a different principal`,
+        );
+      }
+      if (!sessionOwned && callerOwned && deps.unsafeAllowOwnerlessSessionAccess !== true) {
+        throw new StoreConflictError(
+          `session ${deps.sessionId} has no recorded owner; authenticated access is denied`,
         );
       }
     }

@@ -16,8 +16,10 @@ These are runtime boundaries, not optional recommendations.
   organisation ownership; omission of identity is not an authorization bypass.
 - MCP, A2A, Next.js, Server and Studio bind identity from authenticated transport metadata. Request
   bodies cannot select their own owner unless a deliberately named unsafe compatibility flag is set.
-- Ownerless legacy sessions remain readable only for backwards compatibility. Deployments that
-  require tenant isolation must authenticate every entry point and migrate or erase ownerless data.
+- Ownerless legacy sessions remain readable only to ownerless trusted/single-tenant callers.
+  Authenticated principals are denied by default; `unsafeAllowOwnerlessSessionAccess` is a temporary
+  migration escape hatch and may be enabled only after an independent authorization check proves
+  the caller owns the requested session. Tenant deployments should migrate or erase ownerless data.
 
 ## Storage keys and durable execution
 

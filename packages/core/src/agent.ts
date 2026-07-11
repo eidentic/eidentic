@@ -126,6 +126,11 @@ export interface AgentConfig {
   model: ModelPort;
   tools?: Tool[];
   store: StorePort;
+  /**
+   * Unsafe legacy migration escape hatch. When enabled, authenticated callers may open sessions
+   * created before owner binding. Enable only behind an independent session authorization check.
+   */
+  unsafeAllowOwnerlessSessionAccess?: boolean;
   maxTurns?: number;
   now?: () => string;
   newId?: () => string;
@@ -1151,6 +1156,7 @@ export class Agent {
       ...(principal.orgId !== undefined ? { orgId: principal.orgId } : {}),
       // H1 fix: record apiKey when present so apiKey-only principals own their sessions.
       ...(principal.apiKey !== undefined ? { apiKey: principal.apiKey } : {}),
+      ...(this.config.unsafeAllowOwnerlessSessionAccess === true ? { unsafeAllowOwnerlessSessionAccess: true } : {}),
     });
     if (skillPolicy) this.restorePromptSkillPolicy(session.events(), skillPolicy);
 
@@ -1352,6 +1358,7 @@ export class Agent {
         ...(principal.userId !== undefined ? { userId: principal.userId } : {}),
         ...(principal.orgId !== undefined ? { orgId: principal.orgId } : {}),
         ...(principal.apiKey !== undefined ? { apiKey: principal.apiKey } : {}),
+        ...(this.config.unsafeAllowOwnerlessSessionAccess === true ? { unsafeAllowOwnerlessSessionAccess: true } : {}),
       });
       const pending = [...suspSession.events()].reverse().find((e) => e.kind === "suspension");
       if (!pending) throw new Error("Agent.resume: a decision was provided but the session has no pending suspension.");
@@ -1400,6 +1407,7 @@ export class Agent {
       ...(principal.userId !== undefined ? { userId: principal.userId } : {}),
       ...(principal.orgId !== undefined ? { orgId: principal.orgId } : {}),
       ...(principal.apiKey !== undefined ? { apiKey: principal.apiKey } : {}),
+      ...(this.config.unsafeAllowOwnerlessSessionAccess === true ? { unsafeAllowOwnerlessSessionAccess: true } : {}),
     });
     if (resumeSkillPolicy) this.restorePromptSkillPolicy(session.events(), resumeSkillPolicy);
 

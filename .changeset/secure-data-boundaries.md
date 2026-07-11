@@ -1,8 +1,8 @@
 ---
-"@eidentic/types": minor
-"@eidentic/core": minor
+"@eidentic/types": major
+"@eidentic/core": major
 "@eidentic/model": minor
-"@eidentic/memory": minor
+"@eidentic/memory": major
 "@eidentic/sqlite": minor
 "@eidentic/libsql": minor
 "@eidentic/postgres": minor
@@ -13,7 +13,8 @@
 "@eidentic/prompts": minor
 "@eidentic/cli": minor
 "@eidentic/pgvector": patch
-"@eidentic/server": minor
+"@eidentic/server": major
+"eidentic": major
 ---
 
 Harden identity, tenant ownership, erasure, durable idempotency, event replay, multimodal input,
