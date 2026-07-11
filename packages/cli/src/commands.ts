@@ -8,11 +8,12 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  realpathSync,
   readdirSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { join, resolve, isAbsolute, dirname, extname } from "node:path";
+import { join, resolve, relative, sep, isAbsolute, dirname, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createJiti } from "jiti";
 import type { Agent } from "@eidentic/core";
@@ -346,6 +347,59 @@ export function doctor(
 // ---------------------------------------------------------------------------
 
 const CONFIG_NAMES = ["eidentic.config.ts", "eidentic.config.js", "eidentic.config.mjs"] as const;
+
+export type EidenticProject =
+  | { kind: "config"; root: string; configPath: string }
+  | {
+      kind: "directory";
+      root: string;
+      agentRoot: string;
+      instructionsPath: string;
+      agentModulePath?: string;
+    };
+
+function assertProjectPath(root: string, candidate: string, label: string): string {
+  const resolved = realpathSync(candidate);
+  const rel = relative(root, resolved);
+  if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    throw new Error(`${label} resolves outside the project root: ${candidate}`);
+  }
+  return resolved;
+}
+
+function directoryProject(root: string, agentRoot: string): EidenticProject | null {
+  const instructionsCandidate = join(agentRoot, "instructions.md");
+  if (!existsSync(instructionsCandidate)) return null;
+  const safeAgentRoot = assertProjectPath(root, agentRoot, "agent directory");
+  const instructionsPath = assertProjectPath(root, instructionsCandidate, "instructions.md");
+  const moduleCandidate = join(safeAgentRoot, "agent.ts");
+  const agentModulePath = existsSync(moduleCandidate)
+    ? assertProjectPath(root, moduleCandidate, "agent.ts")
+    : undefined;
+  return {
+    kind: "directory",
+    root,
+    agentRoot: safeAgentRoot,
+    instructionsPath,
+    ...(agentModulePath !== undefined ? { agentModulePath } : {}),
+  };
+}
+
+/** Resolve either the legacy config project or the additive `agent/` directory convention. */
+export function resolveProject(cwd: string, explicit?: string): EidenticProject | null {
+  const root = realpathSync(cwd);
+  if (explicit !== undefined) {
+    const requested = isAbsolute(explicit) ? explicit : resolve(root, explicit);
+    if (!existsSync(requested)) return null;
+    const safeRequested = assertProjectPath(root, requested, "explicit project path");
+    if (statSync(safeRequested).isDirectory()) return directoryProject(root, safeRequested);
+    return { kind: "config", root, configPath: safeRequested };
+  }
+
+  const configPath = resolveConfigPath(root);
+  if (configPath !== null) return { kind: "config", root, configPath };
+  return directoryProject(root, join(root, "agent"));
+}
 
 /**
  * Find the eidentic config file.
