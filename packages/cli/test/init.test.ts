@@ -82,6 +82,39 @@ describe("initProject() — default (anthropic)", () => {
   });
 });
 
+describe("initProject() — directory format", () => {
+  it("creates a readable agent directory without a competing legacy config", () => {
+    const result = initProject(tmpDir, { format: "directory" });
+    expect(result.skipped).toHaveLength(0);
+    expect(existsSync(join(tmpDir, "agent", "instructions.md"))).toBe(true);
+    expect(existsSync(join(tmpDir, "agent", "agent.ts"))).toBe(true);
+    expect(existsSync(join(tmpDir, "agent", "tools", "get-time.ts"))).toBe(true);
+    expect(existsSync(join(tmpDir, "eidentic.config.ts"))).toBe(false);
+    expect(existsSync(join(tmpDir, "src", "agent.ts"))).toBe(false);
+  });
+
+  it("keeps instructions, runtime configuration, and tools in separate files", () => {
+    initProject(tmpDir, { format: "directory", provider: "openai", model: "gpt-4o-mini" });
+    expect(readFileSync(join(tmpDir, "agent", "instructions.md"), "utf8"))
+      .toContain("helpful assistant");
+    const runtime = readFileSync(join(tmpDir, "agent", "agent.ts"), "utf8");
+    expect(runtime).toContain('openai("gpt-4o-mini")');
+    expect(runtime).toContain("export default");
+    expect(runtime).not.toContain("createTool");
+    const tool = readFileSync(join(tmpDir, "agent", "tools", "get-time.ts"), "utf8");
+    expect(tool).toContain("createTool");
+    expect(tool).toContain('id: "get_time"');
+  });
+
+  it("is idempotent for directory projects", () => {
+    initProject(tmpDir, { format: "directory" });
+    const second = initProject(tmpDir, { format: "directory" });
+    expect(second.skipped).toEqual(expect.arrayContaining([
+      "agent/instructions.md", "agent/agent.ts", "agent/tools/get-time.ts", ".env",
+    ]));
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Idempotency
 // ---------------------------------------------------------------------------

@@ -19,7 +19,7 @@ npm install eidentic
 # Scaffold a new project
 eidentic init
 
-# Start the dev server (loads eidentic.config.ts)
+# Start the localhost-only dev server, interactive chat, and live reload
 eidentic dev
 
 # Open the local Studio dashboard
@@ -34,7 +34,19 @@ eidentic add component workflow-trace
 eidentic doctor
 ```
 
-### `eidentic.config.ts` example
+The default scaffold is intentionally readable:
+
+```text
+agent/
+  instructions.md
+  agent.ts
+  tools/get-time.ts
+```
+
+`instructions.md` owns the prompt, `agent.ts` selects the model and store, and each
+module in `tools/` default-exports one Eidentic tool. Existing projects remain supported:
+
+### Legacy `eidentic.config.ts` example
 
 ```ts
 // eidentic.config.ts — export `agents` (and optionally `port`, `auth`, etc.)

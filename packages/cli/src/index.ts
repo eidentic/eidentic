@@ -10,9 +10,11 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
-import { doctor, resolveConfigPath, loadConfig, buildServer, initProject, INIT_PROVIDERS, runEval, addSkill, makeDirResolver, addComponent, COMPONENT_NAMES, COMPONENT_DESCRIPTIONS } from "./commands.js";
-import type { Provider } from "./commands.js";
-import { serveNode, NoAuth } from "@eidentic/server";
+import { createInterface } from "node:readline/promises";
+import { doctor, resolveProject, loadProject, buildServer, initProject, INIT_PROVIDERS, runEval, addSkill, makeDirResolver, addComponent, COMPONENT_NAMES, COMPONENT_DESCRIPTIONS } from "./commands.js";
+import { consumeDevInput, watchAgentDirectory, type AgentDirectoryWatcher } from "./dev-console.js";
+import type { EidenticConfig, Provider } from "./commands.js";
+import { serveNode, NoAuth, type ServeNodeHandle } from "@eidentic/server";
 
 // ---------------------------------------------------------------------------
 // Version
@@ -60,12 +62,12 @@ const devCmd = defineCommand({
   meta: {
     name: "dev",
     description:
-      "Start a local dev server. Loads eidentic.config.{ts,js,mjs} from the current directory (or an explicit path).",
+      "Start a local dev server from eidentic.config.* or an agent directory.",
   },
   args: {
     config: {
       type: "positional",
-      description: "Path to eidentic config file (optional)",
+      description: "Path to an Eidentic config file or agent directory (optional)",
       required: false,
     },
     port: {
@@ -78,20 +80,20 @@ const devCmd = defineCommand({
     const explicitPath = args.config as string | undefined;
     const port = args.port ? parseInt(String(args.port), 10) : undefined;
 
-    const configPath = resolveConfigPath(process.cwd(), explicitPath);
+    const project = resolveProject(process.cwd(), explicitPath);
 
-    if (!configPath) {
-      consola.error("No eidentic.config.{ts,js,mjs} found.");
+    if (!project) {
+      consola.error("No eidentic.config.* or agent/instructions.md found.");
       consola.info(
-        "Create a eidentic.config.ts in the current directory, or pass the path explicitly.",
+        "Create agent/instructions.md or eidentic.config.ts, or pass a path explicitly.",
       );
       consola.info("Run `eidentic doctor` for a full environment check.");
       process.exit(1);
     }
 
-    let config;
+    let config: EidenticConfig;
     try {
-      config = await loadConfig(configPath);
+      config = await loadProject(project);
     } catch (err) {
       consola.error(`Error loading config: ${(err as Error).message}`);
       process.exit(1);
@@ -100,23 +102,94 @@ const devCmd = defineCommand({
     const app = buildServer(config);
     const listenPort = port ?? config.port ?? 3000;
 
-    let handle;
+    let handle: ServeNodeHandle;
     try {
-      handle = await serveNode(app, { port: listenPort });
+      handle = await serveNode(app, { port: listenPort, hostname: "127.0.0.1" });
     } catch (err) {
       consola.error(`Failed to start server: ${(err as Error).message}`);
       process.exit(1);
     }
 
     const agentIds = Object.keys(config.agents);
+    const consoleAgents = { ...config.agents };
+    let consoleBusy = false;
+    let resolveConsoleIdle: (() => void) | undefined;
+    const waitForConsoleIdle = (): Promise<void> => consoleBusy
+      ? new Promise<void>((resolve) => { resolveConsoleIdle = resolve; })
+      : Promise.resolve();
+    let readline: ReturnType<typeof createInterface> | undefined;
+    let directoryWatcher: AgentDirectoryWatcher | undefined;
+    let stopping = false;
+    const shutdown = async (): Promise<void> => {
+      if (stopping) return;
+      stopping = true;
+      directoryWatcher?.close();
+      readline?.close();
+      await handle.drain(5_000);
+      await config.close?.();
+    };
     consola.success(
       `eidentic dev server running at ${pc.cyan(`http://localhost:${listenPort}`)}`,
     );
     consola.info(`Agents: ${pc.bold(agentIds.join(", "))}`);
-    consola.info("Press Ctrl+C to stop.");
+    consola.info(process.stdin.isTTY ? "Chat below. Type /help for commands or press Ctrl+C to stop." : "Press Ctrl+C to stop.");
 
-    process.on("SIGINT", () => {
-      handle.close();
+    if (process.stdin.isTTY && process.stdout.isTTY) {
+      readline = createInterface({ input: process.stdin, output: process.stdout });
+      async function* prompts(): AsyncIterable<string> {
+        while (true) yield await readline!.question(pc.cyan("you › "));
+      }
+      void consumeDevInput(prompts(), {
+        agents: consoleAgents,
+        write: (line) => consola.log(line),
+        onActivityChange: (active) => {
+          consoleBusy = active;
+          if (!active) {
+            resolveConsoleIdle?.();
+            resolveConsoleIdle = undefined;
+          }
+        },
+      }).catch((error: unknown) => {
+        if ((error as NodeJS.ErrnoException).code !== "ABORT_ERR") {
+          consola.error(`Dev console stopped: ${(error as Error).message}`);
+        }
+      }).finally(() => {
+        void shutdown();
+      });
+    }
+
+    if (project.kind === "directory") {
+      directoryWatcher = watchAgentDirectory(project.agentRoot, async () => {
+        try {
+          const nextProject = resolveProject(project.root, explicitPath);
+          if (!nextProject || nextProject.kind !== "directory") throw new Error("agent directory is no longer valid");
+          const nextConfig = await loadProject(nextProject);
+          const nextApp = buildServer(nextConfig);
+          await waitForConsoleIdle();
+          const previousConfig = config;
+          const previousApp = buildServer(previousConfig);
+          await handle.drain(5_000);
+          try {
+            handle = await serveNode(nextApp, { port: listenPort, hostname: "127.0.0.1" });
+          } catch (error) {
+            handle = await serveNode(previousApp, { port: listenPort, hostname: "127.0.0.1" });
+            await nextConfig.close?.();
+            throw error;
+          }
+          config = nextConfig;
+          for (const id of Object.keys(consoleAgents)) delete consoleAgents[id];
+          Object.assign(consoleAgents, nextConfig.agents);
+          await previousConfig.close?.();
+          consola.success("Agent reloaded.");
+        } catch (error) {
+          consola.error(`Reload failed: ${(error as Error).message}`);
+        }
+      });
+      consola.info("Watching agent/ for changes.");
+    }
+
+    process.on("SIGINT", async () => {
+      await shutdown();
       process.exit(0);
     });
   },
@@ -151,12 +224,12 @@ const studioCmd = defineCommand({
   meta: {
     name: "studio",
     description:
-      "Start Eidentic Studio (dev tool) on port 3535. Loads eidentic.config.{ts,js,mjs} from the current directory.",
+      "Start Eidentic Studio from eidentic.config.* or an agent directory.",
   },
   args: {
     config: {
       type: "positional",
-      description: "Path to eidentic config file (optional)",
+      description: "Path to an Eidentic config file or agent directory (optional)",
       required: false,
     },
     port: {
@@ -169,19 +242,19 @@ const studioCmd = defineCommand({
     const explicitPath = args.config as string | undefined;
     const port = args.port ? parseInt(String(args.port), 10) : 3535;
 
-    const configPath = resolveConfigPath(process.cwd(), explicitPath);
+    const project = resolveProject(process.cwd(), explicitPath);
 
-    if (!configPath) {
-      consola.error("No eidentic.config.{ts,js,mjs} found.");
+    if (!project) {
+      consola.error("No eidentic.config.* or agent/instructions.md found.");
       consola.info(
-        "Create a eidentic.config.ts in the current directory, or pass the path explicitly.",
+        "Create agent/instructions.md or eidentic.config.ts, or pass a path explicitly.",
       );
       process.exit(1);
     }
 
     let config;
     try {
-      config = await loadConfig(configPath);
+      config = await loadProject(project);
     } catch (err) {
       consola.error(`Error loading config: ${(err as Error).message}`);
       process.exit(1);
@@ -226,8 +299,9 @@ const studioCmd = defineCommand({
 
     openBrowser(url);
 
-    process.on("SIGINT", () => {
+    process.on("SIGINT", async () => {
       handle.close();
+      await config.close?.();
       process.exit(0);
     });
   },
@@ -287,7 +361,6 @@ function printNextSteps(provider: Provider, apiKeyProvided: boolean): void {
     step++;
   }
   consola.log(`  ${pc.cyan(`${step})`)} ${pc.cyan("npx eidentic dev")}  ${pc.dim("(or npx eidentic studio)")}`);
-  consola.log(`  ${pc.cyan(`${step + 1})`)} ${pc.cyan("npx tsx src/agent.ts")}  ${pc.dim("(run the agent script directly)")}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -298,7 +371,7 @@ const initCmd = defineCommand({
   meta: {
     name: "init",
     description:
-      "Scaffold Eidentic into the current directory. Creates eidentic.config.ts, src/agent.ts, .env, .env.example, .gitignore. Idempotent — never overwrites existing files.",
+      "Scaffold a readable agent directory into the current project. Idempotent — never overwrites existing files.",
   },
   args: {
     provider: {
@@ -443,7 +516,7 @@ const initCmd = defineCommand({
       consola.info(`Scaffolding Eidentic into ${pc.cyan(cwd)} (provider: ${pc.bold(provider)}, model: ${pc.bold(model)})`);
     }
 
-    const { created, skipped } = initProject(cwd, { provider, model, apiKey });
+    const { created, skipped } = initProject(cwd, { provider, model, apiKey, format: "directory" });
     printInitResult(created, skipped);
 
     // -------------------------------------------------------------------------
@@ -476,7 +549,6 @@ const initCmd = defineCommand({
         steps.push(`Install deps: ${detectPackageManager(cwd)} ${detectPackageManager(cwd) === "npm" ? "install" : "add"} eidentic ai @ai-sdk/${provider} zod`);
       }
       steps.push("Start dev server: npx eidentic dev");
-      steps.push("Or run the agent: npx tsx src/agent.ts");
       outro(
         [pc.bold("Done!"), "", ...steps.map((s, i) => `  ${pc.cyan(`${i + 1})`)} ${s}`)].join("\n"),
       );

@@ -42,7 +42,7 @@ describe("doctor()", () => {
 
     expect(report.ok).toBe(true);
     expect(report.checks.find((c) => c.name === "Model provider key")?.ok).toBe(true);
-    expect(report.checks.find((c) => c.name === "eidentic.config file")?.ok).toBe(true);
+    expect(report.checks.find((c) => c.name === "Eidentic project")?.ok).toBe(true);
 
     rmSync(dir, { recursive: true, force: true });
   });
@@ -51,7 +51,18 @@ describe("doctor()", () => {
     const report = doctor({}, "/tmp/nonexistent-eidentic-dir-xyz");
     expect(report.ok).toBe(false);
     expect(report.checks.find((c) => c.name === "Model provider key")?.ok).toBe(false);
-    expect(report.checks.find((c) => c.name === "eidentic.config file")?.ok).toBe(false);
+    expect(report.checks.find((c) => c.name === "Eidentic project")?.ok).toBe(false);
+  });
+
+  it("recognizes the agent directory convention as a project", () => {
+    const dir = join(tmpdir(), `eidentic-doctor-directory-${Date.now()}`);
+    mkdirSync(join(dir, "agent"), { recursive: true });
+    writeFileSync(join(dir, "agent", "instructions.md"), "You are helpful.");
+    const report = doctor({ ANTHROPIC_API_KEY: "test" }, dir);
+    expect(report.ok).toBe(true);
+    expect(report.checks.find((check) => check.name === "Eidentic project")?.detail)
+      .toContain("agent/instructions.md");
+    rmSync(dir, { recursive: true, force: true });
   });
 
   it("Node-version check reflects the running version", () => {

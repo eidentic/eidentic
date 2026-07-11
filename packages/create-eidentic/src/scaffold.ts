@@ -103,7 +103,7 @@ const TSCONFIG = `{
     "verbatimModuleSyntax": true,
     "noEmit": true
   },
-  "include": ["src"]
+  "include": ["agent"]
 }
 `;
 
@@ -118,35 +118,32 @@ function envExample(providerMeta: ProviderMeta): string {
 }
 
 function agentTs(providerMeta: ProviderMeta): string {
-  return `import { Agent, AIModel, SqliteStore, createTool } from "eidentic";
+  return `import { AIModel, SqliteStore, defaultPrices } from "eidentic";
 ${providerMeta.importLine}
-import { z } from "zod";
 
-// Persistent, event-sourced session store (durable resume comes for free).
 const store = new SqliteStore("./eidentic.sqlite");
 await store.migrate();
 
-// A tiny example tool — replace with your own.
-const getTime = createTool({
+export default {
+  id: "my-agent",
+  model: new AIModel(${providerMeta.providerFn}("${providerMeta.modelId}")), // needs ${providerMeta.envVar}
+  store,
+  prices: defaultPrices,
+};
+`;
+}
+
+function getTimeToolTs(): string {
+  return `import { createTool } from "eidentic";
+import { z } from "zod";
+
+export default createTool({
   id: "get_time",
   description: "Get the current server time as an ISO string.",
   inputSchema: z.object({}),
+  sideEffect: "read-only",
   execute: async () => ({ now: new Date().toISOString() }),
 });
-
-const agent = new Agent({
-  id: "my-agent",
-  instructions: "You are a helpful assistant. Use tools when relevant, then answer concisely.",
-  model: new AIModel(${providerMeta.providerFn}("${providerMeta.modelId}")), // needs ${providerMeta.envVar}
-  tools: [getTime],
-  store,
-});
-
-for await (const ev of agent.query("What time is it right now?", { sessionId: "session-1" })) {
-  if (ev.type === "result") console.log("\\n" + String(ev.output));
-}
-
-await store.close();
 `;
 }
 
@@ -158,7 +155,7 @@ function packageJson(name: string, providerMeta: ProviderMeta): string {
         version: "0.1.0",
         private: true,
         type: "module",
-        scripts: { dev: "tsx src/agent.ts", typecheck: "tsc --noEmit" },
+        scripts: { dev: "eidentic dev", studio: "eidentic studio", typecheck: "tsc --noEmit" },
         dependencies: {
           eidentic: "latest",
           ai: "^7.0.2",
@@ -645,13 +642,15 @@ export function scaffold(targetDir: string, opts: ScaffoldOptions = {}): string[
     return written;
   }
 
-  // default template
-  mkdirSync(join(targetDir, "src"), { recursive: true });
+  // default directory-first template
+  mkdirSync(join(targetDir, "agent", "tools"), { recursive: true });
 
   const files: Record<string, string> = {
     "package.json": packageJson(projectName, providerMeta),
     "tsconfig.json": TSCONFIG,
-    "src/agent.ts": agentTs(providerMeta),
+    "agent/instructions.md": "You are a helpful assistant. Use tools when relevant, then answer concisely.\n",
+    "agent/agent.ts": agentTs(providerMeta),
+    "agent/tools/get-time.ts": getTimeToolTs(),
     ".env.example": envExample(providerMeta),
     ".gitignore": GITIGNORE,
     "README.md": readme(projectName),

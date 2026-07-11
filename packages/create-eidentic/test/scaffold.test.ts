@@ -16,7 +16,7 @@ describe("create-eidentic scaffold", () => {
     const dir = join(cleanup, "app");
     const files = scaffold(dir, { name: "app" });
 
-    for (const f of ["package.json", "tsconfig.json", "src/agent.ts", ".env.example", ".gitignore", "README.md"]) {
+    for (const f of ["package.json", "tsconfig.json", "agent/instructions.md", "agent/agent.ts", "agent/tools/get-time.ts", ".env.example", ".gitignore", "README.md"]) {
       expect(files).toContain(f);
       expect(existsSync(join(dir, f))).toBe(true);
     }
@@ -24,9 +24,9 @@ describe("create-eidentic scaffold", () => {
     const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
     expect(pkg.name).toBe("app");
     expect(pkg.dependencies.eidentic).toBeDefined();
-    expect(pkg.scripts.dev).toBe("tsx src/agent.ts");
+    expect(pkg.scripts.dev).toBe("eidentic dev");
 
-    const agent = readFileSync(join(dir, "src/agent.ts"), "utf8");
+    const agent = readFileSync(join(dir, "agent/agent.ts"), "utf8");
     expect(agent).toContain('from "eidentic"');
   });
 
@@ -49,7 +49,7 @@ describe("create-eidentic scaffold", () => {
     const env = readFileSync(join(dir, ".env.example"), "utf8");
     expect(env).toContain("ANTHROPIC_API_KEY");
 
-    const agent = readFileSync(join(dir, "src/agent.ts"), "utf8");
+    const agent = readFileSync(join(dir, "agent/agent.ts"), "utf8");
     expect(agent).toContain('from "@ai-sdk/anthropic"');
     expect(agent).toContain("claude-sonnet-4-5");
   });
@@ -66,7 +66,7 @@ describe("create-eidentic scaffold", () => {
     const env = readFileSync(join(dir, ".env.example"), "utf8");
     expect(env).toContain("OPENAI_API_KEY");
 
-    const agent = readFileSync(join(dir, "src/agent.ts"), "utf8");
+    const agent = readFileSync(join(dir, "agent/agent.ts"), "utf8");
     expect(agent).toContain('from "@ai-sdk/openai"');
     expect(agent).toContain("gpt-4o");
   });
@@ -82,7 +82,7 @@ describe("create-eidentic scaffold", () => {
     const env = readFileSync(join(dir, ".env.example"), "utf8");
     expect(env).toContain("GOOGLE_GENERATIVE_AI_API_KEY");
 
-    const agent = readFileSync(join(dir, "src/agent.ts"), "utf8");
+    const agent = readFileSync(join(dir, "agent/agent.ts"), "utf8");
     expect(agent).toContain('from "@ai-sdk/google"');
     expect(agent).toContain("gemini-2.5-pro");
   });
@@ -188,7 +188,8 @@ describe("create-eidentic nextjs-chat template", () => {
     const dir = join(cleanup, "default-app");
     const files = scaffold(dir, {});
 
-    expect(files).toContain("src/agent.ts");
+    expect(files).toContain("agent/instructions.md");
+    expect(files).toContain("agent/agent.ts");
     expect(files).not.toContain("app/api/chat/route.ts");
   });
 
@@ -359,7 +360,7 @@ describe("create-eidentic bun-agent template", () => {
     const dir = join(cleanup, "default-app");
     const files = scaffold(dir, {});
 
-    expect(files).toContain("src/agent.ts");
+    expect(files).toContain("agent/agent.ts");
     expect(files).not.toContain("src/server.ts");
     expect(files).not.toContain("bunfig.toml");
   });

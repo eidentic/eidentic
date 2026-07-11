@@ -199,7 +199,8 @@ Or scaffold a project and boot it in dev:
 
 ```bash
 npm create eidentic@latest my-agent
-cd my-agent && eidentic dev   # loads eidentic.config.ts and serves it
+cd my-agent && npm install
+npm run dev   # loads agent/instructions.md + agent/agent.ts, then opens local chat
 ```
 
 ## What's in the box

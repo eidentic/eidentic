@@ -8,14 +8,15 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  realpathSync,
   readdirSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { join, resolve, isAbsolute, dirname, extname } from "node:path";
+import { join, resolve, relative, sep, isAbsolute, dirname, extname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createJiti } from "jiti";
-import type { Agent } from "@eidentic/core";
+import { Agent, type AgentConfig, type Tool } from "@eidentic/core";
 import type { AuthPort } from "@eidentic/server";
 import { createServer } from "@eidentic/server";
 import type { Hono } from "hono";
@@ -37,6 +38,8 @@ export interface EidenticConfig {
   basePath?: string;
   exposeEvents?: boolean;
   skillBanks?: Record<string, SkillBankLike>;
+  /** Optional lifecycle hook used by development reload/shutdown. */
+  close?: () => void | Promise<void>;
 }
 
 export interface DoctorCheck {
@@ -181,10 +184,42 @@ await store.close();
 `;
 }
 
+function directoryAgentTs(p: ProviderMeta, modelId: string): string {
+  return `import { AIModel, SqliteStore, defaultPrices } from "eidentic";
+${p.importLine}
+
+const store = new SqliteStore("./eidentic.sqlite");
+await store.migrate();
+
+export default {
+  id: "assistant",
+  model: new AIModel(${p.providerFn}("${modelId}")), // reads ${p.envVar} from env/.env
+  store,
+  prices: defaultPrices,
+};
+`;
+}
+
+function directoryToolTs(): string {
+  return `import { createTool } from "eidentic";
+import { z } from "zod";
+
+export default createTool({
+  id: "get_time",
+  description: "Get the current server time as an ISO string.",
+  inputSchema: z.object({}),
+  sideEffect: "read-only",
+  execute: async () => ({ now: new Date().toISOString() }),
+});
+`;
+}
+
 export interface InitOptions {
   provider?: Provider;
   model?: string;
   apiKey?: string;
+  /** Programmatic callers keep the legacy format by default; the CLI opts into directory mode. */
+  format?: "config" | "directory";
 }
 
 /**
@@ -204,6 +239,7 @@ export function initProject(
   const provider = opts.provider ?? "anthropic";
   const p = INIT_PROVIDERS[provider];
   const modelId = opts.model ?? p.modelId;
+  const format = opts.format ?? "config";
 
   const created: string[] = [];
   const skipped: string[] = [];
@@ -220,11 +256,15 @@ export function initProject(
     }
   }
 
-  // 1. eidentic.config.ts
-  writeIfAbsent("eidentic.config.ts", eidenticConfigTs(p, modelId));
-
-  // 2. src/agent.ts
-  writeIfAbsent("src/agent.ts", srcAgentTs(p, modelId));
+  if (format === "directory") {
+    writeIfAbsent("agent/instructions.md", "You are a helpful assistant. Use tools when relevant, then answer concisely.\n");
+    writeIfAbsent("agent/agent.ts", directoryAgentTs(p, modelId));
+    writeIfAbsent("agent/tools/get-time.ts", directoryToolTs());
+  } else {
+    // Legacy programmatic format remains supported for existing callers.
+    writeIfAbsent("eidentic.config.ts", eidenticConfigTs(p, modelId));
+    writeIfAbsent("src/agent.ts", srcAgentTs(p, modelId));
+  }
 
   // 3. .env.example — always with an empty value (never write the real key here)
   writeIfAbsent(".env.example", `# Get a key at https://console.anthropic.com (or your provider's dashboard)\n${p.envVar}=\n`);
@@ -318,15 +358,18 @@ export function doctor(
       : `None of ${PROVIDER_KEYS.join(", ")} found in environment`,
   });
 
-  // 3. eidentic.config.{ts,js,mjs} exists in cwd
-  const configPath = resolveConfigPath(cwd);
-  const configOk = configPath !== null;
+  // 3. A supported Eidentic project exists in cwd.
+  let project: EidenticProject | null = null;
+  try { project = resolveProject(cwd); } catch { /* invalid/missing project is reported below */ }
+  const projectOk = project !== null;
   checks.push({
-    name: "eidentic.config file",
-    ok: configOk,
-    detail: configOk
-      ? `Found ${configPath}`
-      : `No eidentic.config.{ts,js,mjs} in ${cwd}`,
+    name: "Eidentic project",
+    ok: projectOk,
+    detail: project?.kind === "config"
+      ? `Found ${project.configPath}`
+      : project?.kind === "directory"
+        ? `Found ${relative(project.root, project.instructionsPath)}`
+        : `No eidentic.config.* or agent/instructions.md in ${cwd}`,
   });
 
   // 4. .env file present in cwd (informational — always ok:true)
@@ -346,6 +389,171 @@ export function doctor(
 // ---------------------------------------------------------------------------
 
 const CONFIG_NAMES = ["eidentic.config.ts", "eidentic.config.js", "eidentic.config.mjs"] as const;
+
+export type EidenticProject =
+  | { kind: "config"; root: string; configPath: string }
+  | {
+      kind: "directory";
+      root: string;
+      agentRoot: string;
+      instructionsPath: string;
+      agentModulePath?: string;
+      toolModulePaths?: string[];
+    };
+
+export type DirectoryAgentDefinition = Omit<AgentConfig, "id" | "instructions"> & {
+  id?: string;
+};
+
+export interface LoadProjectOptions {
+  importDirectoryModule?: (modulePath?: string) => Promise<unknown>;
+  importToolModule?: (modulePath: string) => Promise<unknown>;
+}
+
+const MAX_INSTRUCTIONS_BYTES = 256 * 1024;
+const MAX_DISCOVERED_TOOLS = 64;
+const TOOL_MODULE_EXTENSIONS = new Set([".ts", ".js", ".mjs"]);
+
+function assertProjectPath(root: string, candidate: string, label: string): string {
+  const resolved = realpathSync(candidate);
+  const rel = relative(root, resolved);
+  if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    throw new Error(`${label} resolves outside the project root: ${candidate}`);
+  }
+  return resolved;
+}
+
+function directoryProject(root: string, agentRoot: string): EidenticProject | null {
+  const instructionsCandidate = join(agentRoot, "instructions.md");
+  if (!existsSync(instructionsCandidate)) return null;
+  const safeAgentRoot = assertProjectPath(root, agentRoot, "agent directory");
+  const instructionsPath = assertProjectPath(root, instructionsCandidate, "instructions.md");
+  const moduleCandidate = join(safeAgentRoot, "agent.ts");
+  const agentModulePath = existsSync(moduleCandidate)
+    ? assertProjectPath(root, moduleCandidate, "agent.ts")
+    : undefined;
+  const toolsRoot = join(safeAgentRoot, "tools");
+  const safeToolsRoot = existsSync(toolsRoot)
+    ? assertProjectPath(root, toolsRoot, "tools directory")
+    : undefined;
+  const toolModulePaths = safeToolsRoot
+    ? readdirSync(safeToolsRoot, { withFileTypes: true })
+      .filter((entry) => (entry.isFile() || entry.isSymbolicLink()) && TOOL_MODULE_EXTENSIONS.has(extname(entry.name)))
+      .map((entry) => assertProjectPath(root, join(safeToolsRoot, entry.name), `tool module ${entry.name}`))
+      .sort((a, b) => basename(a).localeCompare(basename(b), "en"))
+    : [];
+  if (toolModulePaths.length > MAX_DISCOVERED_TOOLS) {
+    throw new Error(`agent/tools contains too many modules (maximum ${MAX_DISCOVERED_TOOLS})`);
+  }
+  return {
+    kind: "directory",
+    root,
+    agentRoot: safeAgentRoot,
+    instructionsPath,
+    ...(agentModulePath !== undefined ? { agentModulePath } : {}),
+    ...(toolModulePaths.length > 0 ? { toolModulePaths } : {}),
+  };
+}
+
+/** Resolve either the legacy config project or the additive `agent/` directory convention. */
+export function resolveProject(cwd: string, explicit?: string): EidenticProject | null {
+  const root = realpathSync(cwd);
+  if (explicit !== undefined) {
+    const requested = isAbsolute(explicit) ? explicit : resolve(root, explicit);
+    if (!existsSync(requested)) return null;
+    const safeRequested = assertProjectPath(root, requested, "explicit project path");
+    if (statSync(safeRequested).isDirectory()) return directoryProject(root, safeRequested);
+    return { kind: "config", root, configPath: safeRequested };
+  }
+
+  const configPath = resolveConfigPath(root);
+  if (configPath !== null) return { kind: "config", root, configPath };
+  return directoryProject(root, join(root, "agent"));
+}
+
+function validateDirectoryDefinition(raw: unknown, modulePath?: string): DirectoryAgentDefinition {
+  if (!raw || typeof raw !== "object") {
+    throw new Error(`${modulePath ?? "directory runtime"} must export an agent runtime object`);
+  }
+  const definition = raw as Record<string, unknown>;
+  if (Object.prototype.hasOwnProperty.call(definition, "instructions")) {
+    throw new Error("Directory agent instructions must come from instructions.md, not agent.ts");
+  }
+  if (!definition["model"] || typeof definition["model"] !== "object") {
+    throw new Error(`${modulePath ?? "directory runtime"} must provide a model`);
+  }
+  if (!definition["store"] || typeof definition["store"] !== "object") {
+    throw new Error(`${modulePath ?? "directory runtime"} must provide a store`);
+  }
+  if (definition["id"] !== undefined && (typeof definition["id"] !== "string" || definition["id"].trim() === "")) {
+    throw new Error(`${modulePath ?? "directory runtime"} id must be a non-empty string`);
+  }
+  return definition as unknown as DirectoryAgentDefinition;
+}
+
+function validateToolModule(raw: unknown, modulePath: string): Tool {
+  if (!raw || typeof raw !== "object") throw new Error(`${modulePath} must default-export a tool object`);
+  const tool = raw as Record<string, unknown>;
+  if (typeof tool["id"] !== "string" || tool["id"].trim() === "") {
+    throw new Error(`${modulePath} tool id must be a non-empty string`);
+  }
+  if (typeof tool["execute"] !== "function" || !tool["jsonSchema"] || typeof tool["jsonSchema"] !== "object") {
+    throw new Error(`${modulePath} must default-export a valid Eidentic tool`);
+  }
+  return raw as Tool;
+}
+
+/** Compile either project format to the existing server/Studio configuration contract. */
+export async function loadProject(
+  project: EidenticProject,
+  opts: LoadProjectOptions = {},
+): Promise<EidenticConfig> {
+  if (project.kind === "config") return loadConfig(project.configPath);
+
+  const instructionStat = statSync(project.instructionsPath);
+  if (!instructionStat.isFile()) throw new Error("Directory agent instructions.md must be a regular file");
+  if (instructionStat.size > MAX_INSTRUCTIONS_BYTES) {
+    throw new Error(`Directory agent instructions.md is too large (maximum ${MAX_INSTRUCTIONS_BYTES} bytes)`);
+  }
+  const instructions = readFileSync(project.instructionsPath, "utf8").trim();
+  if (instructions === "") throw new Error("Directory agent instructions.md is empty");
+
+  let rawDefinition: unknown;
+  if (opts.importDirectoryModule) {
+    rawDefinition = await opts.importDirectoryModule(project.agentModulePath);
+  } else {
+    if (!project.agentModulePath) {
+      throw new Error("Directory agent requires agent.ts with model and store runtime configuration");
+    }
+    const jiti = createJiti(import.meta.url, { moduleCache: false });
+    rawDefinition = await jiti.import<unknown>(project.agentModulePath, { default: true });
+  }
+  const definition = validateDirectoryDefinition(rawDefinition, project.agentModulePath);
+  try {
+    const id = definition.id?.trim() || basename(project.agentRoot);
+    const discoveredTools: Tool[] = [];
+    if (project.toolModulePaths?.length) {
+      const jiti = opts.importToolModule ? undefined : createJiti(import.meta.url, { moduleCache: false });
+      for (const modulePath of project.toolModulePaths) {
+        const rawTool = opts.importToolModule
+          ? await opts.importToolModule(modulePath)
+          : await jiti!.import<unknown>(modulePath, { default: true });
+        discoveredTools.push(validateToolModule(rawTool, modulePath));
+      }
+    }
+    const tools = [...(definition.tools ?? []), ...discoveredTools];
+    const seenToolIds = new Set<string>();
+    for (const tool of tools) {
+      if (seenToolIds.has(tool.id)) throw new Error(`Duplicate tool id in directory project: ${tool.id}`);
+      seenToolIds.add(tool.id);
+    }
+    const agent = new Agent({ ...definition, id, instructions, ...(tools.length > 0 ? { tools } : {}) });
+    return { agents: { [id]: agent }, close: () => definition.store.close() };
+  } catch (error) {
+    await definition.store.close();
+    throw error;
+  }
+}
 
 /**
  * Find the eidentic config file.
