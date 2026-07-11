@@ -433,10 +433,13 @@ function directoryProject(root: string, agentRoot: string): EidenticProject | nu
     ? assertProjectPath(root, moduleCandidate, "agent.ts")
     : undefined;
   const toolsRoot = join(safeAgentRoot, "tools");
-  const toolModulePaths = existsSync(toolsRoot)
-    ? readdirSync(toolsRoot, { withFileTypes: true })
+  const safeToolsRoot = existsSync(toolsRoot)
+    ? assertProjectPath(root, toolsRoot, "tools directory")
+    : undefined;
+  const toolModulePaths = safeToolsRoot
+    ? readdirSync(safeToolsRoot, { withFileTypes: true })
       .filter((entry) => (entry.isFile() || entry.isSymbolicLink()) && TOOL_MODULE_EXTENSIONS.has(extname(entry.name)))
-      .map((entry) => assertProjectPath(root, join(toolsRoot, entry.name), `tool module ${entry.name}`))
+      .map((entry) => assertProjectPath(root, join(safeToolsRoot, entry.name), `tool module ${entry.name}`))
       .sort((a, b) => basename(a).localeCompare(basename(b), "en"))
     : [];
   if (toolModulePaths.length > MAX_DISCOVERED_TOOLS) {
@@ -526,25 +529,30 @@ export async function loadProject(
     rawDefinition = await jiti.import<unknown>(project.agentModulePath, { default: true });
   }
   const definition = validateDirectoryDefinition(rawDefinition, project.agentModulePath);
-  const id = definition.id?.trim() || basename(project.agentRoot);
-  const discoveredTools: Tool[] = [];
-  if (project.toolModulePaths?.length) {
-    const jiti = opts.importToolModule ? undefined : createJiti(import.meta.url, { moduleCache: false });
-    for (const modulePath of project.toolModulePaths) {
-      const rawTool = opts.importToolModule
-        ? await opts.importToolModule(modulePath)
-        : await jiti!.import<unknown>(modulePath, { default: true });
-      discoveredTools.push(validateToolModule(rawTool, modulePath));
+  try {
+    const id = definition.id?.trim() || basename(project.agentRoot);
+    const discoveredTools: Tool[] = [];
+    if (project.toolModulePaths?.length) {
+      const jiti = opts.importToolModule ? undefined : createJiti(import.meta.url, { moduleCache: false });
+      for (const modulePath of project.toolModulePaths) {
+        const rawTool = opts.importToolModule
+          ? await opts.importToolModule(modulePath)
+          : await jiti!.import<unknown>(modulePath, { default: true });
+        discoveredTools.push(validateToolModule(rawTool, modulePath));
+      }
     }
+    const tools = [...(definition.tools ?? []), ...discoveredTools];
+    const seenToolIds = new Set<string>();
+    for (const tool of tools) {
+      if (seenToolIds.has(tool.id)) throw new Error(`Duplicate tool id in directory project: ${tool.id}`);
+      seenToolIds.add(tool.id);
+    }
+    const agent = new Agent({ ...definition, id, instructions, ...(tools.length > 0 ? { tools } : {}) });
+    return { agents: { [id]: agent }, close: () => definition.store.close() };
+  } catch (error) {
+    await definition.store.close();
+    throw error;
   }
-  const tools = [...(definition.tools ?? []), ...discoveredTools];
-  const seenToolIds = new Set<string>();
-  for (const tool of tools) {
-    if (seenToolIds.has(tool.id)) throw new Error(`Duplicate tool id in directory project: ${tool.id}`);
-    seenToolIds.add(tool.id);
-  }
-  const agent = new Agent({ ...definition, id, instructions, ...(tools.length > 0 ? { tools } : {}) });
-  return { agents: { [id]: agent }, close: () => definition.store.close() };
 }
 
 /**

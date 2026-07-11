@@ -3,8 +3,8 @@
 ## Objective
 
 Make the first Eidentic agent runnable in under ten minutes from a readable directory while
-preserving the existing programmatic `eidentic.config.*` API. A project may start with
-`agent/instructions.md`; optional TypeScript files add model/runtime configuration, tools, skills,
+preserving the existing programmatic `eidentic.config.*` API. A project starts with
+`agent/instructions.md` and a small `agent.ts` runtime bridge; optional TypeScript files add tools, skills,
 and subagents. The same project remains portable across supported deployment targets.
 
 ## User and success measures
@@ -24,19 +24,19 @@ cloud dependency. Success means:
 ```text
 agent/
   instructions.md        # required when using directory mode
-  agent.ts                # optional runtime overrides
+  agent.ts                # required model and store runtime bridge in this release
   tools/                  # optional TypeScript tool modules
   skills/                 # optional SKILL.md-compatible prompt skills
   subagents/              # optional nested agent directories
 ```
 
-The first release discovers instructions, optional agent configuration, and tool modules. Skills
+The first release discovers instructions, required runtime configuration, and optional tool modules. Skills
 and subagent directories are part of the stable layout but become executable only when their
 dedicated slices land; unknown files are ignored. A root `eidentic.config.*` remains authoritative
 when present. Directory mode is selected only when no legacy config exists or when explicitly
 requested.
 
-## Public interfaces
+## CLI-internal interfaces
 
 - `resolveProject(cwd, explicit?)` returns a discriminated `config` or `directory` project.
 - `loadProject(project)` returns the existing `EidenticConfig` shape consumed by server and Studio.
@@ -90,4 +90,3 @@ and terminal integrity.
 - Slack/Teams channels, approval inbox, schedules, or connection management.
 - A new durable engine, secret vault, tracing standard, or model gateway.
 - Removing or changing the semantics of `eidentic.config.*`.
-

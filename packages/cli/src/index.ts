@@ -104,7 +104,7 @@ const devCmd = defineCommand({
 
     let handle: ServeNodeHandle;
     try {
-      handle = await serveNode(app, { port: listenPort });
+      handle = await serveNode(app, { port: listenPort, hostname: "127.0.0.1" });
     } catch (err) {
       consola.error(`Failed to start server: ${(err as Error).message}`);
       process.exit(1);
@@ -170,9 +170,9 @@ const devCmd = defineCommand({
           const previousApp = buildServer(previousConfig);
           await handle.drain(5_000);
           try {
-            handle = await serveNode(nextApp, { port: listenPort });
+            handle = await serveNode(nextApp, { port: listenPort, hostname: "127.0.0.1" });
           } catch (error) {
-            handle = await serveNode(previousApp, { port: listenPort });
+            handle = await serveNode(previousApp, { port: listenPort, hostname: "127.0.0.1" });
             await nextConfig.close?.();
             throw error;
           }
@@ -299,8 +299,9 @@ const studioCmd = defineCommand({
 
     openBrowser(url);
 
-    process.on("SIGINT", () => {
+    process.on("SIGINT", async () => {
       handle.close();
+      await config.close?.();
       process.exit(0);
     });
   },

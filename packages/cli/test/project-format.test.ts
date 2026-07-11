@@ -91,6 +91,19 @@ describe("resolveProject", () => {
     }
   });
 
+  it("rejects an empty tools directory symlink that escapes the project root", () => {
+    mkdirSync(join(root, "agent"));
+    writeFileSync(join(root, "agent", "instructions.md"), "Safe instructions");
+    const outside = join(tmpdir(), `eidentic-outside-tools-${Date.now()}`);
+    mkdirSync(outside);
+    symlinkSync(outside, join(root, "agent", "tools"));
+    try {
+      expect(() => resolveProject(root)).toThrow(/tools directory.*outside|outside.*project root/i);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
   it("rejects an instructions symlink that escapes the project root", () => {
     const outside = join(tmpdir(), `eidentic-outside-${Date.now()}.md`);
     writeFileSync(outside, "outside");
@@ -152,6 +165,22 @@ describe("loadProject directory mode", () => {
     });
     await config.close?.();
 
+    expect(closed).toBe(true);
+  });
+
+  it("closes the store when a discovered tool fails validation", async () => {
+    mkdirSync(join(root, "agent", "tools"));
+    writeFileSync(join(root, "agent", "instructions.md"), "Close after failure.");
+    writeFileSync(join(root, "agent", "agent.ts"), "export default {};\n");
+    writeFileSync(join(root, "agent", "tools", "broken.ts"), "export default {};\n");
+    const store = new InMemoryStore();
+    let closed = false;
+    store.close = async () => { closed = true; };
+
+    await expect(loadProject(resolveProject(root)!, {
+      importDirectoryModule: async () => ({ model: new MockModel([response]), store }),
+      importToolModule: async () => ({}),
+    })).rejects.toThrow(/valid Eidentic tool|tool id/i);
     expect(closed).toBe(true);
   });
 

@@ -16,7 +16,7 @@ Follow the interactive prompts to choose:
 
 - **Provider:** anthropic | openai | google | deepseek | mistral
 - **Template:**
-  - `default` — bare Node.js agent script (no framework)
+  - `default` — directory-first local agent with instructions, runtime config, and an example tool
   - `nextjs-chat` — Next.js App Router chat UI with `@eidentic/nextjs` + `useChat`
   - `bun-agent` — Bun-native agent script with `@eidentic/sqlite`
 

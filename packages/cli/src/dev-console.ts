@@ -108,8 +108,20 @@ export async function consumeDevInput(
 
     options.onActivityChange?.(true);
     try {
+      let lastAssistantText = "";
       for await (const event of options.agents[activeAgentId]!.query(line, { sessionId })) {
-        for (const outputLine of formatDevEvent(event)) options.write(outputLine);
+        const outputLines = formatDevEvent(event);
+        if (event.type === "assistant") {
+          lastAssistantText = event.content
+            .filter(isText)
+            .map((block) => safeTerminalText(block.text))
+            .filter(Boolean)
+            .join(" ");
+        }
+        for (const outputLine of outputLines) {
+          if (event.type === "result" && outputLine === lastAssistantText) continue;
+          options.write(outputLine);
+        }
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";

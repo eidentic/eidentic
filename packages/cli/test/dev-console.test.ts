@@ -62,7 +62,10 @@ describe("watchAgentDirectory", () => {
     try {
       appendFileSync(file, "two");
       appendFileSync(file, "three");
-      await new Promise((resolve) => setTimeout(resolve, 120));
+      const deadline = Date.now() + 1_000;
+      while (reloads === 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
       expect(reloads).toBe(1);
     } finally {
       watcher.close();
@@ -104,5 +107,20 @@ describe("consumeDevInput", () => {
       createSessionId: () => "s1",
     });
     expect(lines).toEqual(["Unknown command. Type /help.", "Unknown agent: missing"]);
+  });
+
+  it("does not print the same final answer twice", async () => {
+    const lines: string[] = [];
+    await consumeDevInput(["hello", "/exit"], {
+      agents: { alpha: {
+        async *query(_prompt: string, options: { sessionId: string }): AsyncIterable<StreamEvent> {
+          yield { type: "assistant", content: [textBlock("same answer")], usage: { inputTokens: 1, outputTokens: 1 } };
+          yield { type: "result", subtype: "success", output: "same answer", usage: { inputTokens: 1, outputTokens: 1 }, numTurns: 1, sessionId: options.sessionId };
+        },
+      } },
+      write: (line) => lines.push(line),
+      createSessionId: () => "s1",
+    });
+    expect(lines.filter((line) => line === "same answer")).toHaveLength(1);
   });
 });
