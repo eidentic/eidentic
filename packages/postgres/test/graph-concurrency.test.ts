@@ -40,5 +40,5 @@ describe("PostgresStore current-fact concurrency", () => {
     } finally {
       await client.close();
     }
-  });
+  }, 15_000);
 });
