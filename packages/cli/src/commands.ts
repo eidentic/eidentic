@@ -16,7 +16,7 @@ import {
 import { join, resolve, relative, sep, isAbsolute, dirname, extname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createJiti } from "jiti";
-import { Agent, type AgentConfig } from "@eidentic/core";
+import { Agent, type AgentConfig, type Tool } from "@eidentic/core";
 import type { AuthPort } from "@eidentic/server";
 import { createServer } from "@eidentic/server";
 import type { Hono } from "hono";
@@ -359,6 +359,7 @@ export type EidenticProject =
       agentRoot: string;
       instructionsPath: string;
       agentModulePath?: string;
+      toolModulePaths?: string[];
     };
 
 export type DirectoryAgentDefinition = Omit<AgentConfig, "id" | "instructions"> & {
@@ -367,9 +368,12 @@ export type DirectoryAgentDefinition = Omit<AgentConfig, "id" | "instructions"> 
 
 export interface LoadProjectOptions {
   importDirectoryModule?: (modulePath?: string) => Promise<unknown>;
+  importToolModule?: (modulePath: string) => Promise<unknown>;
 }
 
 const MAX_INSTRUCTIONS_BYTES = 256 * 1024;
+const MAX_DISCOVERED_TOOLS = 64;
+const TOOL_MODULE_EXTENSIONS = new Set([".ts", ".js", ".mjs"]);
 
 function assertProjectPath(root: string, candidate: string, label: string): string {
   const resolved = realpathSync(candidate);
@@ -389,12 +393,23 @@ function directoryProject(root: string, agentRoot: string): EidenticProject | nu
   const agentModulePath = existsSync(moduleCandidate)
     ? assertProjectPath(root, moduleCandidate, "agent.ts")
     : undefined;
+  const toolsRoot = join(safeAgentRoot, "tools");
+  const toolModulePaths = existsSync(toolsRoot)
+    ? readdirSync(toolsRoot, { withFileTypes: true })
+      .filter((entry) => (entry.isFile() || entry.isSymbolicLink()) && TOOL_MODULE_EXTENSIONS.has(extname(entry.name)))
+      .map((entry) => assertProjectPath(root, join(toolsRoot, entry.name), `tool module ${entry.name}`))
+      .sort((a, b) => basename(a).localeCompare(basename(b), "en"))
+    : [];
+  if (toolModulePaths.length > MAX_DISCOVERED_TOOLS) {
+    throw new Error(`agent/tools contains too many modules (maximum ${MAX_DISCOVERED_TOOLS})`);
+  }
   return {
     kind: "directory",
     root,
     agentRoot: safeAgentRoot,
     instructionsPath,
     ...(agentModulePath !== undefined ? { agentModulePath } : {}),
+    ...(toolModulePaths.length > 0 ? { toolModulePaths } : {}),
   };
 }
 
@@ -434,6 +449,18 @@ function validateDirectoryDefinition(raw: unknown, modulePath?: string): Directo
   return definition as unknown as DirectoryAgentDefinition;
 }
 
+function validateToolModule(raw: unknown, modulePath: string): Tool {
+  if (!raw || typeof raw !== "object") throw new Error(`${modulePath} must default-export a tool object`);
+  const tool = raw as Record<string, unknown>;
+  if (typeof tool["id"] !== "string" || tool["id"].trim() === "") {
+    throw new Error(`${modulePath} tool id must be a non-empty string`);
+  }
+  if (typeof tool["execute"] !== "function" || !tool["jsonSchema"] || typeof tool["jsonSchema"] !== "object") {
+    throw new Error(`${modulePath} must default-export a valid Eidentic tool`);
+  }
+  return raw as Tool;
+}
+
 /** Compile either project format to the existing server/Studio configuration contract. */
 export async function loadProject(
   project: EidenticProject,
@@ -461,7 +488,23 @@ export async function loadProject(
   }
   const definition = validateDirectoryDefinition(rawDefinition, project.agentModulePath);
   const id = definition.id?.trim() || basename(project.agentRoot);
-  const agent = new Agent({ ...definition, id, instructions });
+  const discoveredTools: Tool[] = [];
+  if (project.toolModulePaths?.length) {
+    const jiti = opts.importToolModule ? undefined : createJiti(import.meta.url);
+    for (const modulePath of project.toolModulePaths) {
+      const rawTool = opts.importToolModule
+        ? await opts.importToolModule(modulePath)
+        : await jiti!.import<unknown>(modulePath, { default: true });
+      discoveredTools.push(validateToolModule(rawTool, modulePath));
+    }
+  }
+  const tools = [...(definition.tools ?? []), ...discoveredTools];
+  const seenToolIds = new Set<string>();
+  for (const tool of tools) {
+    if (seenToolIds.has(tool.id)) throw new Error(`Duplicate tool id in directory project: ${tool.id}`);
+    seenToolIds.add(tool.id);
+  }
+  const agent = new Agent({ ...definition, id, instructions, ...(tools.length > 0 ? { tools } : {}) });
   return { agents: { [id]: agent } };
 }
 

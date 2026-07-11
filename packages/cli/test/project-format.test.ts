@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadProject, resolveProject } from "../src/commands.js";
 import { InMemoryStore, MockModel } from "@eidentic/types/testing";
-import type { ModelResponse } from "@eidentic/types";
+import { textBlock, toolUseBlock, type ModelResponse } from "@eidentic/types";
+import { createTool } from "@eidentic/core";
+import { z } from "zod";
 
 describe("resolveProject", () => {
   let root: string;
@@ -58,6 +60,35 @@ describe("resolveProject", () => {
 
   it("returns null when neither supported project format exists", () => {
     expect(resolveProject(root)).toBeNull();
+  });
+
+  it("discovers supported tool modules in deterministic filename order", () => {
+    mkdirSync(join(root, "agent", "tools"), { recursive: true });
+    writeFileSync(join(root, "agent", "instructions.md"), "Tools");
+    writeFileSync(join(root, "agent", "tools", "zeta.ts"), "export default {};\n");
+    writeFileSync(join(root, "agent", "tools", "alpha.mjs"), "export default {};\n");
+    writeFileSync(join(root, "agent", "tools", "notes.md"), "ignored");
+
+    expect(resolveProject(root)).toMatchObject({
+      kind: "directory",
+      toolModulePaths: [
+        join(root, "agent", "tools", "alpha.mjs"),
+        join(root, "agent", "tools", "zeta.ts"),
+      ],
+    });
+  });
+
+  it("rejects a discovered tool symlink that escapes the project root", () => {
+    const outside = join(tmpdir(), `eidentic-outside-tool-${Date.now()}.ts`);
+    writeFileSync(outside, "export default {};\n");
+    mkdirSync(join(root, "agent", "tools"), { recursive: true });
+    writeFileSync(join(root, "agent", "instructions.md"), "Tools");
+    symlinkSync(outside, join(root, "agent", "tools", "escape.ts"));
+    try {
+      expect(() => resolveProject(root)).toThrow(/outside.*project root/i);
+    } finally {
+      rmSync(outside, { force: true });
+    }
   });
 
   it("rejects an instructions symlink that escapes the project root", () => {
@@ -145,5 +176,33 @@ describe("loadProject directory mode", () => {
   it("explains how to configure runtime defaults when agent.ts is absent", async () => {
     writeFileSync(join(root, "agent", "instructions.md"), "Canonical instructions");
     await expect(loadProject(resolveProject(root)!)).rejects.toThrow(/agent\.ts|model.*store/i);
+  });
+
+  it("loads discovered tools and makes them callable by the agent", async () => {
+    mkdirSync(join(root, "agent", "tools"));
+    writeFileSync(join(root, "agent", "instructions.md"), "Use the clock tool.");
+    writeFileSync(join(root, "agent", "agent.ts"), "export default {};\n");
+    writeFileSync(join(root, "agent", "tools", "clock.ts"), "export default {};\n");
+    const clock = createTool({
+      id: "clock",
+      description: "Read the clock",
+      inputSchema: z.object({}),
+      sideEffect: "read-only",
+      execute: async () => ({ now: "2026-07-12T00:00:00.000Z" }),
+    });
+    const model = new MockModel([
+      { content: [toolUseBlock("call-1", "clock", {})], usage: { inputTokens: 1, outputTokens: 1 } },
+      { content: [textBlock("done")], usage: { inputTokens: 1, outputTokens: 1 } },
+    ]);
+    const importedTools: string[] = [];
+    const config = await loadProject(resolveProject(root)!, {
+      importDirectoryModule: async () => ({ model, store: new InMemoryStore() }),
+      importToolModule: async (path) => { importedTools.push(path); return clock; },
+    });
+    const events = [];
+    for await (const event of config.agents.agent!.query("time?", { sessionId: "tools" })) events.push(event);
+    expect(importedTools).toEqual([join(root, "agent", "tools", "clock.ts")]);
+    expect(events.some((event) => event.type === "tool.result")).toBe(true);
+    expect(events.at(-1)).toMatchObject({ type: "result", output: "done" });
   });
 });
