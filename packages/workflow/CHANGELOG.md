@@ -1,5 +1,24 @@
 # @eidentic/workflow
 
+## 0.2.3
+
+### Patch Changes
+
+- d63af81: Fail fast on invalid workflow numeric options, clean up retry cancellation listeners after normal
+  completion, and harden the file run store with owner-only permissions, random fsynced atomic
+  writes, cross-process locking, and symlink-safe path validation.
+- d63af81: Harden tenant and principal isolation, persistence and replay behavior, guarded external egress,
+  file and skill boundaries, and model/cost accounting across the SDK. Correct dual-package export
+  metadata so TypeScript selects matching ESM/CJS declarations, and add packed-consumer release
+  checks for runtime loading and Node16/NodeNext resolution. Bound archival deduplication work with
+  an explicit comparison budget and observable truncation instead of allowing 10k-entry scopes to
+  perform roughly 50 million pair checks.
+- Updated dependencies [d63af81]
+- Updated dependencies [d63af81]
+- Updated dependencies [d63af81]
+  - @eidentic/core@1.0.0
+  - @eidentic/types@1.0.0
+
 ## 0.2.2
 
 ### Patch Changes

@@ -1,5 +1,19 @@
 # @eidentic/pinecone
 
+## 0.2.5
+
+### Patch Changes
+
+- d63af81: Harden tenant and principal isolation, persistence and replay behavior, guarded external egress,
+  file and skill boundaries, and model/cost accounting across the SDK. Correct dual-package export
+  metadata so TypeScript selects matching ESM/CJS declarations, and add packed-consumer release
+  checks for runtime loading and Node16/NodeNext resolution. Bound archival deduplication work with
+  an explicit comparison budget and observable truncation instead of allowing 10k-entry scopes to
+  perform roughly 50 million pair checks.
+- Updated dependencies [d63af81]
+- Updated dependencies [d63af81]
+  - @eidentic/types@1.0.0
+
 ## 0.2.4
 
 ### Patch Changes

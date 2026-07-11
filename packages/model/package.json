@@ -1,6 +1,6 @@
 {
   "name": "@eidentic/model",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "type": "module",
   "license": "Apache-2.0",
   "publishConfig": {

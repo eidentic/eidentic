@@ -1,6 +1,6 @@
 {
   "name": "create-eidentic",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "license": "Apache-2.0",
   "description": "Scaffold a new Eidentic agent project — `npm create eidentic@latest` for default, Next.js chat, or Bun agent templates.",

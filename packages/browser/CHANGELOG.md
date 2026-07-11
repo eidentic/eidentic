@@ -1,5 +1,33 @@
 # @eidentic/browser
 
+## 0.2.0
+
+### Minor Changes
+
+- d63af81: Add `withBrowserTools`, the secure browser lifecycle API. It creates one fresh
+  context/page per verified tenant run, installs context-wide request interception
+  before page creation, requests blocked service workers, rejects context reuse,
+  and closes pages, popups, and context on every completion path.
+
+  The caller-owned `browserTools(page, options)` API is now deprecated and requires
+  the explicit `unsafeSharedPage: true` compatibility opt-in. Migrate by wrapping
+  each agent run in `withBrowserTools` and binding `tenantId`/`runId` from the
+  verified request principal and session.
+
+### Patch Changes
+
+- d63af81: Harden tenant and principal isolation, persistence and replay behavior, guarded external egress,
+  file and skill boundaries, and model/cost accounting across the SDK. Correct dual-package export
+  metadata so TypeScript selects matching ESM/CJS declarations, and add packed-consumer release
+  checks for runtime loading and Node16/NodeNext resolution. Bound archival deduplication work with
+  an explicit comparison budget and observable truncation instead of allowing 10k-entry scopes to
+  perform roughly 50 million pair checks.
+- Updated dependencies [d63af81]
+- Updated dependencies [d63af81]
+- Updated dependencies [d63af81]
+  - @eidentic/core@1.0.0
+  - @eidentic/tools@0.2.0
+
 ## 0.1.9
 
 ### Patch Changes

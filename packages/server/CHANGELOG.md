@@ -1,5 +1,41 @@
 # @eidentic/server
 
+## 1.0.0
+
+### Major Changes
+
+- d63af81: Harden identity, tenant ownership, erasure, durable idempotency, event replay, multimodal input,
+  credential storage, filesystem writes, outbound requests, runtime limits, graph concurrency, and
+  error/output boundaries. Scope and idempotency keys now use versioned injective tuple formats when
+  legacy delimiters are ambiguous. Store and durable adapters gain governance, credential-CAS, and
+  atomic intent-claim operations; custom adapters must implement the expanded port contracts.
+
+  Convex public handlers now deny when no authorization hook is configured. Explicitly named unsafe
+  compatibility options remain for controlled migration only. See
+  `docs/design/21-security-boundary-migrations.md` for migration rules and infrastructure limits.
+
+### Patch Changes
+
+- d63af81: Harden integration boundaries across A2A, MCP, Next.js, React, and Studio. The
+  changes add fail-closed identity and authorization handling, bounded and
+  cancellable A2A I/O, strict JSON request and stream validation, append-only
+  regeneration safety, separate Studio run/admin authentication, credential
+  redaction, and explicit Node listener hostname support while preserving drain
+  semantics.
+- d63af81: Harden tenant and principal isolation, persistence and replay behavior, guarded external egress,
+  file and skill boundaries, and model/cost accounting across the SDK. Correct dual-package export
+  metadata so TypeScript selects matching ESM/CJS declarations, and add packed-consumer release
+  checks for runtime loading and Node16/NodeNext resolution. Bound archival deduplication work with
+  an explicit comparison budget and observable truncation instead of allowing 10k-entry scopes to
+  perform roughly 50 million pair checks.
+- Updated dependencies [d63af81]
+- Updated dependencies [d63af81]
+- Updated dependencies [d63af81]
+- Updated dependencies [d63af81]
+  - @eidentic/core@1.0.0
+  - @eidentic/workflow@0.2.3
+  - @eidentic/types@1.0.0
+
 ## 0.4.1
 
 ### Patch Changes
