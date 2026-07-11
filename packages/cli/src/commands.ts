@@ -182,10 +182,42 @@ await store.close();
 `;
 }
 
+function directoryAgentTs(p: ProviderMeta, modelId: string): string {
+  return `import { AIModel, SqliteStore, defaultPrices } from "eidentic";
+${p.importLine}
+
+const store = new SqliteStore("./eidentic.sqlite");
+await store.migrate();
+
+export default {
+  id: "assistant",
+  model: new AIModel(${p.providerFn}("${modelId}")), // reads ${p.envVar} from env/.env
+  store,
+  prices: defaultPrices,
+};
+`;
+}
+
+function directoryToolTs(): string {
+  return `import { createTool } from "eidentic";
+import { z } from "zod";
+
+export default createTool({
+  id: "get_time",
+  description: "Get the current server time as an ISO string.",
+  inputSchema: z.object({}),
+  sideEffect: "read-only",
+  execute: async () => ({ now: new Date().toISOString() }),
+});
+`;
+}
+
 export interface InitOptions {
   provider?: Provider;
   model?: string;
   apiKey?: string;
+  /** Programmatic callers keep the legacy format by default; the CLI opts into directory mode. */
+  format?: "config" | "directory";
 }
 
 /**
@@ -205,6 +237,7 @@ export function initProject(
   const provider = opts.provider ?? "anthropic";
   const p = INIT_PROVIDERS[provider];
   const modelId = opts.model ?? p.modelId;
+  const format = opts.format ?? "config";
 
   const created: string[] = [];
   const skipped: string[] = [];
@@ -221,11 +254,15 @@ export function initProject(
     }
   }
 
-  // 1. eidentic.config.ts
-  writeIfAbsent("eidentic.config.ts", eidenticConfigTs(p, modelId));
-
-  // 2. src/agent.ts
-  writeIfAbsent("src/agent.ts", srcAgentTs(p, modelId));
+  if (format === "directory") {
+    writeIfAbsent("agent/instructions.md", "You are a helpful assistant. Use tools when relevant, then answer concisely.\n");
+    writeIfAbsent("agent/agent.ts", directoryAgentTs(p, modelId));
+    writeIfAbsent("agent/tools/get-time.ts", directoryToolTs());
+  } else {
+    // Legacy programmatic format remains supported for existing callers.
+    writeIfAbsent("eidentic.config.ts", eidenticConfigTs(p, modelId));
+    writeIfAbsent("src/agent.ts", srcAgentTs(p, modelId));
+  }
 
   // 3. .env.example — always with an empty value (never write the real key here)
   writeIfAbsent(".env.example", `# Get a key at https://console.anthropic.com (or your provider's dashboard)\n${p.envVar}=\n`);

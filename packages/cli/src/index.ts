@@ -287,7 +287,6 @@ function printNextSteps(provider: Provider, apiKeyProvided: boolean): void {
     step++;
   }
   consola.log(`  ${pc.cyan(`${step})`)} ${pc.cyan("npx eidentic dev")}  ${pc.dim("(or npx eidentic studio)")}`);
-  consola.log(`  ${pc.cyan(`${step + 1})`)} ${pc.cyan("npx tsx src/agent.ts")}  ${pc.dim("(run the agent script directly)")}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -298,7 +297,7 @@ const initCmd = defineCommand({
   meta: {
     name: "init",
     description:
-      "Scaffold Eidentic into the current directory. Creates eidentic.config.ts, src/agent.ts, .env, .env.example, .gitignore. Idempotent — never overwrites existing files.",
+      "Scaffold a readable agent directory into the current project. Idempotent — never overwrites existing files.",
   },
   args: {
     provider: {
@@ -443,7 +442,7 @@ const initCmd = defineCommand({
       consola.info(`Scaffolding Eidentic into ${pc.cyan(cwd)} (provider: ${pc.bold(provider)}, model: ${pc.bold(model)})`);
     }
 
-    const { created, skipped } = initProject(cwd, { provider, model, apiKey });
+    const { created, skipped } = initProject(cwd, { provider, model, apiKey, format: "directory" });
     printInitResult(created, skipped);
 
     // -------------------------------------------------------------------------
@@ -476,7 +475,6 @@ const initCmd = defineCommand({
         steps.push(`Install deps: ${detectPackageManager(cwd)} ${detectPackageManager(cwd) === "npm" ? "install" : "add"} eidentic ai @ai-sdk/${provider} zod`);
       }
       steps.push("Start dev server: npx eidentic dev");
-      steps.push("Or run the agent: npx tsx src/agent.ts");
       outro(
         [pc.bold("Done!"), "", ...steps.map((s, i) => `  ${pc.cyan(`${i + 1})`)} ${s}`)].join("\n"),
       );
