@@ -2,6 +2,7 @@ import { createClient } from "@libsql/client";
 import type { Client } from "@libsql/client";
 import {
   StoreConflictError,
+  legacyScopeKey,
   scopeKey,
   tokenize,
   type StorePort,
@@ -803,6 +804,23 @@ export class LibsqlStore implements StorePort, GraphPort, DurablePort {
     const results = await this.client.batch(stmts, "write");
     const deleted = results.reduce((sum, r) => sum + r.rowsAffected, 0);
     return { deleted };
+  }
+
+  /** Run while application writers are quiesced; the batch itself is atomic. */
+  async migrateLegacyScope(scope: Scope): Promise<{ migrated: number }> {
+    const from = legacyScopeKey(scope);
+    const to = scopeKey(scope);
+    if (from === to) return { migrated: 0 };
+    const tables = ["facts", "memories", "memory_meta", "block_history", "blocks", "idempotency_keys"] as const;
+    for (const table of tables) {
+      const target = await this.client.execute({ sql: `SELECT 1 FROM ${table} WHERE scope_key = ? LIMIT 1`, args: [to] });
+      if (target.rows.length > 0) throw new StoreConflictError(`legacy scope migration target is not empty: ${to}`);
+    }
+    const results = await this.client.batch(
+      tables.map((table) => ({ sql: `UPDATE ${table} SET scope_key = ? WHERE scope_key = ?`, args: [to, from] })),
+      "write",
+    );
+    return { migrated: results.reduce((sum, result) => sum + result.rowsAffected, 0) };
   }
 
   // ---------------------------------------------------------------------------

@@ -350,6 +350,23 @@ export interface StorePort {
   close(): Promise<void>;
 }
 
+/** Result of an explicit, operator-authorized legacy scope-key migration. */
+export interface LegacyScopeMigrationResult {
+  /** Rows whose scope key changed from `legacyScopeKey(scope)` to `scopeKey(scope)`. */
+  migrated: number;
+}
+
+/**
+ * Optional capability implemented by first-party persistent stores.
+ *
+ * This is deliberately not an automatic read fallback: delimiter-based legacy keys can be
+ * ambiguous. An operator must supply the authoritative logical scope. Implementations refuse to
+ * merge into an already-populated v2 target, so a mistaken mapping cannot silently combine tenants.
+ */
+export interface LegacyScopeMigratableStorePort {
+  migrateLegacyScope(scope: Scope): Promise<LegacyScopeMigrationResult>;
+}
+
 // --- Temporal knowledge graph (Tier-4) ---
 
 /** A timestamped, invalidatable edge. `object` is a plain string (entity name OR literal) in 7a. */

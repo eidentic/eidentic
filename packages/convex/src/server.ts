@@ -52,6 +52,7 @@ export const {
   expireFacts,
   sweepExpired,
   eraseScope,
+  migrateLegacyScope,
   writeCheckpoint,
   lastCheckpoint,
   recordIntent,

@@ -120,7 +120,8 @@ describe("eidenticFunctions authorize hook", () => {
     const names = Object.keys(fns);
     expect(names).toContain("getBlocks");
     expect(names).toContain("vectorUpsert");
-    expect(names.length).toBe(36);
+    expect(names).toContain("migrateLegacyScope");
+    expect(names.length).toBe(37);
   });
 
   it("denies a public invocation when no authorize hook is configured", async () => {
@@ -131,7 +132,7 @@ describe("eidenticFunctions authorize hook", () => {
 
   it("requires an explicit unsafe compatibility opt-in for unauthenticated handlers", () => {
     const fns = eidenticFunctions({ unsafeAllowUnauthenticated: true });
-    expect(Object.keys(fns)).toHaveLength(36);
+    expect(Object.keys(fns)).toHaveLength(37);
   });
 
   it("accepts an async authorize that resolves to allow", async () => {

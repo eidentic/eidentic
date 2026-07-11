@@ -14,6 +14,7 @@
  */
 import {
   StoreConflictError,
+  legacyScopeKey,
   scopeKey,
   type StorePort,
   type Scope,
@@ -89,6 +90,7 @@ export interface ConvexStoreFns {
   expireFacts: FnRef;
   sweepExpired: FnRef;
   eraseScope: FnRef;
+  migrateLegacyScope: FnRef;
   writeCheckpoint: FnRef;
   lastCheckpoint: FnRef;
   recordIntent: FnRef;
@@ -113,7 +115,7 @@ const STORE_FN_NAMES: (keyof ConvexStoreFns)[] = [
   "createSession", "getSession", "replaceSessionApiKey", "listSessions", "appendEvents", "readEvents",
   "getBlocks", "getBlock", "upsertBlock", "appendBlock", "getBlockHistory", "listBlocks",
   "indexMemory", "searchMemory", "listMemory", "deleteMemory", "assertFact", "queryFacts", "corroborate", "expireFacts",
-  "sweepExpired", "eraseScope",
+  "sweepExpired", "eraseScope", "migrateLegacyScope",
   "writeCheckpoint", "lastCheckpoint", "recordIntent", "claimIntent", "releaseIntent", "recordCompletion", "getIdempotency",
   "recordDecision", "getDecision",
 ];
@@ -455,6 +457,13 @@ export class ConvexStore implements StorePort, GraphPort, DurablePort {
       args["sessionId"] = scope.sessionId;
     }
     return (await this.runner.mutation(this.fns.eraseScope, args)) as { deleted: number };
+  }
+
+  async migrateLegacyScope(scope: Scope): Promise<{ migrated: number }> {
+    const fromScopeKey = legacyScopeKey(scope);
+    const toScopeKey = scopeKey(scope);
+    if (fromScopeKey === toScopeKey) return { migrated: 0 };
+    return (await this.runner.mutation(this.fns.migrateLegacyScope, { fromScopeKey, toScopeKey })) as { migrated: number };
   }
 
   // --- Graph (Facts) ---

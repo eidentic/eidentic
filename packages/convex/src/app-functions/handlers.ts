@@ -850,6 +850,34 @@ const eraseScope = defineMutation("eraseScope", {
   },
 });
 
+// Explicit operator migration only. Never called from normal reads: legacy delimiter keys can be
+// ambiguous, so the caller must provide the authoritative v2 destination.
+const migrateLegacyScope = defineMutation("migrateLegacyScope", {
+  args: { fromScopeKey: v.string(), toScopeKey: v.string() },
+  returns: v.object({ migrated: v.number() }),
+  handler: async (ctx: MCtx, { fromScopeKey, toScopeKey }) => {
+    if (fromScopeKey === toScopeKey) return { migrated: 0 };
+    const scopedTables = [
+      { table: tables.fact, index: "by_scope" },
+      { table: tables.memory, index: "by_scope" },
+      { table: tables.blockHistory, index: "by_scope_label_version" },
+      { table: tables.block, index: "by_scope_label" },
+      { table: tables.vector, index: "by_scope" },
+      { table: tables.idempotency, index: "by_scope" },
+    ];
+    for (const { table, index } of scopedTables) {
+      const target = await ctx.db.query(table).withIndex(index, (q: any) => q.eq("scopeKey", toScopeKey)).first();
+      if (target) throw new Error(`legacy scope migration target is not empty: ${toScopeKey}`);
+    }
+    let migrated = 0;
+    for (const { table, index } of scopedTables) {
+      const rows = await ctx.db.query(table).withIndex(index, (q: any) => q.eq("scopeKey", fromScopeKey)).collect();
+      for (const row of rows) { await ctx.db.patch(row._id, { scopeKey: toScopeKey }); migrated += 1; }
+    }
+    return { migrated };
+  },
+});
+
 // ---------------------------------------------------------------------------
 // Vectors (VectorPort) — manual cosine scoring in the handler
 // ---------------------------------------------------------------------------
@@ -1193,6 +1221,7 @@ const getDecision = defineQuery("getDecision", {
       expireFacts,
       sweepExpired,
       eraseScope,
+      migrateLegacyScope,
       vectorUpsert,
       vectorSearch,
       vectorDelete,

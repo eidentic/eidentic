@@ -1,4 +1,4 @@
-export { Memory, TRANSIENT_MARKERS, ConsentRejectedError } from "./memory.js";
+export { Memory, TRANSIENT_MARKERS, ConsentRejectedError, migrateLegacyScopeVectors } from "./memory.js";
 export type { MemoryOptions, BlockHealth, DedupeOptions, DedupeResult, RecencyOptions } from "./memory.js";
 export { reciprocalRankFusion } from "./rrf.js";
 export { BlockEditor } from "./blocks.js";

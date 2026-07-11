@@ -25,7 +25,7 @@ import type {
   SuspendDecision,
 } from "./ports.js";
 import type { SecretsPort, SandboxPort, SandboxResult, SandboxRunOptions } from "./security.js";
-import { scopeKey } from "./ports.js";
+import { legacyScopeKey, scopeKey } from "./ports.js";
 import { tokenize } from "./text.js";
 import type { StoredEvent } from "./protocol.js";
 import { StoreConflictError } from "./errors.js";
@@ -343,6 +343,32 @@ export class InMemoryStore implements StorePort, GraphPort, DurablePort {
     return [...this.blocks.entries()]
       .filter(([k]) => k.startsWith(prefix))
       .map(([, v]) => v);
+  }
+
+  async migrateLegacyScope(scope: Scope): Promise<{ migrated: number }> {
+    const from = legacyScopeKey(scope);
+    const to = scopeKey(scope);
+    if (from === to) return { migrated: 0 };
+
+    const targetPopulated = [...this.blocks.keys()].some((key) => key.startsWith(`${to}#`))
+      || this.history.some((row) => row.scopeKey === to)
+      || this.memEntries.some((row) => row.scopeKey === to)
+      || this.facts.some((row) => row.scopeKey === to)
+      || [...this.idempotency.values()].some((row) => row.scopeKey === to);
+    if (targetPopulated) throw new StoreConflictError(`legacy scope migration target is not empty: ${to}`);
+
+    let migrated = 0;
+    for (const [key, value] of [...this.blocks]) {
+      if (!key.startsWith(`${from}#`)) continue;
+      this.blocks.delete(key);
+      this.blocks.set(`${to}${key.slice(from.length)}`, value);
+      migrated += 1;
+    }
+    for (const row of this.history) if (row.scopeKey === from) { row.scopeKey = to; migrated += 1; }
+    for (const row of this.memEntries) if (row.scopeKey === from) { row.scopeKey = to; migrated += 1; }
+    for (const row of this.facts) if (row.scopeKey === from) { row.scopeKey = to; migrated += 1; }
+    for (const row of this.idempotency.values()) if (row.scopeKey === from) { row.scopeKey = to; migrated += 1; }
+    return { migrated };
   }
 
   async eraseScope(scope: Scope): Promise<{ deleted: number }> {

@@ -6,6 +6,7 @@ export {
   createSession,
   eidenticFunctions,
   eraseScope,
+  migrateLegacyScope,
   expireFacts,
   getBlock,
   getBlockHistory,

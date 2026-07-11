@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import { createRequire } from "node:module";
 import {
   StoreConflictError,
+  legacyScopeKey,
   scopeKey,
   tokenize,
   type StorePort,
@@ -530,6 +531,23 @@ export class SqliteStore implements StorePort, GraphPort, DurablePort {
       return total;
     });
     return { deleted: tx() };
+  }
+
+  async migrateLegacyScope(scope: Scope): Promise<{ migrated: number }> {
+    const from = legacyScopeKey(scope);
+    const to = scopeKey(scope);
+    if (from === to) return { migrated: 0 };
+    const tables = ["facts", "memories", "memory_meta", "block_history", "blocks", "idempotency_keys"] as const;
+    const tx = this.db.transaction(() => {
+      for (const table of tables) {
+        const target = this.db.prepare(`SELECT 1 FROM ${table} WHERE scope_key = ? LIMIT 1`).get(to);
+        if (target) throw new StoreConflictError(`legacy scope migration target is not empty: ${to}`);
+      }
+      let migrated = 0;
+      for (const table of tables) migrated += this.db.prepare(`UPDATE ${table} SET scope_key = ? WHERE scope_key = ?`).run(to, from).changes;
+      return migrated;
+    });
+    return { migrated: tx() };
   }
 
   async writeCheckpoint(sessionId: string, seq: number, hash: string): Promise<void> {

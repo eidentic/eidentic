@@ -1,5 +1,6 @@
 import {
   StoreConflictError,
+  legacyScopeKey,
   scopeKey,
   tokenize,
   type StorePort,
@@ -755,6 +756,25 @@ export class PostgresStore implements StorePort, GraphPort, DurablePort {
         deleted += sessions.length;
       }
       return { deleted };
+    });
+  }
+
+  async migrateLegacyScope(scope: Scope): Promise<{ migrated: number }> {
+    const from = legacyScopeKey(scope);
+    const to = scopeKey(scope);
+    if (from === to) return { migrated: 0 };
+    const tables = ["facts", "memories", "block_history", "blocks", "idempotency_keys"] as const;
+    return this.withTransaction(async (client) => {
+      for (const table of tables) {
+        const { rows } = await client.query(`SELECT 1 FROM ${table} WHERE scope_key = $1 LIMIT 1`, [to]);
+        if (rows.length > 0) throw new StoreConflictError(`legacy scope migration target is not empty: ${to}`);
+      }
+      let migrated = 0;
+      for (const table of tables) {
+        const { rows } = await client.query(`UPDATE ${table} SET scope_key = $1 WHERE scope_key = $2 RETURNING scope_key`, [to, from]);
+        migrated += rows.length;
+      }
+      return { migrated };
     });
   }
 

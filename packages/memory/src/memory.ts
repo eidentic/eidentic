@@ -1,5 +1,6 @@
 import {
   addUsage,
+  legacyScopeKey,
   scopeKey,
   tokenize,
   isToolUse,
@@ -522,6 +523,42 @@ export class ConsentRejectedError extends Error {
     super(message);
     this.name = "ConsentRejectedError";
   }
+}
+
+/**
+ * Explicitly move vectors written with the pre-v2 delimiter key to an operator-selected scope.
+ * Normal recall never invokes this helper. The target must be empty, and `list` is required so
+ * migration cannot guess, merge tenants, or silently lose vector payloads.
+ */
+export async function migrateLegacyScopeVectors(vector: VectorPort, scope: Scope): Promise<{ migrated: number }> {
+  const from = legacyScopeKey(scope);
+  const to = scopeKey(scope);
+  if (from === to) return { migrated: 0 };
+  if (!vector.list) throw new Error("legacy vector scope migration requires VectorPort.list");
+  const source = await vector.list(from);
+  if (source.length === 0) return { migrated: 0 };
+  const target = await vector.list(to);
+  const sourceById = new Map(source.map((entry) => [entry.id, entry]));
+  const samePayload = (a: VectorEntry, b: VectorEntry) =>
+    a.text === b.text && a.vector.length === b.vector.length && a.vector.every((value, index) => value === b.vector[index]);
+  for (const entry of target) {
+    const expected = sourceById.get(entry.id);
+    if (!expected || !samePayload(entry, expected)) {
+      throw new Error(`legacy vector scope migration target contains unrelated data: ${to}`);
+    }
+  }
+  const targetIds = new Set(target.map((entry) => entry.id));
+  for (const entry of source) if (!targetIds.has(entry.id)) await vector.upsert({ ...entry, scopeKey: to });
+  const verified = await vector.list(to);
+  if (verified.length !== source.length || verified.some((entry) => {
+    const expected = sourceById.get(entry.id);
+    return !expected || !samePayload(entry, expected);
+  })) throw new Error("legacy vector scope migration copy verification failed; source was retained");
+  const erased = await vector.eraseScope(from);
+  if (erased.deleted !== source.length) {
+    throw new Error(`legacy vector scope migration source count changed (expected ${source.length}, erased ${erased.deleted})`);
+  }
+  return { migrated: source.length };
 }
 
 /** Health snapshot for one always-in-context block (§6.5). */
