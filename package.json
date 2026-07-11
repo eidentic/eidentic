@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "license": "Apache-2.0",
-  "packageManager": "pnpm@10.8.1",
+  "packageManager": "pnpm@10.16.1",
   "engines": { "node": ">=22.13.0" },
   "repository": { "type": "git", "url": "git+https://github.com/eidentic/eidentic.git" },
   "scripts": {
@@ -12,6 +12,7 @@
     "test:watch": "vitest",
     "typecheck": "turbo run typecheck",
     "check:readme": "node scripts/check-readme-examples.mjs",
+    "test:packed": "node scripts/packed-consumer-smoke.mjs",
     "perf:budget": "node scripts/perf-budget.mjs",
     "changeset": "changeset",
     "version": "changeset version",

@@ -84,6 +84,11 @@ export interface PromptStore {
   load(): Promise<PromptStoreState | undefined>;
   /** Persist the full state snapshot. */
   save(state: PromptStoreState): Promise<void>;
+  /**
+   * Optional atomic read-modify-write transaction. Persistent stores should implement this so
+   * independent registry instances cannot overwrite each other's version allocation.
+   */
+  transact?<T>(mutator: (state: PromptStoreState) => T | Promise<T>): Promise<T>;
 }
 
 // ─── Canary result ────────────────────────────────────────────────────────────

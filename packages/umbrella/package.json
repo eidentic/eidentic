@@ -29,7 +29,9 @@
       "default": "./dist/testing.js"
     }
   },
-  "sideEffects": false,
+  "sideEffects": [
+    "./dist/cli.js"
+  ],
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit"

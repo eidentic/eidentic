@@ -1,4 +1,4 @@
-import { addUsage, type ModelPort, type StreamEvent, type Usage } from "@eidentic/types";
+import { addUsage, type ModelPort, type ModelResponse, type StreamEvent, type Usage } from "@eidentic/types";
 import type { QueryOptions } from "./agent.js";
 import type { TreeBudget } from "./agent.js";
 
@@ -25,6 +25,11 @@ export interface StrategyContext {
   opts: QueryOptions;
   /** The agent's own model (used as the executor default in planAndExecute). */
   model: ModelPort;
+  /**
+   * Framework-supplied boundary for auxiliary model calls. Custom strategies that call a model
+   * directly should invoke this before inspecting or forwarding the response.
+   */
+  enforceModelResponseLimits?: (response: ModelResponse) => void;
   /**
    * The internal opts that carry `_budget`/`_depth`. Strategies must pass these
    * (with the sessionId overridden for each sub-run) into `react` so that the
@@ -398,6 +403,7 @@ Call the \`critique\` tool with your evaluation.`;
               { role: "user", content: criticPrompt },
             ],
             tools: [critiqueTool],
+            ...(ctx.opts.signal ? { signal: ctx.opts.signal } : {}),
           });
         } catch (err) {
           // Critic call failed — fail-safe: accept the draft.
@@ -409,6 +415,13 @@ Call the \`critique\` tool with your evaluation.`;
         const criticUsage = criticResponse.usage;
         sharedBudget.usage = addUsage(sharedBudget.usage, criticUsage);
         totalUsage = addUsage(totalUsage, criticUsage);
+        try {
+          ctx.enforceModelResponseLimits?.(criticResponse);
+        } catch {
+          // The call was billable, but its oversized output is untrusted and must not enter context.
+          yield* finishAccepted(terminal, draft);
+          return;
+        }
 
         // Extract the critique tool call from the critic response.
         let satisfactory = true;
@@ -554,6 +567,7 @@ export function planAndExecute(opts: {
               { role: "user", content: planInput },
             ],
             tools: [makePlanTool],
+            ...(ctx.opts.signal ? { signal: ctx.opts.signal } : {}),
           });
         } catch {
           return [];
@@ -562,6 +576,11 @@ export function planAndExecute(opts: {
         // FIX 2 + FIX 3: account planner usage into shared budget and aggregated total.
         sharedBudget.usage = addUsage(sharedBudget.usage, plannerResponse.usage);
         totalUsage = addUsage(totalUsage, plannerResponse.usage);
+        try {
+          ctx.enforceModelResponseLimits?.(plannerResponse);
+        } catch {
+          return [];
+        }
 
         const toolUses = plannerResponse.content.filter((b) => b.type === "tool_use");
         if (toolUses.length > 0) {
@@ -784,4 +803,3 @@ function buildSynthesizedTerminal(
     ...(object !== undefined ? { object } : {}),
   };
 }
-

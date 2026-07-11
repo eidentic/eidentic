@@ -32,6 +32,20 @@ describe("bashTool (sealed shell, §5.6)", () => {
     expect(calls[0]!.opts).toMatchObject({ language: "bash", timeoutMs: 5000 });
   });
 
+  it("forwards the tool context AbortSignal to the sandbox", async () => {
+    let seenSignal: AbortSignal | undefined;
+    const spy = {
+      run: async (_code: string, options?: { signal?: AbortSignal }) => {
+        seenSignal = options?.signal;
+        return { stdout: "", stderr: "", exitCode: 0 };
+      },
+    };
+    const controller = new AbortController();
+    const tool = bashTool(spy);
+    await tool.execute({ command: "sleep 1" }, { signal: controller.signal });
+    expect(seenSignal).toBe(controller.signal);
+  });
+
   it("never imports node:child_process (host exec is forbidden by §5.6)", async () => {
     const src = await readFile(fileURLToPath(new URL("../src/bash-tool.ts", import.meta.url)), "utf8");
     expect(src).not.toMatch(/child_process/);

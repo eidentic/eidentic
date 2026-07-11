@@ -18,7 +18,7 @@ describe("whole-tree cost budget (§8.6)", () => {
     const childModel = new MockModel([
       { content: [textBlock("child reply")], usage: { inputTokens: 20, outputTokens: 10 } },
     ]);
-    const child = new Agent({ id: "w", instructions: "", model: childModel, store: childStore, modelId: "haiku", prices: PRICES });
+    const child = new Agent({ permissions: { mode: "bypass" }, id: "w", instructions: "", model: childModel, store: childStore, modelId: "haiku", prices: PRICES });
 
     const parentStore = new InMemoryStore(); await parentStore.migrate();
     const parentModel = new MockModel([
@@ -26,6 +26,7 @@ describe("whole-tree cost budget (§8.6)", () => {
       { content: [textBlock("synth")], usage: { inputTokens: 2, outputTokens: 2 } },
     ]);
     const parent = new Agent({
+      permissions: { mode: "bypass" },
       id: "lead", instructions: "", model: parentModel, store: parentStore, modelId: "haiku", prices: PRICES,
       subAgents: { w: { agent: child, description: "worker" } },
     });
@@ -48,8 +49,8 @@ describe("whole-tree cost budget (§8.6)", () => {
     const c1 = mkChild(); await c1.s.migrate();
     const c2 = mkChild(); await c2.s.migrate();
     // Children have no policy — enforcement is the PARENT's tree budget only.
-    const childA = new Agent({ id: "a", instructions: "", model: c1.m, store: c1.s, modelId: "haiku", prices: PRICES });
-    const childB = new Agent({ id: "b", instructions: "", model: c2.m, store: c2.s, modelId: "haiku", prices: PRICES });
+    const childA = new Agent({ permissions: { mode: "bypass" }, id: "a", instructions: "", model: c1.m, store: c1.s, modelId: "haiku", prices: PRICES });
+    const childB = new Agent({ permissions: { mode: "bypass" }, id: "b", instructions: "", model: c2.m, store: c2.s, modelId: "haiku", prices: PRICES });
 
     const parentStore = new InMemoryStore(); await parentStore.migrate();
     // Both spawns are returned in ONE model response so they are dispatched serially in the same batch.
@@ -65,6 +66,7 @@ describe("whole-tree cost budget (§8.6)", () => {
       { content: [textBlock("done")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
     const parent = new Agent({
+      permissions: { mode: "bypass" },
       id: "lead", instructions: "", model: parentModel, store: parentStore, modelId: "haiku", prices: PRICES,
       // Budget $0.20: child A costs exactly $0.20; after it budget.usd = $0.20 >= $0.20 so the gate
       // refuses child B (which is in the same dispatch batch, after child A completes).
@@ -87,7 +89,7 @@ describe("whole-tree cost budget (§8.6)", () => {
     const childModel = new MockModel([
       { content: [textBlock("child burns tokens")], usage: { inputTokens: 40, outputTokens: 40 } },
     ]);
-    const child = new Agent({ id: "w", instructions: "", model: childModel, store: childStore, modelId: "haiku", prices: PRICES });
+    const child = new Agent({ permissions: { mode: "bypass" }, id: "w", instructions: "", model: childModel, store: childStore, modelId: "haiku", prices: PRICES });
 
     const parentStore = new InMemoryStore(); await parentStore.migrate();
     const parentModel = new MockModel([
@@ -95,6 +97,7 @@ describe("whole-tree cost budget (§8.6)", () => {
       { content: [textBlock("would synthesize")], usage: { inputTokens: 5, outputTokens: 5 } },
     ]);
     const parent = new Agent({
+      permissions: { mode: "bypass" },
       id: "lead", instructions: "", model: parentModel, store: parentStore, modelId: "haiku", prices: PRICES,
       // maxTokens 50: parent first call = 10, child adds 80 → tree = 90 ≥ 50 → preflight aborts before the next parent call.
       policy: { maxTokens: 50 },
@@ -113,7 +116,7 @@ describe("whole-tree cost budget (§8.6)", () => {
     const model = new MockModel([
       { content: [textBlock("hello")], usage: { inputTokens: 5, outputTokens: 3 } },
     ]);
-    const agent = new Agent({ id: "solo", instructions: "", model, store, modelId: "haiku", prices: PRICES });
+    const agent = new Agent({ permissions: { mode: "bypass" }, id: "solo", instructions: "", model, store, modelId: "haiku", prices: PRICES });
 
     const events = await run(agent, "hi", "s1");
     const result = events.at(-1) as Extract<StreamEvent, { type: "result" }>;
@@ -128,7 +131,7 @@ describe("whole-tree cost budget (§8.6)", () => {
     const mkChild = (id: string) => {
       const s = new InMemoryStore();
       const m = new MockModel([{ content: [textBlock("ok")], usage: { inputTokens: 50, outputTokens: 50 } }]);
-      return { agent: new Agent({ id, instructions: "", model: m, store: s, modelId: "haiku", prices: PRICES }), s };
+      return { agent: new Agent({ permissions: { mode: "bypass" }, id, instructions: "", model: m, store: s, modelId: "haiku", prices: PRICES }), s };
     };
     const cA = mkChild("a"); await cA.s.migrate();
     const cB = mkChild("b"); await cB.s.migrate();
@@ -141,6 +144,7 @@ describe("whole-tree cost budget (§8.6)", () => {
       { content: [textBlock("done")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
     const parent = new Agent({
+      permissions: { mode: "bypass" },
       id: "lead", instructions: "", model: parentModel, store: parentStore, modelId: "haiku", prices: PRICES,
       subAgents: { a: { agent: cA.agent, description: "a" }, b: { agent: cB.agent, description: "b" } },
     });
@@ -168,7 +172,7 @@ describe("whole-tree cost budget (§8.6)", () => {
     // Grandchild: 50 in + 50 out = $0.100
     const grandStore = new InMemoryStore(); await grandStore.migrate();
     const grandModel = new MockModel([{ content: [textBlock("grand")], usage: { inputTokens: 50, outputTokens: 50 } }]);
-    const grandchild = new Agent({ id: "grand", instructions: "", model: grandModel, store: grandStore, modelId: "haiku", prices: PRICES });
+    const grandchild = new Agent({ permissions: { mode: "bypass" }, id: "grand", instructions: "", model: grandModel, store: grandStore, modelId: "haiku", prices: PRICES });
 
     // Child: 50 in + 50 out = $0.100; also spawns the grandchild
     const childStore = new InMemoryStore(); await childStore.migrate();
@@ -177,6 +181,7 @@ describe("whole-tree cost budget (§8.6)", () => {
       { content: [textBlock("child done")], usage: { inputTokens: 25, outputTokens: 25 } },
     ]);
     const child = new Agent({
+      permissions: { mode: "bypass" },
       id: "child", instructions: "", model: childModel, store: childStore, modelId: "haiku", prices: PRICES,
       maxDepth: 2,
       subAgents: { grand: { agent: grandchild, description: "grandchild" } },
@@ -189,6 +194,7 @@ describe("whole-tree cost budget (§8.6)", () => {
       { content: [textBlock("parent done")], usage: { inputTokens: 5, outputTokens: 5 } },
     ]);
     const parent = new Agent({
+      permissions: { mode: "bypass" },
       id: "parent", instructions: "", model: parentModel, store: parentStore, modelId: "haiku", prices: PRICES,
       maxDepth: 2,
       subAgents: { child: { agent: child, description: "child" } },
@@ -216,7 +222,7 @@ describe("whole-tree cost budget (§8.6)", () => {
     const mkChild50 = (id: string) => {
       const s = new InMemoryStore();
       const m = new MockModel([{ content: [textBlock("ok")], usage: { inputTokens: 50, outputTokens: 50 } }]);
-      return { agent: new Agent({ id, instructions: "", model: m, store: s, modelId: "haiku", prices: PRICES }), s, m };
+      return { agent: new Agent({ permissions: { mode: "bypass" }, id, instructions: "", model: m, store: s, modelId: "haiku", prices: PRICES }), s, m };
     };
     const cA = mkChild50("ga"); await cA.s.migrate();
     const cB = mkChild50("gb"); await cB.s.migrate();
@@ -233,6 +239,7 @@ describe("whole-tree cost budget (§8.6)", () => {
       { content: [textBlock("done")], usage: { inputTokens: 0, outputTokens: 0 } },
     ]);
     const parent = new Agent({
+      permissions: { mode: "bypass" },
       id: "lead", instructions: "", model: parentModel, store: parentStore, modelId: "haiku", prices: PRICES,
       policy: { maxCostUsd: 0.1 }, // exactly $0.10: first child fills it, second must be refused
       subAgents: { ga: { agent: cA.agent, description: "a" }, gb: { agent: cB.agent, description: "b" } },
@@ -256,7 +263,7 @@ describe("spawn_agent idempotencyKey (Fix 2 §9.3)", () => {
     // We do this by checking that the Agent wires a tool with idempotencyKey present.
     const childStore = new InMemoryStore(); await childStore.migrate();
     const childModel = new MockModel([{ content: [textBlock("ok")], usage: { inputTokens: 1, outputTokens: 1 } }]);
-    const child = new Agent({ id: "c", instructions: "", model: childModel, store: childStore });
+    const child = new Agent({ permissions: { mode: "bypass" }, id: "c", instructions: "", model: childModel, store: childStore });
 
     const parentStore = new InMemoryStore(); await parentStore.migrate();
     const parentModel = new MockModel([{ content: [textBlock("ok")], usage: { inputTokens: 1, outputTokens: 1 } }]);
@@ -271,6 +278,7 @@ describe("spawn_agent idempotencyKey (Fix 2 §9.3)", () => {
     };
 
     const parent = new Agent({
+      permissions: { mode: "bypass" },
       id: "lead", instructions: "", model: capturingModel as typeof parentModel, store: parentStore,
       subAgents: { c: { agent: child, description: "child" } },
     });
@@ -319,7 +327,7 @@ describe("spawn_agent child-failure error signal (Fix 3)", () => {
     const errorModel = {
       complete: async () => { throw new Error("model exploded"); },
     };
-    const child = new Agent({ id: "failing", instructions: "", model: errorModel as any, store: childStore });
+    const child = new Agent({ permissions: { mode: "bypass" }, id: "failing", instructions: "", model: errorModel as any, store: childStore });
 
     const parentStore = new InMemoryStore(); await parentStore.migrate();
     const parentModel = new MockModel([
@@ -327,6 +335,7 @@ describe("spawn_agent child-failure error signal (Fix 3)", () => {
       { content: [textBlock("done")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
     const parent = new Agent({
+      permissions: { mode: "bypass" },
       id: "lead", instructions: "", model: parentModel, store: parentStore,
       subAgents: { failing: { agent: child, description: "always fails" } },
     });
@@ -353,6 +362,7 @@ describe("spawn_agent child-failure error signal (Fix 3)", () => {
       { content: [toolUseBlock("n2", "noop", {})], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
     const child = new Agent({
+      permissions: { mode: "bypass" },
       id: "looping", instructions: "", model: childModel, store: childStore,
       tools: [noopTool], maxTurns: 1,
     });
@@ -363,6 +373,7 @@ describe("spawn_agent child-failure error signal (Fix 3)", () => {
       { content: [textBlock("done")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
     const parent = new Agent({
+      permissions: { mode: "bypass" },
       id: "lead", instructions: "", model: parentModel, store: parentStore,
       subAgents: { looping: { agent: child, description: "hits max_turns" } },
     });

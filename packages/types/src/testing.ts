@@ -25,7 +25,7 @@ import type {
   SuspendDecision,
 } from "./ports.js";
 import type { SecretsPort, SandboxPort, SandboxResult, SandboxRunOptions } from "./security.js";
-import { scopeKey } from "./ports.js";
+import { legacyScopeKey, scopeKey } from "./ports.js";
 import { tokenize } from "./text.js";
 import type { StoredEvent } from "./protocol.js";
 import { StoreConflictError } from "./errors.js";
@@ -53,7 +53,7 @@ export class InMemoryStore implements StorePort, GraphPort, DurablePort {
   private graphIdCounter = 0;
   private checkpoints: Checkpoint[] = [];
   private idempotency = new Map<string, IdempotencyRecord>();
-  private decisions = new Map<string, SuspendDecision>(); // key: `${sessionId}#${callId}`
+  private decisions = new Map<string, { sessionId: string; callId: string; decision: SuspendDecision }>();
   private readonly newGraphId: () => string;
   private readonly graphNow: () => string;
 
@@ -71,6 +71,12 @@ export class InMemoryStore implements StorePort, GraphPort, DurablePort {
   async getSession(id: string) {
     const s = this.sessions.get(id);
     return s ? { ...s } : null;
+  }
+  async replaceSessionApiKey(sessionId: string, expected: string, replacement: string): Promise<boolean> {
+    const session = this.sessions.get(sessionId);
+    if (!session || session.apiKey !== expected) return false;
+    session.apiKey = replacement;
+    return true;
   }
   async appendEvents(events: StoredEvent[]) {
     const seenId = new Set(this.events.map((e) => e.id));
@@ -168,6 +174,26 @@ export class InMemoryStore implements StorePort, GraphPort, DurablePort {
       }
     }
     return scored.sort((a, b) => b.score - a.score).slice(0, topK);
+  }
+  async listMemory(scope: Scope) {
+    const key = scopeKey(scope);
+    return this.memEntries
+      .filter((entry) => entry.scopeKey === key)
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .map(({ id, text, ingestedAt, metadata }) => ({
+        id,
+        text,
+        ...(ingestedAt !== undefined ? { ingestedAt } : {}),
+        ...(metadata !== undefined ? { metadata: { ...metadata } } : {}),
+      }));
+  }
+  async deleteMemory(scope: Scope, ids: string[]): Promise<number> {
+    if (ids.length === 0) return 0;
+    const key = scopeKey(scope);
+    const targets = new Set(ids);
+    const before = this.memEntries.length;
+    this.memEntries = this.memEntries.filter((entry) => entry.scopeKey !== key || !targets.has(entry.id));
+    return before - this.memEntries.length;
   }
 
   async assertFact(scope: Scope, input: AssertFactInput): Promise<{ asserted: Fact; invalidated: Fact[] }> {
@@ -319,6 +345,32 @@ export class InMemoryStore implements StorePort, GraphPort, DurablePort {
       .map(([, v]) => v);
   }
 
+  async migrateLegacyScope(scope: Scope): Promise<{ migrated: number }> {
+    const from = legacyScopeKey(scope);
+    const to = scopeKey(scope);
+    if (from === to) return { migrated: 0 };
+
+    const targetPopulated = [...this.blocks.keys()].some((key) => key.startsWith(`${to}#`))
+      || this.history.some((row) => row.scopeKey === to)
+      || this.memEntries.some((row) => row.scopeKey === to)
+      || this.facts.some((row) => row.scopeKey === to)
+      || [...this.idempotency.values()].some((row) => row.scopeKey === to);
+    if (targetPopulated) throw new StoreConflictError(`legacy scope migration target is not empty: ${to}`);
+
+    let migrated = 0;
+    for (const [key, value] of [...this.blocks]) {
+      if (!key.startsWith(`${from}#`)) continue;
+      this.blocks.delete(key);
+      this.blocks.set(`${to}${key.slice(from.length)}`, value);
+      migrated += 1;
+    }
+    for (const row of this.history) if (row.scopeKey === from) { row.scopeKey = to; migrated += 1; }
+    for (const row of this.memEntries) if (row.scopeKey === from) { row.scopeKey = to; migrated += 1; }
+    for (const row of this.facts) if (row.scopeKey === from) { row.scopeKey = to; migrated += 1; }
+    for (const row of this.idempotency.values()) if (row.scopeKey === from) { row.scopeKey = to; migrated += 1; }
+    return { migrated };
+  }
+
   async eraseScope(scope: Scope): Promise<{ deleted: number }> {
     const key = scopeKey(scope);
     let deleted = 0;
@@ -345,18 +397,43 @@ export class InMemoryStore implements StorePort, GraphPort, DurablePort {
     this.facts = this.facts.filter((f) => f.scopeKey !== key);
     deleted += factsBefore - this.facts.length;
 
-    // Sessions and events: sessions are agent-scoped (no per-user scope_key column).
-    // Erase all sessions for this scope's agentId and their events. Safe because
-    // the conformance case uses unique agentIds per test scope.
-    const agentId = "agentId" in scope ? (scope as { agentId: string }).agentId : undefined;
-    if (agentId !== undefined) {
-      const sessionIds: string[] = [];
-      for (const [sid, sess] of this.sessions.entries()) {
-        if (sess.agentId === agentId) { sessionIds.push(sid); this.sessions.delete(sid); deleted += 1; }
+    const sessionIds = new Set<string>();
+    for (const [sid, session] of this.sessions) {
+      const selected = scope.kind === "agent"
+        ? session.agentId === scope.agentId
+        : scope.kind === "user"
+          ? session.agentId === scope.agentId && session.userId === scope.userId
+          : scope.kind === "org"
+            ? session.agentId === scope.agentId && session.orgId === scope.orgId
+            : scope.kind === "thread"
+              ? session.agentId === scope.agentId && sid === scope.sessionId
+              : false;
+      if (selected) sessionIds.add(sid);
+    }
+
+    const checkpointsBefore = this.checkpoints.length;
+    this.checkpoints = this.checkpoints.filter((checkpoint) => !sessionIds.has(checkpoint.sessionId));
+    deleted += checkpointsBefore - this.checkpoints.length;
+
+    for (const [idempotencyKey, record] of [...this.idempotency]) {
+      if (record.scopeKey === key || (record.sessionId !== undefined && sessionIds.has(record.sessionId))) {
+        this.idempotency.delete(idempotencyKey);
+        deleted += 1;
       }
-      const eventsBefore = this.events.length;
-      this.events = this.events.filter((e) => !sessionIds.includes(e.sessionId));
-      deleted += eventsBefore - this.events.length;
+    }
+
+    for (const [decisionKey, record] of [...this.decisions]) {
+      if (sessionIds.has(record.sessionId)) {
+        this.decisions.delete(decisionKey);
+        deleted += 1;
+      }
+    }
+
+    const eventsBefore = this.events.length;
+    this.events = this.events.filter((event) => !sessionIds.has(event.sessionId));
+    deleted += eventsBefore - this.events.length;
+    for (const sessionId of sessionIds) {
+      if (this.sessions.delete(sessionId)) deleted += 1;
     }
 
     return { deleted };
@@ -380,8 +457,26 @@ export class InMemoryStore implements StorePort, GraphPort, DurablePort {
   }
 
   async recordIntent(key: string, argsHash: string, metadata?: IdempotencyMetadata): Promise<void> {
-    if (this.idempotency.has(key)) return; // intent is write-once; never downgrade applied → intent
+    const existing = this.idempotency.get(key);
+    if (existing) {
+      if (existing.scopeKey === undefined && metadata?.scopeKey !== undefined) existing.scopeKey = metadata.scopeKey;
+      if (existing.sessionId === undefined && metadata?.sessionId !== undefined) existing.sessionId = metadata.sessionId;
+      if (existing.ownerKey === undefined && metadata?.ownerKey !== undefined) existing.ownerKey = metadata.ownerKey;
+      return; // intent is write-once; never downgrade applied → intent or reassign ownership
+    }
     this.idempotency.set(key, { key, argsHash, status: "intent", createdAt: this.graphNow(), ...metadata });
+  }
+
+  async claimIntent(key: string, argsHash: string, metadata?: IdempotencyMetadata): Promise<boolean> {
+    if (this.idempotency.has(key)) return false;
+    this.idempotency.set(key, { key, argsHash, status: "intent", createdAt: this.graphNow(), ...metadata });
+    return true;
+  }
+
+  async releaseIntent(key: string, argsHash: string): Promise<boolean> {
+    const existing = this.idempotency.get(key);
+    if (!existing || existing.status !== "intent" || existing.argsHash !== argsHash) return false;
+    return this.idempotency.delete(key);
   }
 
   async recordCompletion(key: string, result: unknown, metadata?: IdempotencyMetadata): Promise<void> {
@@ -394,10 +489,9 @@ export class InMemoryStore implements StorePort, GraphPort, DurablePort {
       key,
       argsHash,
       createdAt: existing?.createdAt ?? this.graphNow(),
-      ...(existing?.scopeKey !== undefined ? { scopeKey: existing.scopeKey } : {}),
-      ...(existing?.sessionId !== undefined ? { sessionId: existing.sessionId } : {}),
-      ...(existing?.ownerKey !== undefined ? { ownerKey: existing.ownerKey } : {}),
-      ...metadata,
+      ...((existing?.scopeKey ?? metadata?.scopeKey) !== undefined ? { scopeKey: existing?.scopeKey ?? metadata?.scopeKey } : {}),
+      ...((existing?.sessionId ?? metadata?.sessionId) !== undefined ? { sessionId: existing?.sessionId ?? metadata?.sessionId } : {}),
+      ...((existing?.ownerKey ?? metadata?.ownerKey) !== undefined ? { ownerKey: existing?.ownerKey ?? metadata?.ownerKey } : {}),
       status,
       result: stored,
     });
@@ -411,18 +505,33 @@ export class InMemoryStore implements StorePort, GraphPort, DurablePort {
   async recordDecision(sessionId: string, callId: string, decision: SuspendDecision): Promise<void> {
     // JSON round-trip so the in-memory store matches SqliteStore serialize/parse semantics.
     const stored = JSON.parse(JSON.stringify(decision)) as SuspendDecision;
-    this.decisions.set(`${sessionId}#${callId}`, stored);
+    this.decisions.set(JSON.stringify([sessionId, callId]), { sessionId, callId, decision: stored });
   }
 
   async getDecision(sessionId: string, callId: string): Promise<SuspendDecision | null> {
-    const d = this.decisions.get(`${sessionId}#${callId}`);
-    return d ? { ...d } : null;
+    const record = this.decisions.get(JSON.stringify([sessionId, callId]));
+    return record ? { ...record.decision } : null;
   }
 }
 
 export interface ConformanceCase {
   name: string;
   run: () => Promise<void>;
+}
+
+function asDurableStore(store: StorePort & GraphPort): DurablePort | null {
+  const candidate = store as StorePort & GraphPort & Partial<DurablePort>;
+  return typeof candidate.writeCheckpoint === "function" &&
+    typeof candidate.lastCheckpoint === "function" &&
+    typeof candidate.recordIntent === "function" &&
+    typeof candidate.claimIntent === "function" &&
+    typeof candidate.releaseIntent === "function" &&
+    typeof candidate.recordCompletion === "function" &&
+    typeof candidate.getIdempotency === "function" &&
+    typeof candidate.recordDecision === "function" &&
+    typeof candidate.getDecision === "function"
+    ? candidate as StorePort & GraphPort & DurablePort
+    : null;
 }
 
 function assert(cond: boolean, msg: string): void {
@@ -456,6 +565,13 @@ export function storeConformanceCases(makeStore: () => StorePort & GraphPort): C
       await s.createSession({ id: "cs", agentId: "a", createdAt: "t" });
       assertEqual((await s.getSession("cs"))?.agentId, "a", "session agentId");
       assertEqual(await s.getSession("missing"), null, "missing session is null");
+    }) },
+    { name: "replaceSessionApiKey compare-and-swaps legacy credentials", run: withStore(async (s) => {
+      await s.createSession({ id: "credential-session", agentId: "a", createdAt: "t", apiKey: "legacy-raw" });
+      assertEqual(await s.replaceSessionApiKey("credential-session", "wrong", "fingerprint"), false, "wrong expected value fails");
+      assertEqual((await s.getSession("credential-session"))?.apiKey, "legacy-raw", "failed CAS preserves value");
+      assertEqual(await s.replaceSessionApiKey("credential-session", "legacy-raw", "fingerprint"), true, "matching CAS succeeds");
+      assertEqual((await s.getSession("credential-session"))?.apiKey, "fingerprint", "replacement persisted");
     }) },
     { name: "readEvents returns events ordered by seq", run: withStore(async (s) => {
       await s.createSession({ id: "cs", agentId: "a", createdAt: "t" });
@@ -544,6 +660,24 @@ export function storeConformanceCases(makeStore: () => StorePort & GraphPort): C
       const hitsB2 = await s.searchMemory(scopeB, "banana", 10);
       assertEqual(hitsB2.length, 1, "scopeB unaffected after scopeA re-index");
       assertEqual(hitsB2[0]?.text, "banana mango", "scopeB text unchanged");
+    }) },
+    { name: "listMemory + deleteMemory are durable and exact-scope isolated", run: withStore(async (s) => {
+      const scopeA: Scope = { kind: "user", agentId: "memory-agent", userId: "alice" };
+      const scopeB: Scope = { kind: "user", agentId: "memory-agent", userId: "bob" };
+      await s.indexMemory([
+        { scope: scopeA, id: "same", text: "alice private", ingestedAt: 7, metadata: { source: "a" } },
+        { scope: scopeA, id: "other", text: "alice retained" },
+        { scope: scopeB, id: "same", text: "bob private", ingestedAt: 9, metadata: { source: "b" } },
+      ]);
+      const listed = await s.listMemory(scopeA);
+      assertEqual(listed.map((entry) => entry.id), ["other", "same"], "list returns complete ordered ids");
+      assertEqual(listed[0]?.text, "alice retained", "first entry text survives");
+      assertEqual(listed[1]?.text, "alice private", "second entry text survives");
+      assertEqual(listed[1]?.ingestedAt, 7, "ingest time survives");
+      assertEqual(listed[1]?.metadata, { source: "a" }, "metadata survives");
+      assertEqual(await s.deleteMemory(scopeA, ["same", "missing", "same"]), 1, "only one exact row deleted");
+      assertEqual((await s.listMemory(scopeA)).map((entry) => entry.id), ["other"], "other same-scope row remains");
+      assertEqual((await s.listMemory(scopeB)).map((entry) => entry.text), ["bob private"], "same id in other scope remains");
     }) },
     { name: "getBlock returns block after upsert, null for missing, scope-isolated", run: withStore(async (s) => {
       const scopeX: Scope = { kind: "agent", agentId: "gbx" };
@@ -864,6 +998,83 @@ export function storeConformanceCases(makeStore: () => StorePort & GraphPort): C
       assert((await s.getBlock(scopeB, "bio")) !== null, "scopeB block intact");
       assert((await s.readEvents("sess_erase_b")).length > 0, "scopeB events intact");
     }) },
+    { name: "eraseScope(user): deletes only that user's sessions and durable records within a shared agent", run: withStore(async (s) => {
+      const durable = asDurableStore(s);
+      const at = "2026-01-01T00:00:00.000Z";
+      const alice: Scope = { kind: "user", agentId: "erase_shared_agent", userId: "alice" };
+      const bob: Scope = { kind: "user", agentId: "erase_shared_agent", userId: "bob" };
+      const event = (id: string, sessionId: string): StoredEvent => ({
+        id, sessionId, seq: 0, kind: "user", schemaVersion: 1, payload: id, createdAt: at,
+      });
+
+      await s.createSession({ id: "erase_alice_session", agentId: "erase_shared_agent", userId: "alice", orgId: "acme", createdAt: at });
+      await s.createSession({ id: "erase_bob_session", agentId: "erase_shared_agent", userId: "bob", orgId: "acme", createdAt: at });
+      await s.appendEvents([
+        event("erase_alice_event", "erase_alice_session"),
+        event("erase_bob_event", "erase_bob_session"),
+      ]);
+      await s.upsertBlock(alice, { label: "profile", value: "Alice" });
+      await s.upsertBlock(bob, { label: "profile", value: "Bob" });
+
+      if (durable) {
+        await durable.writeCheckpoint("erase_alice_session", 1, "alice-hash");
+        await durable.writeCheckpoint("erase_bob_session", 1, "bob-hash");
+        await durable.recordIntent("erase_alice_session:tool", "alice-args", { sessionId: "erase_alice_session" });
+        await durable.recordCompletion("erase_alice_session:tool", { owner: "alice" }, { sessionId: "erase_alice_session" });
+        await durable.recordIntent("erase_bob_session:tool", "bob-args", { sessionId: "erase_bob_session" });
+        await durable.recordCompletion("erase_bob_session:tool", { owner: "bob" }, { sessionId: "erase_bob_session" });
+        await durable.recordIntent("erase_alice_scope_only", "alice-scope", { scopeKey: scopeKey(alice) });
+        await durable.recordDecision("erase_alice_session", "call", { approved: true, data: { owner: "alice" } });
+        await durable.recordDecision("erase_bob_session", "call", { approved: true, data: { owner: "bob" } });
+      }
+
+      await s.eraseScope(alice);
+
+      assertEqual(await s.getSession("erase_alice_session"), null, "Alice session erased");
+      assert((await s.getSession("erase_bob_session")) !== null, "Bob session remains");
+      assertEqual(await s.readEvents("erase_alice_session"), [], "Alice events erased");
+      assertEqual((await s.readEvents("erase_bob_session")).map((e) => e.id), ["erase_bob_event"], "Bob events remain");
+      assertEqual(await s.getBlock(alice, "profile"), null, "Alice scoped data erased");
+      assert((await s.getBlock(bob, "profile")) !== null, "Bob scoped data remains");
+
+      if (durable) {
+        assertEqual(await durable.lastCheckpoint("erase_alice_session"), null, "Alice checkpoint erased");
+        assert((await durable.lastCheckpoint("erase_bob_session")) !== null, "Bob checkpoint remains");
+        assertEqual(await durable.getIdempotency("erase_alice_session:tool"), null, "Alice session idempotency erased");
+        assertEqual(await durable.getIdempotency("erase_alice_scope_only"), null, "Alice scope idempotency erased");
+        assert((await durable.getIdempotency("erase_bob_session:tool")) !== null, "Bob idempotency remains");
+        assertEqual(await durable.getDecision("erase_alice_session", "call"), null, "Alice decision erased");
+        assert((await durable.getDecision("erase_bob_session", "call")) !== null, "Bob decision remains");
+      }
+    }) },
+    { name: "eraseScope(org/thread/shared): selects exact sessions and never fans shared erasure into sessions", run: withStore(async (s) => {
+      const at = "2026-01-01T00:00:00.000Z";
+      const agentId = "erase_scope_kinds_agent";
+      const session = async (id: string, userId: string, orgId: string) => {
+        await s.createSession({ id, agentId, userId, orgId, createdAt: at });
+        await s.appendEvents([{ id: `${id}_event`, sessionId: id, seq: 0, kind: "user", schemaVersion: 1, payload: id, createdAt: at }]);
+      };
+
+      await session("erase_org_acme_1", "alice", "acme");
+      await session("erase_org_acme_2", "bob", "acme");
+      await session("erase_org_other", "carol", "other");
+      await s.eraseScope({ kind: "org", agentId, orgId: "acme" });
+      assertEqual(await s.getSession("erase_org_acme_1"), null, "first Acme session erased");
+      assertEqual(await s.getSession("erase_org_acme_2"), null, "second Acme session erased");
+      assert((await s.getSession("erase_org_other")) !== null, "other org session remains");
+
+      await session("erase_thread_target", "dana", "other");
+      await session("erase_thread_sibling", "dana", "other");
+      await s.eraseScope({ kind: "thread", agentId, sessionId: "erase_thread_target" });
+      assertEqual(await s.getSession("erase_thread_target"), null, "exact thread session erased");
+      assert((await s.getSession("erase_thread_sibling")) !== null, "same-owner sibling session remains");
+
+      await s.upsertBlock({ kind: "shared", blockId: "erase_shared_block" }, { label: "shared", value: "erase me" });
+      await s.eraseScope({ kind: "shared", blockId: "erase_shared_block" });
+      assertEqual(await s.getBlock({ kind: "shared", blockId: "erase_shared_block" }, "shared"), null, "shared block erased");
+      assert((await s.getSession("erase_org_other")) !== null, "shared erase leaves sessions untouched");
+      assert((await s.getSession("erase_thread_sibling")) !== null, "shared erase leaves sibling session untouched");
+    }) },
     { name: "graph: contradiction records supersedes link on the new fact + defaults lastCorroboratedAt to validFrom", run: withStore(async (s) => {
       const t1 = "2026-01-01T00:00:00.000Z";
       const t2 = "2026-03-01T00:00:00.000Z";
@@ -960,7 +1171,10 @@ export class InMemoryVectorStore implements VectorPort {
 }
 
 /** Behavioral contract every VectorPort adapter must satisfy (uses tiny fixed vectors — no embedder needed). */
-export function vectorConformanceCases(makeStore: () => Promise<VectorPort> | VectorPort): ConformanceCase[] {
+export function vectorConformanceCases(
+  makeStore: () => Promise<VectorPort> | VectorPort,
+  opts: { settle?: () => Promise<void> } = {},
+): ConformanceCase[] {
   const k = "user:a:u1";
   const other = "user:a:u2";
   // 4-dim vectors where similarity is obvious
@@ -969,11 +1183,13 @@ export function vectorConformanceCases(makeStore: () => Promise<VectorPort> | Ve
     const s = await makeStore();
     await fn(s);
   };
+  const settle = opts.settle ?? (async () => {});
   return [
     { name: "vector: ranks by similarity within scope, isolates scopes", run: withStore(async (s) => {
       await s.upsert(e("a", k, "A", [1, 0, 0, 0]));
       await s.upsert(e("b", k, "B", [0, 1, 0, 0]));
       await s.upsert(e("c", other, "C", [1, 0, 0, 0]));
+      await settle();
       const hits = await s.search([1, 0, 0, 0], k, 10);
       assertEqual(hits[0]?.id, "a", "closest first");
       assert(!hits.some((h) => h.id === "c"), "other scope excluded");
@@ -981,6 +1197,7 @@ export function vectorConformanceCases(makeStore: () => Promise<VectorPort> | Ve
     { name: "vector: idempotent upsert by id", run: withStore(async (s) => {
       await s.upsert(e("x", k, "old", [1, 0, 0, 0]));
       await s.upsert(e("x", k, "new", [0, 0, 0, 1]));
+      await settle();
       const hits = await s.search([0, 0, 0, 1], k, 10);
       assertEqual(hits.filter((h) => h.id === "x").length, 1, "single row");
       assertEqual(hits[0]?.text, "new", "latest wins");
@@ -988,6 +1205,7 @@ export function vectorConformanceCases(makeStore: () => Promise<VectorPort> | Ve
     { name: "vector: same logical id may exist independently in different scopes", run: withStore(async (s) => {
       await s.upsert(e("shared", k, "in A", [1, 0, 0, 0]));
       await s.upsert(e("shared", other, "in B", [0, 1, 0, 0]));
+      await settle();
       const hitsA = await s.search([1, 0, 0, 0], k, 10);
       const hitsB = await s.search([0, 1, 0, 0], other, 10);
       assertEqual(hitsA.find((h) => h.id === "shared")?.text, "in A", "scope A keeps its entry");
@@ -995,14 +1213,18 @@ export function vectorConformanceCases(makeStore: () => Promise<VectorPort> | Ve
     }) },
     { name: "vector: delete removes by id within scope", run: withStore(async (s) => {
       await s.upsert(e("d", k, "D", [1, 0, 0, 0]));
+      await settle();
       await s.delete("d", k);
+      await settle();
       const hits = await s.search([1, 0, 0, 0], k, 10);
       assert(!hits.some((h) => h.id === "d"), "deleted");
     }) },
     { name: "vector: delete in scope A does not remove same id in scope B", run: withStore(async (s) => {
       await s.upsert(e("shared", k, "in A", [1, 0, 0, 0]));
       await s.upsert(e("shared", other, "in B", [1, 0, 0, 0]));
+      await settle();
       await s.delete("shared", k);
+      await settle();
       const hitsA = await s.search([1, 0, 0, 0], k, 10);
       assert(!hitsA.some((h) => h.id === "shared"), "removed from scope A");
       const hitsB = await s.search([1, 0, 0, 0], other, 10);
@@ -1011,6 +1233,7 @@ export function vectorConformanceCases(makeStore: () => Promise<VectorPort> | Ve
     { name: "vector: exact-match query returns top hit with score > 0.99", run: withStore(async (s) => {
       const vec: number[] = [1, 0, 0, 0];
       await s.upsert(e("exact", k, "E", vec));
+      await settle();
       const hits = await s.search(vec, k, 10);
       assert(hits.length > 0, "at least one hit");
       assert(hits[0]?.id === "exact", "exact match is top hit");
@@ -1023,6 +1246,7 @@ export function vectorConformanceCases(makeStore: () => Promise<VectorPort> | Ve
       await s.upsert(e("l1", k, "L1", [1, 0, 0, 0]));
       await s.upsert(e("l2", k, "L2", [0, 1, 0, 0]));
       await s.upsert(e("l3", other, "L3", [0, 0, 1, 0]));
+      await settle();
       const entries = await s.list(k);
       const ids = entries.map((x) => x.id).sort();
       assertEqual(ids, ["l1", "l2"], "list returns exactly the entries in scope k (other scope excluded)");
@@ -1037,12 +1261,14 @@ export function vectorConformanceCases(makeStore: () => Promise<VectorPort> | Ve
       await s.upsert(e("da1", k, "A1", [1, 0, 0, 0]));
       await s.upsert(e("da2", k, "A2", [0, 1, 0, 0]));
       await s.upsert(e("db1", other, "B1", [1, 0, 0, 0]));
+      await settle();
 
       // Verify A has entries before erasure
       assert((await s.search([1, 0, 0, 0], k, 10)).length > 0, "scope A has entries before eraseScope");
 
       const result = await s.eraseScope(k);
       assert(result.deleted > 0, "eraseScope returns deleted > 0");
+      await settle();
 
       // Scope A is empty
       assertEqual(await s.search([1, 0, 0, 0], k, 10), [], "scope A empty after eraseScope");
@@ -1091,6 +1317,27 @@ export function durableConformanceCases(makeStore: () => Promise<DurablePort> | 
     { name: "durable: getIdempotency returns null for an unknown key", run: withStore(async (s) => {
       assertEqual(await s.getIdempotency("nope"), null, "missing key → null");
     }) },
+    { name: "durable: claimIntent atomically grants an unseen key once", run: withStore(async (s) => {
+      const [first, second] = await Promise.all([
+        s.claimIntent("claim-once", "same", { sessionId: "s" }),
+        s.claimIntent("claim-once", "same", { sessionId: "s" }),
+      ]);
+      assertEqual([first, second].filter(Boolean).length, 1, "exactly one claimant wins");
+      const record = await s.getIdempotency("claim-once");
+      assertEqual(record?.status, "intent", "winning claim writes intent");
+      assertEqual(record?.argsHash, "same", "winning claim preserves args hash");
+      assertEqual(record?.sessionId, "s", "winning claim preserves ownership");
+    }) },
+    { name: "durable: releaseIntent only removes the exact pending claim", run: withStore(async (s) => {
+      await s.claimIntent("release-me", "hash-a", { sessionId: "s" });
+      assertEqual(await s.releaseIntent("release-me", "wrong", { sessionId: "s" }), false, "wrong hash cannot release");
+      assert((await s.getIdempotency("release-me")) !== null, "wrong release leaves claim intact");
+      assertEqual(await s.releaseIntent("release-me", "hash-a", { sessionId: "s" }), true, "exact pending claim releases");
+      assertEqual(await s.getIdempotency("release-me"), null, "released claim is gone");
+      await s.claimIntent("applied-no-release", "hash-b");
+      await s.recordCompletion("applied-no-release", "done");
+      assertEqual(await s.releaseIntent("applied-no-release", "hash-b"), false, "applied rows are immutable");
+    }) },
     { name: "durable: intent → completion lifecycle; getIdempotency reflects applied + result", run: withStore(async (s) => {
       await s.recordIntent("k1", "argshash");
       const afterIntent = await s.getIdempotency("k1");
@@ -1110,6 +1357,30 @@ export function durableConformanceCases(makeStore: () => Promise<DurablePort> | 
       const r = await s.getIdempotency("k2");
       assertEqual(r?.status, "applied", "still applied after a second intent");
       assertEqual(r?.result, "done", "result intact");
+    }) },
+    { name: "durable: idempotency ownership metadata persists and completion enriches missing fields", run: withStore(async (s) => {
+      await s.recordIntent("meta-key", "meta-hash", { sessionId: "meta-session" });
+      await s.recordCompletion("meta-key", "done", { scopeKey: "user:meta-agent:meta-user", ownerKey: "user:meta-user" });
+      const record = await s.getIdempotency("meta-key");
+      assertEqual(record?.sessionId, "meta-session", "sessionId metadata persists from intent");
+      assertEqual(record?.scopeKey, "user:meta-agent:meta-user", "scopeKey metadata is enriched on completion");
+      assertEqual(record?.ownerKey, "user:meta-user", "ownerKey metadata is enriched on completion");
+    }) },
+    { name: "durable: idempotency ownership metadata cannot be reassigned by a later write", run: withStore(async (s) => {
+      await s.recordIntent("owned-key", "owned-hash", {
+        sessionId: "alice-session",
+        scopeKey: "user:agent:alice",
+        ownerKey: "user:alice",
+      });
+      await s.recordCompletion("owned-key", "done", {
+        sessionId: "bob-session",
+        scopeKey: "user:agent:bob",
+        ownerKey: "user:bob",
+      });
+      const record = await s.getIdempotency("owned-key");
+      assertEqual(record?.sessionId, "alice-session", "existing session ownership is immutable");
+      assertEqual(record?.scopeKey, "user:agent:alice", "existing scope ownership is immutable");
+      assertEqual(record?.ownerKey, "user:alice", "existing owner key is immutable");
     }) },
     { name: "durable: recordCompletion persists null/falsy results faithfully", run: withStore(async (s) => {
       await s.recordIntent("k3", "h");

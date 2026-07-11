@@ -1,10 +1,9 @@
 /**
  * Eidentic Convex app-functions handlers.
  *
- * Back-compat note: the top-level exports still use the original table names from
- * `eidenticTables`, so `export * from "@eidentic/convex/server"` remains source-compatible.
- * New app-functions installs can use `eidenticFunctions({ tables, authorize })` together with
- * `createEidenticTableNames` / `createEidenticTables` for prefixed table names.
+ * Top-level legacy exports retain their names but now fail closed. Use `eidenticFunctions` with an
+ * authorization hook. The explicitly named unsafe compatibility object exists only for controlled
+ * migrations and tests.
  */
 import type { RegisteredMutation, RegisteredQuery } from "convex/server";
 import {
@@ -22,10 +21,18 @@ export type { EidenticAuthorize } from "./app-functions/handlers.js";
 type EidenticRegisteredFunction = RegisteredMutation<"public", any, any> | RegisteredQuery<"public", any, any>;
 
 const defaultHandlers = defineEidenticHandlers(DEFAULT_EIDENTIC_TABLE_NAMES);
+const denyUnauthenticated: EidenticAuthorize = async () => {
+  throw new Error("Eidentic Convex public function denied: configure eidenticFunctions({ authorize })");
+};
+const deniedDefaultFunctions = authorizeEidenticHandlers(defaultHandlers, denyUnauthenticated);
+
+/** @deprecated Explicitly unsafe legacy public handlers. Prefer `eidenticFunctions({ authorize })`. */
+export const unsafeLegacyPublicEidenticFunctions = defaultHandlers.functions;
 
 export const {
   createSession,
   getSession,
+  replaceSessionApiKey,
   listSessions,
   appendEvents,
   readEvents,
@@ -37,15 +44,20 @@ export const {
   listBlocks,
   indexMemory,
   searchMemory,
+  listMemory,
+  deleteMemory,
   assertFact,
   queryFacts,
   corroborate,
   expireFacts,
   sweepExpired,
   eraseScope,
+  migrateLegacyScope,
   writeCheckpoint,
   lastCheckpoint,
   recordIntent,
+  claimIntent,
+  releaseIntent,
   recordCompletion,
   getIdempotency,
   recordDecision,
@@ -55,17 +67,19 @@ export const {
   vectorDelete,
   vectorEraseScope,
   vectorList,
-} = defaultHandlers.functions;
+} = deniedDefaultFunctions;
 
 export interface EidenticFunctionsOptions {
   /** Optional authorization hook run before every generated handler. */
   authorize?: EidenticAuthorize;
+  /** @deprecated Explicitly restore unauthenticated public handlers during a controlled migration. */
+  unsafeAllowUnauthenticated?: boolean;
   /** Optional table-name mapping for prefixed/custom app-functions schemas. */
   tables?: EidenticTableNames;
 }
 
 /**
- * Build all 31 eidentic functions with an optional authorization hook and optional table map.
+ * Build all 36 eidentic functions with an optional authorization hook and optional table map.
  *
  * Use this in a host app's `convex/eidentic.ts` when the functions are reachable over HTTP:
  *
@@ -83,5 +97,6 @@ export interface EidenticFunctionsOptions {
  */
 export function eidenticFunctions(opts: EidenticFunctionsOptions = {}): Record<string, EidenticRegisteredFunction> {
   const handlerSet = opts.tables ? defineEidenticHandlers(opts.tables) : defaultHandlers;
-  return authorizeEidenticHandlers(handlerSet, opts.authorize);
+  const authorize = opts.authorize ?? (opts.unsafeAllowUnauthenticated === true ? undefined : denyUnauthenticated);
+  return authorizeEidenticHandlers(handlerSet, authorize);
 }

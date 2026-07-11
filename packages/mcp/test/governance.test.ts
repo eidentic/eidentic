@@ -56,16 +56,16 @@ const fakeClient: McpClientLike = {
 // Fake MCP server (mirrors server.test.ts)
 // ---------------------------------------------------------------------------
 class FakeMcpServer implements McpServerLike {
-  private handlers = new Map<string, (req: any) => Promise<any>>();
+  private handlers = new Map<string, (req: any, extra?: any) => Promise<any>>();
 
-  setRequestHandler(schema: unknown, handler: (req: any) => Promise<any>): void {
+  setRequestHandler(schema: unknown, handler: (req: any, extra?: any) => Promise<any>): void {
     this.handlers.set(String(schema), handler);
   }
 
-  async invoke(method: string, req: unknown = {}): Promise<any> {
+  async invoke(method: string, req: unknown = {}, extra?: unknown): Promise<any> {
     const handler = this.handlers.get(method);
     if (!handler) throw new Error(`FakeMcpServer: no handler registered for '${method}'`);
-    return handler(req);
+    return handler(req, extra);
   }
 
   async connect(_transport: unknown): Promise<void> { /* noop */ }
@@ -247,6 +247,25 @@ describe("serveTools — onAudit hook (governance)", () => {
     expect(events[0]!.method).toBe("tools/call");
   });
 
+  it("retains only credential-free transport identity when an additional auth check denies", async () => {
+    const events: McpAuditEvent[] = [];
+    const fake = new FakeMcpServer();
+    const authInfo = {
+      token: "raw-bearer-must-never-reach-audit",
+      clientId: "known-client",
+      scopes: ["tools:read"],
+    };
+    serveTools(fake, [addTool], {
+      authenticateConnection: () => false,
+      onAudit: (event) => events.push(event),
+    });
+
+    await fake.invoke("tools/list", {}, { authInfo });
+    expect(events[0]?.outcome).toBe("denied");
+    expect(events[0]?.principal).toEqual({ clientId: "known-client", scopes: ["tools:read"] });
+    expect(JSON.stringify(events)).not.toContain("raw-bearer-must-never-reach-audit");
+  });
+
   it("fires onAudit with outcome=denied when authorize returns false", async () => {
     const events: McpAuditEvent[] = [];
     const fake = new FakeMcpServer();
@@ -301,7 +320,7 @@ describe("serveTools — onAudit hook (governance)", () => {
     expect(events[0]!.errorMessage).toContain("invalid input");
   });
 
-  it("includes principal from the raw request object in audit events", async () => {
+  it("does not report the untrusted protocol request as an authenticated principal", async () => {
     const events: McpAuditEvent[] = [];
     const fake = new FakeMcpServer();
     serveTools(fake, [addTool], { onAudit: (e) => { events.push(e); } });
@@ -309,7 +328,7 @@ describe("serveTools — onAudit hook (governance)", () => {
     const req = { params: { name: "add", arguments: { a: 1, b: 2 } }, _identity: "user-42" };
     await fake.invoke("tools/call", req);
 
-    expect(events[0]!.principal).toBe(req);
+    expect(events[0]!.principal).toBeUndefined();
   });
 
   // -------------------------------------------------------------------------

@@ -38,6 +38,12 @@ async function freshStore(): Promise<InMemoryStore> {
   return s;
 }
 
+function recallContext(req: { messages: Array<{ role: string; content: unknown }> }) {
+  return req.messages.find((message) =>
+    message.role === "user" && typeof message.content === "string" && message.content.includes("<recall>"),
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Custom MemoryPort fake that returns snippets with metadata
 // ---------------------------------------------------------------------------
@@ -79,7 +85,7 @@ describe("Feature 3 — recall citations: system prompt injection", () => {
     // Intercept the complete call to capture messages.
     const originalComplete = model.complete.bind(model);
     (model as unknown as { complete: typeof model.complete }).complete = async (req) => {
-      const sys = req.messages.find((m) => m.role === "system");
+      const sys = recallContext(req);
       if (sys) capturedSystem = typeof sys.content === "string" ? sys.content : JSON.stringify(sys.content);
       return originalComplete(req);
     };
@@ -120,7 +126,7 @@ describe("Feature 3 — recall citations: system prompt injection", () => {
     ]);
     const orig = model.complete.bind(model);
     (model as unknown as { complete: typeof model.complete }).complete = async (req) => {
-      const sys = req.messages.find((m) => m.role === "system");
+      const sys = recallContext(req);
       if (sys) capturedSystem = typeof sys.content === "string" ? sys.content : "";
       return orig(req);
     };
@@ -156,7 +162,7 @@ describe("Feature 3 — recall citations: system prompt injection", () => {
     ]);
     const orig = model.complete.bind(model);
     (model as unknown as { complete: typeof model.complete }).complete = async (req) => {
-      const sys = req.messages.find((m) => m.role === "system");
+      const sys = recallContext(req);
       if (sys) capturedSystem = typeof sys.content === "string" ? sys.content : "";
       return orig(req);
     };
@@ -198,7 +204,7 @@ describe("Feature 3 — recall citations: runTurn passes source to system prompt
     ]);
     const orig = baseModel.complete.bind(baseModel);
     (baseModel as unknown as { complete: typeof baseModel.complete }).complete = async (req) => {
-      const sys = req.messages.find((m) => m.role === "system");
+      const sys = recallContext(req);
       if (sys) capturedSystem = typeof sys.content === "string" ? sys.content : "";
       return orig(req);
     };
@@ -246,7 +252,7 @@ describe("Fix 2 — maxRecallTokens cap: truncates low-ranked snippets before in
     ]);
     const orig = baseModel.complete.bind(baseModel);
     (baseModel as unknown as { complete: typeof baseModel.complete }).complete = async (req) => {
-      const sys = req.messages.find((m) => m.role === "system");
+      const sys = recallContext(req);
       if (sys) capturedSystem = typeof sys.content === "string" ? sys.content : "";
       return orig(req);
     };
@@ -294,7 +300,7 @@ describe("Fix 2 — maxRecallTokens cap: truncates low-ranked snippets before in
     ]);
     const orig = baseModel.complete.bind(baseModel);
     (baseModel as unknown as { complete: typeof baseModel.complete }).complete = async (req) => {
-      const sys = req.messages.find((m) => m.role === "system");
+      const sys = recallContext(req);
       if (sys) capturedSystem = typeof sys.content === "string" ? sys.content : "";
       return orig(req);
     };
@@ -339,7 +345,7 @@ describe("Fix 2 — maxRecallTokens cap: truncates low-ranked snippets before in
     ]);
     const orig = baseModel.complete.bind(baseModel);
     (baseModel as unknown as { complete: typeof baseModel.complete }).complete = async (req) => {
-      const sys = req.messages.find((m) => m.role === "system");
+      const sys = recallContext(req);
       if (sys) capturedSystem = typeof sys.content === "string" ? sys.content : "";
       return orig(req);
     };

@@ -639,17 +639,59 @@ describe("session ownership (Fix 3a IDOR)", () => {
     expect(Array.isArray(body.events)).toBe(true);
   });
 
-  it("events: no-owner session (legacy) is accessible by any authenticated principal", async () => {
+  it("events: no-owner legacy session is denied when authentication is configured", async () => {
     // Create a session directly in the store without a userId (simulates a pre-Fix-1 legacy session)
     const { app, store } = makeOwnershipApp([]);
     await store.migrate();
     await store.createSession({ id: "legacy-sess", agentId: "demo", createdAt: new Date().toISOString() });
 
-    // Bob reads the legacy session → 200 (back-compat: no owner = allow)
+    // Authenticated multi-tenant mode must fail closed for ownerless legacy data.
     const eventsRes = await app.request("/v1/agents/demo/sessions/legacy-sess/events", {
       headers: { authorization: "Bearer key-bob" },
     });
+    expect(eventsRes.status).toBe(403);
+  });
+
+  it("events: ownerless legacy access requires an explicit compatibility opt-in", async () => {
+    const { agent, store } = makeAgent([]);
+    const app = createServer({
+      agents: { demo: agent },
+      auth: ApiKeyAuth({ "key-bob": { userId: "bob" } }),
+      exposeEvents: true,
+      allowLegacyUnownedRecords: true,
+    });
+    await store.migrate();
+    await store.createSession({ id: "legacy-opt-in", agentId: "demo", createdAt: new Date().toISOString() });
+
+    const eventsRes = await app.request("/v1/agents/demo/sessions/legacy-opt-in/events", {
+      headers: { authorization: "Bearer key-bob" },
+    });
     expect(eventsRes.status).toBe(200);
+  });
+
+  it("events: matching org does not authorize a different user-owned session", async () => {
+    const { agent } = makeAgent([textResponse("hello")]);
+    const app = createServer({
+      agents: { demo: agent },
+      auth: ApiKeyAuth({
+        "key-alice": { userId: "alice", orgId: "acme" },
+        "key-bob": { userId: "bob", orgId: "acme" },
+      }),
+      exposeEvents: true,
+    });
+
+    const queryRes = await app.request("/v1/agents/demo/query", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer key-alice" },
+      body: JSON.stringify({ input: "hi", sessionId: "same-org-user-owned" }),
+    });
+    expect(queryRes.status).toBe(200);
+    await readResponseText(queryRes);
+
+    const eventsRes = await app.request("/v1/agents/demo/sessions/same-org-user-owned/events", {
+      headers: { authorization: "Bearer key-bob" },
+    });
+    expect(eventsRes.status).toBe(403);
   });
 
   // Finding #1 — IDOR on /query: cross-session read via client-supplied sessionId
@@ -817,37 +859,41 @@ describe("SSE stream resumability (Last-Event-ID)", () => {
     return readResponseText(res);
   }
 
-  it("fresh connection: all events carry an SSE id field", async () => {
+  it("fresh connection: only durably persisted visible events carry their exact SSE id", async () => {
     const { agent } = makeAgent([textResponse("hi there")]);
     const app = createServer({ agents: { demo: agent } });
 
     const text = await runQuery(app, "sse-id-sess-1");
     const events = parseSseEvents(text);
 
-    // Every event except stream.delta and result should have an id
+    // session.init is not a stored event and must not claim another record's cursor.
     const sessionInitEvents = events.filter((e) => e.event === "session.init");
     expect(sessionInitEvents.length).toBeGreaterThan(0);
-    expect(sessionInitEvents[0]!.id).toBeDefined();
-    expect(sessionInitEvents[0]!.id).toMatch(/^\d+$/);
+    expect(sessionInitEvents[0]!.id).toBeUndefined();
 
     const assistantEvents = events.filter((e) => e.event === "assistant");
     expect(assistantEvents.length).toBeGreaterThan(0);
     expect(assistantEvents[0]!.id).toBeDefined();
     expect(assistantEvents[0]!.id).toMatch(/^\d+$/);
+    expect((assistantEvents[0]!.data as { eventSeq?: number }).eventSeq).toBe(
+      Number(assistantEvents[0]!.id),
+    );
+
+    const resultEvent = events.find((event) => event.event === "result");
+    expect(resultEvent?.id).toMatch(/^\d+$/);
+    expect((resultEvent?.data as { eventSeq?: number }).eventSeq).toBe(Number(resultEvent?.id));
   });
 
-  it("fresh connection: stream.delta events do NOT carry an SSE id", async () => {
-    // MockModel does not emit stream.delta; just verify result has no id
+  it("fresh connection: terminal result carries its persisted terminal_result id", async () => {
     const { agent } = makeAgent([textResponse("hi")]);
     const app = createServer({ agents: { demo: agent } });
 
     const text = await runQuery(app, "sse-id-delta-sess");
     const events = parseSseEvents(text);
 
-    // result event should have no id
     const resultEvents = events.filter((e) => e.event === "result");
     expect(resultEvents.length).toBeGreaterThan(0);
-    expect(resultEvents[0]!.id).toBeUndefined();
+    expect(resultEvents[0]!.id).toMatch(/^\d+$/);
   });
 
   it("fresh connection: SSE ids are monotonically increasing for persisted events", async () => {
@@ -921,7 +967,7 @@ describe("SSE stream resumability (Last-Event-ID)", () => {
     expect((resultEvent?.data as { subtype: string }).subtype).toBe("success");
   });
 
-  it("reconnect with Last-Event-ID equal to last stored seq: receives only result (nothing to replay)", async () => {
+  it("reconnect with Last-Event-ID equal to last stored seq emits no duplicate events", async () => {
     const store = new InMemoryStore();
     const { agent } = makeAgent([textResponse("short response")], store);
     const app = createServer({ agents: { demo: agent } });
@@ -939,13 +985,24 @@ describe("SSE stream resumability (Last-Event-ID)", () => {
     });
     const reconnectEvents = parseSseEvents(reconnectText);
 
-    // Should only receive the synthesized result (no stored events to replay)
-    const assistantEvents = reconnectEvents.filter((e) => e.event === "assistant");
-    expect(assistantEvents.length).toBe(0); // nothing to replay
+    expect(reconnectEvents).toEqual([]);
+  });
 
-    const resultEvent = reconnectEvents.find((e) => e.event === "result");
-    expect(resultEvent).toBeDefined();
-    expect((resultEvent?.data as { subtype: string }).subtype).toBe("success");
+  it("replays byte-equivalent persisted assistant and terminal events", async () => {
+    const store = new InMemoryStore();
+    const { agent } = makeAgent([textResponse("exact replay")], store);
+    const app = createServer({ agents: { demo: agent } });
+    const fresh = parseSseEvents(await runQuery(app, "exact-replay-sess"));
+    const freshPersisted = fresh.filter((event) =>
+      event.event === "assistant" || event.event === "result"
+    );
+    const firstVisibleSeq = Number(freshPersisted[0]?.id);
+
+    const replayed = parseSseEvents(await runQuery(app, "exact-replay-sess", "ignored", {
+      "last-event-id": String(firstVisibleSeq - 1),
+    }));
+
+    expect(replayed).toEqual(freshPersisted);
   });
 
   it("replay: replayed events carry the correct stored seq as their SSE id", async () => {

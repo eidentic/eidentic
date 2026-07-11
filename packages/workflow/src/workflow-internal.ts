@@ -117,12 +117,18 @@ export async function executeBody<I, O>(
   name: string,
   body: Step<I, O>,
   input: I,
-  opts?: { signal?: AbortSignal; onEvent?: (e: WorkflowEvent) => void; cache?: ReplayCache },
+  opts?: {
+    signal?: AbortSignal;
+    onEvent?: (e: WorkflowEvent) => void;
+    cache?: ReplayCache;
+    beforeEffect?: () => Promise<void>;
+  },
 ): Promise<BodyExecution<O>> {
   const traces: StepTrace[] = [];
   const cache = opts?.cache ?? emptyReplayCache();
-  const ctx = buildRootCtx(opts?.signal, traces, opts?.onEvent, cache);
+  const ctx = buildRootCtx(opts?.signal, traces, opts?.onEvent, cache, opts?.beforeEffect);
   try {
+    await opts?.beforeEffect?.();
     const output = await body(input, ctx);
     return { kind: "completed", output, trace: traces };
   } catch (err: unknown) {
@@ -150,12 +156,14 @@ export function buildRootCtx(
   traces: StepTrace[],
   onEvent: ((e: WorkflowEvent) => void) | undefined,
   cache: ReplayCache,
+  beforeEffect?: () => Promise<void>,
 ): CtxWithCollector {
   const ctx: CtxWithCollector = {
     signal,
     path: [],
     _traces: traces,
     _replay: new ReplayController(cache),
+    ...(beforeEffect !== undefined ? { _beforeEffect: beforeEffect } : {}),
     emit(event: WorkflowEvent): void {
       onEvent?.(event);
     },
@@ -176,6 +184,7 @@ export function buildChildCtx(parent: StepContext, name: string): CtxWithCollect
     path: [...parent.path, name],
     _traces: (parent as CtxWithCollector)._traces,
     _replay: (parent as CtxWithCollector)._replay,
+    _beforeEffect: (parent as CtxWithCollector)._beforeEffect,
     emit: parent.emit,
     step: undefined,
     all: undefined,

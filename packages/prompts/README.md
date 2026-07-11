@@ -95,8 +95,8 @@ const events = await registry.history("support-agent-system");
 | Store | Usage |
 |---|---|
 | In-memory (default) | `createPromptRegistry()` — process lifetime only, ideal for tests |
-| File store | `createPromptRegistry(filePromptStore("./prompts.json"))` — crash-safe atomic writes |
-| Custom | Implement `PromptStore` (`load() / save(state)`) for any backend |
+| File store | `createPromptRegistry(filePromptStore("./prompts.json"))` — crash-safe, locked transactions |
+| Custom | Implement `PromptStore` (`load() / save(state)`, optionally atomic `transact()`) |
 
 ## API reference
 
@@ -118,3 +118,6 @@ Substitutes `{{varName}}` placeholders. Throws `PromptRenderError` listing all m
 ### `filePromptStore(path)`
 
 Crash-safe JSON file store. Each write is a full snapshot atomically `rename`d over the target.
+Registry mutations run under an owner-only cross-process lock, so independent registry instances
+cannot allocate the same version or overwrite a concurrent tag change. The store uses private file
+modes and refuses symlink leaves and caller-writable symlink parent components.

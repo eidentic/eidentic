@@ -25,6 +25,7 @@ describe("Agent graph tools", () => {
       { content: [textBlock("Baran's favorite language is TypeScript.")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
     const agent = new Agent({
+      permissions: { mode: "bypass" },
       id: "ga", instructions: "Use the knowledge graph.", model, store, memory,
       now: () => "t", newId: ((n) => () => `g${n++}`)(0),
     });
@@ -45,7 +46,7 @@ describe("Agent graph tools", () => {
       { content: [toolUseBlock("c1", "graph_assert", { subject: "x", predicate: "y", object: "z" })], usage: { inputTokens: 1, outputTokens: 1 } },
       { content: [textBlock("done")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
-    const agent = new Agent({ id: "ng", instructions: "x", model, store, memory, now: () => "t", newId: ((n) => () => `n${n++}`)(0) });
+    const agent = new Agent({ permissions: { mode: "bypass" }, id: "ng", instructions: "x", model, store, memory, now: () => "t", newId: ((n) => () => `n${n++}`)(0) });
     const events = await run(agent, "hi", "s2", "baran");
     // graph_assert must be UNREGISTERED: the tool.result must report "unknown tool"
     const toolResults = events.filter((e) => e.type === "tool.result");
@@ -68,6 +69,7 @@ describe("Agent self-editing memory", () => {
       { content: [textBlock("Saved.")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
     const agent = new Agent({
+      permissions: { mode: "bypass" },
       id: "sa", instructions: "Remember durable facts.", model, store, memory,
       now: () => "t", newId: ((n) => () => `id${n++}`)(0),
     });
@@ -87,15 +89,17 @@ describe("Agent self-editing memory", () => {
       { content: [toolUseBlock("c1", "memory_append", { label: "human", text: "Name: Baran\n" })], usage: { inputTokens: 1, outputTokens: 1 } },
       { content: [textBlock("Saved.")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
-    const agent1 = new Agent({ id: "sa", instructions: "Remember.", model: model1, store, memory, now: () => "t", newId: ((n) => () => `a${n++}`)(0) });
+    const agent1 = new Agent({ permissions: { mode: "bypass" }, id: "sa", instructions: "Remember.", model: model1, store, memory, now: () => "t", newId: ((n) => () => `a${n++}`)(0) });
     await run(agent1, "My name is Baran", "s1", "baran");
 
     const model2 = new MockModel([{ content: [textBlock("Hi Baran.")], usage: { inputTokens: 1, outputTokens: 1 } }]);
-    const agent2 = new Agent({ id: "sa", instructions: "Greet.", model: model2, store, memory, now: () => "t", newId: ((n) => () => `b${n++}`)(0) });
+    const agent2 = new Agent({ permissions: { mode: "bypass" }, id: "sa", instructions: "Greet.", model: model2, store, memory, now: () => "t", newId: ((n) => () => `b${n++}`)(0) });
     await run(agent2, "hello again", "s2", "baran");
 
-    const system = model2.calls[0]!.messages[0]!.content as string;
-    expect(system).toContain("Name: Baran");
-    expect(system).toContain("<human v=1");
+    const context = String(model2.calls[0]!.messages.find((message) =>
+      message.role === "user" && String(message.content).includes("<memory>"),
+    )?.content);
+    expect(context).toContain("Name: Baran");
+    expect(context).toContain('<block label="human" version="1"');
   });
 });

@@ -153,6 +153,7 @@ note motivating vendor-neutrality.
 ## 11.4 API sketch
 
 ```ts
+// docs-check-skip: conceptual observability and evaluation API sketch
 new Agent({
   policy: {
     maxTurns: 16, maxCostUsd: 0.5, maxWallClock: '60s',

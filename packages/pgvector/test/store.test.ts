@@ -124,4 +124,17 @@ describe("PgVectorStore legacy single-column PK migration", () => {
     const { rows } = await client.query("SELECT id FROM memories");
     expect(rows).toHaveLength(1);
   });
+
+  it("quotes a pre-existing constraint identifier during migration", async () => {
+    const client = makePglite();
+    await client.query("CREATE EXTENSION IF NOT EXISTS vector;");
+    await client.query(
+      `CREATE TABLE memories (` +
+        `id text NOT NULL, scope_key text NOT NULL, text text NOT NULL, embedding vector(3), ` +
+        `CONSTRAINT "legacy""; DROP TABLE memories; --" PRIMARY KEY (id))`,
+    );
+    await PgVectorStore.create({ client, table: "memories", dim: 3 });
+    const { rows } = await client.query("SELECT to_regclass('memories') AS name");
+    expect((rows[0] as { name: string }).name).toBe("memories");
+  });
 });

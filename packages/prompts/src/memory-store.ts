@@ -7,13 +7,31 @@ import type { PromptStore, PromptStoreState } from "./types.js";
  */
 export function memoryPromptStore(): PromptStore {
   let state: PromptStoreState | undefined;
+  let chain: Promise<void> = Promise.resolve();
   return {
     async load() {
+      await chain;
       return state;
     },
-    async save(s) {
+    save(s) {
       // Deep-clone so callers can't mutate the stored copy through references.
-      state = JSON.parse(JSON.stringify(s)) as PromptStoreState;
+      const operation = chain.then(() => {
+        state = JSON.parse(JSON.stringify(s)) as PromptStoreState;
+      });
+      chain = operation.catch(() => undefined);
+      return operation;
+    },
+    transact<T>(mutator: (state: PromptStoreState) => T | Promise<T>): Promise<T> {
+      const operation = chain.then(async () => {
+        const working = state
+          ? JSON.parse(JSON.stringify(state)) as PromptStoreState
+          : { versions: [], tags: {}, history: [] };
+        const result = await mutator(working);
+        state = JSON.parse(JSON.stringify(working)) as PromptStoreState;
+        return result;
+      });
+      chain = operation.then(() => undefined, () => undefined);
+      return operation;
     },
   };
 }

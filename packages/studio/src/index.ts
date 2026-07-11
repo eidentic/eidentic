@@ -7,12 +7,13 @@
  * have full read/write access to agent memory and session data.
  */
 
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { serveStatic } from "@hono/node-server/serve-static";
+import { getConnInfo } from "@hono/node-server/conninfo";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import type { Agent } from "@eidentic/core";
-import type { AuthPort, AuthRequest, Scope, StoredEvent, PriceTable } from "@eidentic/types";
+import type { AuthPort, AuthPrincipal, AuthRequest, Scope, StoredEvent, PriceTable } from "@eidentic/types";
 import type { StepTrace, WorkflowResult } from "@eidentic/workflow";
 import { createWorkflowRunRegistry } from "@eidentic/workflow";
 import { createServer, NoAuth, ApiKeyAuth, serveNode } from "@eidentic/server";
@@ -68,7 +69,8 @@ export interface StudioOptions {
    */
   skillBanks?: Record<string, SkillBankLike>;
   /**
-   * Authentication adapter. Defaults to NoAuth.
+   * Authentication adapter for agent run routes. It never grants Studio
+   * management access unless `allowRunAuthAsAdmin` is explicitly enabled.
    *
    * IMPORTANT: The studio exposes agent memory read/write, session traces,
    * and fact graph data. In production or any networked environment, always
@@ -76,6 +78,33 @@ export interface StudioOptions {
    * on an internet-reachable address.
    */
   auth?: AuthPort;
+  /**
+   * Authentication adapter specifically for Studio's administrative API.
+   * Prefer this over `auth` when run-route users must not automatically become
+   * Studio administrators. Defaults to local-only NoAuth.
+   */
+  adminAuth?: AuthPort;
+  /**
+   * Restore the legacy behavior where `auth` also protects the Studio admin API.
+   *
+   * @deprecated Run users and Studio administrators are separate trust domains.
+   * Configure `adminAuth` instead.
+   * @default false
+   */
+  allowRunAuthAsAdmin?: boolean;
+  /** Fine-grained admin authorization evaluated after adminAuth succeeds. */
+  authorizeAdmin?: (
+    principal: AuthPrincipal,
+    req: Request,
+  ) => boolean | Promise<boolean>;
+  /**
+   * Permit NoAuth requests whose URL host is not loopback.
+   *
+   * @deprecated This disables Studio's local-only safety rail. Configure
+   * adminAuth instead whenever Studio is reachable over a network.
+   * @default false
+   */
+  allowRemoteNoAuth?: boolean;
   /** Base path for the management API. Default "/api". */
   basePath?: string;
   /**
@@ -103,11 +132,18 @@ function assertNoAuthAllowed(auth: AuthPort): void {
   );
 }
 
+/** Explicitly disables run-route access when only an admin credential exists. */
+const DenyRunAuth: AuthPort = {
+  authenticate(): null {
+    return null;
+  },
+};
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-async function runAuth(auth: AuthPort, req: Request): Promise<boolean> {
+async function runAuth(auth: AuthPort, req: Request): Promise<AuthPrincipal | null> {
   const headers: Record<string, string | undefined> = {};
   req.headers.forEach((value, key) => {
     headers[key.toLowerCase()] = value;
@@ -118,8 +154,61 @@ async function runAuth(auth: AuthPort, req: Request): Promise<boolean> {
     path: url.pathname,
     headers,
   };
-  const principal = await auth.authenticate(authReq);
-  return principal !== null;
+  return auth.authenticate(authReq);
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "").split("%", 1)[0]!;
+  if (host.startsWith("::ffff:")) return isLoopbackHostname(host.slice("::ffff:".length));
+  if (host === "localhost" || host === "::1" || host === "0:0:0:0:0:0:0:1") return true;
+  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  return match !== null && Number(match[1]) === 127 && match.slice(1).every((part) => Number(part) <= 255);
+}
+
+function isLocalStudioRequest(c: Context): boolean {
+  try {
+    // On the Node adapter, use the actual TCP peer. The HTTP Host header is attacker-controlled
+    // and must never be accepted as proof that a request originated from loopback.
+    const address = getConnInfo(c).remote.address;
+    if (typeof address === "string") return isLoopbackHostname(address);
+  } catch {
+    // `app.request()` and non-Node adapters do not expose a socket. Keep programmatic local-dev
+    // compatibility; production NoAuth is separately rejected by assertNoAuthAllowed().
+  }
+  return isLoopbackHostname(new URL(c.req.raw.url).hostname);
+}
+
+const SENSITIVE_FIELD = /^(?:(?:x[-_])?api[-_]?key|authorization|proxy-authorization|cookie|set-cookie|access[-_]?token|refresh[-_]?token|id[-_]?token|token|secret|client[-_]?secret|private[-_]?key|password|passwd|credential)$/i;
+const SENSITIVE_QUERY = /([?&](?:api[-_]?key|key|access[-_]?token|refresh[-_]?token|id[-_]?token|token|auth|authorization|secret|password|credential|sig|signature|code)=)[^&#\s"']*/gi;
+
+function redactStudioString(value: string): string {
+  return value
+    .replace(/\b(Bearer\s+)[^\s,"']+/gi, "$1[REDACTED]")
+    .replace(/\b(Basic\s+)[a-z0-9+/_=-]+/gi, "$1[REDACTED]")
+    .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^/@\s]+@/gi, "$1[REDACTED]@")
+    .replace(/\b(sk-[a-z0-9_-]{16,})\b/gi, "[REDACTED]")
+    .replace(/\b((?:api[-_]?key|token|password|secret)\s*[:=]\s*)[^\s,&?#"']+/gi, "$1[REDACTED]")
+    .replace(SENSITIVE_QUERY, "$1[REDACTED]");
+}
+
+/** Redact credentials before management data crosses the Studio API boundary. */
+function redactStudioData(value: unknown, seen = new WeakMap<object, unknown>()): unknown {
+  if (typeof value === "string") return redactStudioString(value);
+  if (value === null || typeof value !== "object") return value;
+  const existing = seen.get(value);
+  if (existing !== undefined) return existing;
+  if (Array.isArray(value)) {
+    const out: unknown[] = [];
+    seen.set(value, out);
+    for (const item of value) out.push(redactStudioData(item, seen));
+    return out;
+  }
+  const out: Record<string, unknown> = {};
+  seen.set(value, out);
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    out[key] = SENSITIVE_FIELD.test(key) ? "[REDACTED]" : redactStudioData(item, seen);
+  }
+  return out;
 }
 
 function hasGraph(store: unknown): store is {
@@ -230,8 +319,10 @@ function usdForUsage(
  * Returns a StudioHandle with `app` (the Hono instance) and `recordWorkflow`.
  */
 export function createStudioApi(opts: StudioOptions): StudioHandle {
-  const auth = opts.auth ?? NoAuth;
-  assertNoAuthAllowed(auth);
+  const adminAuth = opts.adminAuth
+    ?? (opts.allowRunAuthAsAdmin === true ? opts.auth : undefined)
+    ?? NoAuth;
+  assertNoAuthAllowed(adminAuth);
   const base = (opts.basePath ?? "/api").replace(/\/$/, "");
   const app = new Hono({ strict: false });
 
@@ -248,8 +339,24 @@ export function createStudioApi(opts: StudioOptions): StudioHandle {
     if (c.req.path === `${base}/health`) {
       return next();
     }
-    const ok = await runAuth(auth, c.req.raw);
-    if (!ok) return c.json({ error: "Unauthorized" }, 401);
+    if (
+      adminAuth === NoAuth &&
+      opts.allowRemoteNoAuth !== true &&
+      !isLocalStudioRequest(c)
+    ) {
+      return c.json({ error: "Studio NoAuth is local-only" }, 403);
+    }
+    const principal = await runAuth(adminAuth, c.req.raw);
+    if (principal === null) return c.json({ error: "Unauthorized" }, 401);
+    if (opts.authorizeAdmin !== undefined) {
+      let allowed = false;
+      try {
+        allowed = await opts.authorizeAdmin(principal, c.req.raw);
+      } catch {
+        allowed = false;
+      }
+      if (!allowed) return c.json({ error: "Forbidden" }, 403);
+    }
     return next();
   });
 
@@ -281,7 +388,7 @@ export function createStudioApi(opts: StudioOptions): StudioHandle {
     const hasMemory = typeof (store as unknown as Record<string, unknown>)["getBlocks"] === "function";
     const hasSkillsFlag = opts.skillBanks?.[id] !== undefined || agent.skillCatalog().length > 0;
     const hasGraphFeature = hasGraph(store);
-    return c.json({
+    return c.json(redactStudioData({
       id,
       instructions: agent.instructions,
       model: agent.modelId,
@@ -289,7 +396,7 @@ export function createStudioApi(opts: StudioOptions): StudioHandle {
       hasMemory,
       hasSkills: hasSkillsFlag,
       hasGraph: hasGraphFeature,
-    });
+    }));
   });
 
   // --- Sessions list (with per-session usage + usd) ---
@@ -316,7 +423,7 @@ export function createStudioApi(opts: StudioOptions): StudioHandle {
         }
       }),
     );
-    return c.json(enriched);
+    return c.json(redactStudioData(enriched));
   });
 
   // --- Session events (trace) ---
@@ -326,7 +433,7 @@ export function createStudioApi(opts: StudioOptions): StudioHandle {
     if (!agent) return c.json({ error: `Unknown agent: ${id}` }, 404);
     const sid = c.req.param("sid");
     const events = await agent.store.readEvents(sid);
-    return c.json({ events });
+    return c.json(redactStudioData({ events }));
   });
 
   // --- Per-agent cost aggregate ---
@@ -388,7 +495,7 @@ export function createStudioApi(opts: StudioOptions): StudioHandle {
       ? { kind: "user", agentId: id, userId }
       : { kind: "agent", agentId: id };
     const blocks = await agent.store.listBlocks(scope);
-    return c.json(blocks);
+    return c.json(redactStudioData(blocks));
   });
 
   // --- Block upsert (CAS) ---
@@ -425,10 +532,10 @@ export function createStudioApi(opts: StudioOptions): StudioHandle {
         { label, value },
         typeof expectVersion === "number" ? expectVersion : undefined,
       );
-      return c.json(block);
+      return c.json(redactStudioData(block));
     } catch (err: unknown) {
       if (err instanceof Error && /conflict/i.test(err.message)) {
-        return c.json({ error: "conflict", message: err.message }, 409);
+        return c.json({ error: "conflict", message: redactStudioString(err.message) }, 409);
       }
       throw err;
     }
@@ -448,7 +555,7 @@ export function createStudioApi(opts: StudioOptions): StudioHandle {
       return c.json([]);
     }
     const facts = await agent.store.queryFacts({ scope, ...(subject ? { subject } : {}) });
-    return c.json(facts);
+    return c.json(redactStudioData(facts));
   });
 
   // --- Memories search ---
@@ -462,7 +569,7 @@ export function createStudioApi(opts: StudioOptions): StudioHandle {
       ? { kind: "user", agentId: id, userId }
       : { kind: "agent", agentId: id };
     const snippets = await agent.store.searchMemory(scope, q, 20);
-    return c.json(snippets);
+    return c.json(redactStudioData(snippets));
   });
 
   // --- Skills list (unified: prompt catalog + executable bank) ---
@@ -487,7 +594,7 @@ export function createStudioApi(opts: StudioOptions): StudioHandle {
         author: lock["author"] as string | undefined,
       };
     });
-    return c.json([...promptSkills, ...bankSkills]);
+    return c.json(redactStudioData([...promptSkills, ...bankSkills]));
   });
 
   // --- Skills approve ---
@@ -513,7 +620,7 @@ export function createStudioApi(opts: StudioOptions): StudioHandle {
       durationMs: r.durationMs,
       stepCount: r.stepCount,
     }));
-    return c.json(summaries);
+    return c.json(redactStudioData(summaries));
   });
 
   // --- Workflow runs — detail ---
@@ -521,7 +628,7 @@ export function createStudioApi(opts: StudioOptions): StudioHandle {
     const wid = c.req.param("wid");
     const run = wfRegistry.get(wid);
     if (!run) return c.json({ error: `Unknown workflow run: ${wid}` }, 404);
-    return c.json(run);
+    return c.json(redactStudioData(run));
   });
 
   // --- Workflow runs — HTTP ingestion (POST) ---
@@ -579,14 +686,27 @@ export function createStudioApi(opts: StudioOptions): StudioHandle {
  * Returns a StudioHandle (includes `recordWorkflow` and `app`).
  */
 export function createStudio(opts: StudioOptions): StudioHandle {
+  // Run-route and Studio-admin credentials are separate trust domains. Neither
+  // credential implicitly grants access to the other surface.
+  const runAuth = opts.auth ?? (opts.adminAuth !== undefined ? DenyRunAuth : NoAuth);
   const run = createServer({
     agents: opts.agents,
-    auth: opts.auth,
+    auth: runAuth,
     exposeEvents: true,
   });
   const studioHandle = createStudioApi(opts);
 
   const combined = new Hono({ strict: false });
+  combined.use("/v1/*", async (c, next) => {
+    if (
+      runAuth === NoAuth &&
+      opts.allowRemoteNoAuth !== true &&
+      !isLocalStudioRequest(c)
+    ) {
+      return c.json({ error: "Studio NoAuth is local-only" }, 403);
+    }
+    return next();
+  });
   combined.route("/", run);
   combined.route("/", studioHandle);
 
@@ -611,8 +731,19 @@ export interface StudioServeOptions extends StudioOptions {}
  */
 export async function serveStudio(
   opts: StudioServeOptions,
-  { port = 3535 }: { port?: number } = {},
+  {
+    port = 3535,
+    hostname = "127.0.0.1",
+  }: { port?: number; hostname?: string } = {},
 ): Promise<import("@eidentic/server").ServeNodeHandle> {
+  const adminAuth = opts.adminAuth
+    ?? (opts.allowRunAuthAsAdmin === true ? opts.auth : undefined)
+    ?? NoAuth;
+  if (adminAuth === NoAuth && opts.allowRemoteNoAuth !== true && !isLoopbackHostname(hostname)) {
+    throw new Error(
+      "Studio NoAuth may only bind to a loopback hostname. Configure adminAuth or explicitly set allowRemoteNoAuth: true.",
+    );
+  }
   // Resolve ui/dist relative to this module file.
   // import.meta.url works in ESM; in CJS contexts (rare for a dev-tool server)
   // we fall back to __dirname if it exists in scope.
@@ -649,5 +780,7 @@ export async function serveStudio(
   // SPA fallback: any unmatched path → index.html
   handle.get("/*", serveStatic({ root: uiDist, path: "/index.html" }));
 
-  return serveNode(handle, { port });
+  // Reuse the canonical Node adapter so Studio retains the same graceful-drain
+  // semantics as every other Eidentic server.
+  return serveNode(handle, { port, hostname });
 }

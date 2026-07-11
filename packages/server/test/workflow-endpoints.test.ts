@@ -332,23 +332,39 @@ describe("workflow ownership — cross-tenant isolation", () => {
     expect(listB.map((r) => r.id)).not.toContain(idA);
   });
 
-  it("NoAuth (no-owner) records are accessible to any authenticated principal (back-compat)", async () => {
+  it("ownerless records are hidden from authenticated principals by default", async () => {
     const app = makeAuthApp();
     // Record without owner (legacy / no-auth mode)
     const id = app.handle.recordWorkflow("legacy-wf", makeResult("legacy", []));
 
-    // Both tenants can see it in list
+    // Neither tenant can claim an ownerless legacy record without explicit migration opt-in.
     const resA = await app.request("/v1/workflows", {
       headers: { authorization: "Bearer key-tenant-a" },
     });
     const listA = await resA.json() as WorkflowRunSummary[];
-    expect(listA.some((r) => r.id === id)).toBe(true);
+    expect(listA.some((r) => r.id === id)).toBe(false);
 
     const resB = await app.request("/v1/workflows", {
       headers: { authorization: "Bearer key-tenant-b" },
     });
     const listB = await resB.json() as WorkflowRunSummary[];
-    expect(listB.some((r) => r.id === id)).toBe(true);
+    expect(listB.some((r) => r.id === id)).toBe(false);
+  });
+
+  it("ownerless records remain available behind the explicit compatibility opt-in", async () => {
+    const app = createServer({
+      agents: { demo: makeAgent() },
+      auth: ApiKeyAuth({ "key-a": { userId: "user-a" } }),
+      allowLegacyUnownedRecords: true,
+    });
+    const id = app.handle.recordWorkflow("legacy-wf", makeResult("legacy", []));
+
+    const res = await app.request("/v1/workflows", {
+      headers: { authorization: "Bearer key-a" },
+    });
+    expect(res.status).toBe(200);
+    const list = await res.json() as WorkflowRunSummary[];
+    expect(list.some((r) => r.id === id)).toBe(true);
   });
 
   it("NoAuth single-tenant mode sees all runs regardless of owner field", async () => {

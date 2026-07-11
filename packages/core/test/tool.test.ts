@@ -1,7 +1,9 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { z } from "zod";
-import { createTool, ToolRegistry } from "../src/tool.js";
+import { createTool, idempotencyLedgerKey, ToolRegistry } from "../src/tool.js";
 import { InMemoryStore } from "@eidentic/types/testing";
+import { canonicalJson } from "@eidentic/types";
+import { sha256Hex } from "../src/sha256.js";
 
 const echo = createTool({
   id: "echo",
@@ -88,7 +90,7 @@ describe("ToolRegistry durable idempotency", () => {
     const [r] = await reg.dispatch([{ callId: "c1", name: "write", input: { to: "a" } }]);
     expect(runs).toBe(1);
     expect(r!.output).toEqual({ sent: 1 });
-    const rec = await durable.getIdempotency("write:a");
+    const rec = await durable.getIdempotency(idempotencyLedgerKey(undefined, "write:a"));
     expect(rec?.status).toBe("applied");
     expect(rec?.result).toEqual({ sent: 1 });
   });
@@ -108,6 +110,33 @@ describe("ToolRegistry durable idempotency", () => {
     expect(runs).toBe(1); // NOT re-run
     expect(r2!.output).toEqual({ sent: 1 }); // cached result
     expect(r2!.meta?.durableSkipped).toBe(true);
+  });
+
+  it("atomically grants a durable key to only one concurrent dispatcher", async () => {
+    const durable = await makeDurable();
+    let runs = 0;
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    let started!: () => void;
+    const didStart = new Promise<void>((resolve) => { started = resolve; });
+    const writeTool = createTool({
+      id: "write", description: "writes", sideEffect: "destructive",
+      inputSchema: z.object({ to: z.string() }),
+      idempotencyKey: (i) => `write:${i.to}`,
+      execute: async () => { runs++; started(); await blocked; return { sent: true }; },
+    });
+    const first = new ToolRegistry([writeTool], { durable, sessionId: "shared" });
+    const second = new ToolRegistry([writeTool], { durable, sessionId: "shared" });
+
+    const firstRun = first.dispatch([{ callId: "c1", name: "write", input: { to: "a" } }]);
+    await didStart;
+    const [loser] = await second.dispatch([{ callId: "c2", name: "write", input: { to: "a" } }]);
+    expect(loser).toMatchObject({ isError: true, meta: { durablePending: true, durableSkipped: true } });
+    expect(runs).toBe(1);
+    release();
+    const [winner] = await firstRun;
+    expect(winner).toMatchObject({ isError: false, output: { sent: true } });
+    expect(runs).toBe(1);
   });
 
   it("idempotent tools (not just destructive) are protected by key", async () => {
@@ -227,7 +256,7 @@ describe("ToolRegistry durable idempotency", () => {
     });
   });
 
-  it("intent-without-completion (errored tool) does NOT mark applied → re-runs next time (v1 policy)", async () => {
+  it("intent-without-completion fails closed and never re-runs implicitly", async () => {
     const durable = await makeDurable();
     let runs = 0;
     const flaky = createTool({
@@ -239,19 +268,17 @@ describe("ToolRegistry durable idempotency", () => {
     const reg = new ToolRegistry([flaky], { durable });
     const [r1] = await reg.dispatch([{ callId: "c1", name: "flaky", input: { to: "a" } }]);
     expect(r1!.isError).toBe(true);
-    expect((await durable.getIdempotency("flaky:a"))?.status).toBe("intent"); // intent only, not applied
+    expect((await durable.getIdempotency(idempotencyLedgerKey(undefined, "flaky:a")))?.status).toBe("intent");
     const [r2] = await reg.dispatch([{ callId: "c2", name: "flaky", input: { to: "a" } }]);
-    expect(runs).toBe(2); // re-ran
-    expect(r2!.output).toEqual({ ok: 2 });
-    expect((await durable.getIdempotency("flaky:a"))?.status).toBe("applied");
+    expect(runs).toBe(1);
+    expect(r2).toMatchObject({ isError: true, meta: { durablePending: true, durableSkipped: true } });
+    expect((r2!.output as { error: string }).error).toMatch(/reconciliation/);
+    expect((await durable.getIdempotency(idempotencyLedgerKey(undefined, "flaky:a")))?.status).toBe("intent");
   });
 
   // ─── Finding #7: idempotency key-format migration gap ─────────────────────────
 
-  it("migration compat (#7): bare-key ledger entry (pre-session-prefix) is honoured on resume", async () => {
-    // Simulates a ledger written by a version that stored bare `toolKey` without session prefix.
-    // After upgrade the prefixed key is missing; the registry must fall back to the bare key
-    // so that a previously-settled destructive tool is NOT re-executed.
+  it("migration safety (#7): ambiguous bare-key records are never trusted across sessions", async () => {
     const durable = await makeDurable();
     let runs = 0;
     const writeTool = createTool({
@@ -261,31 +288,17 @@ describe("ToolRegistry durable idempotency", () => {
       execute: async ({ input }) => { runs++; return { sent: input.to, n: runs }; },
     });
 
-    // Seed a bare-key entry (as the old version would have written): registry with NO sessionId.
-    const seedReg = new ToolRegistry([writeTool], { durable }); // no sessionId → bare key
-    const [seedResult] = await seedReg.dispatch([{ callId: "c0", name: "write", input: { to: "migrate@test.com" } }]);
-    expect(seedResult!.isError).toBe(false);
-    expect(runs).toBe(1); // first (seed) execution
-
-    // Verify the bare key is in the ledger.
-    const bareEntry = await durable.getIdempotency("write:migrate@test.com");
-    expect(bareEntry?.status).toBe("applied");
-    // The prefixed key must NOT exist yet.
-    expect(await durable.getIdempotency("sess-migrate:write:migrate@test.com")).toBeNull();
-
-    // Reset run counter — now a session-prefixed registry must NOT re-execute.
-    runs = 0;
+    await durable.recordIntent("write:migrate@test.com", "legacy-ambiguous");
+    await durable.recordCompletion("write:migrate@test.com", { sent: "someone-else" });
     const sessionReg = new ToolRegistry([writeTool], { durable, sessionId: "sess-migrate" });
     const [r] = await sessionReg.dispatch([{ callId: "c1", name: "write", input: { to: "migrate@test.com" } }]);
 
-    expect(runs).toBe(0); // NOT re-executed; bare-key fallback honoured
+    expect(runs).toBe(1);
     expect(r!.isError).toBe(false);
-    expect(r!.meta?.durableSkipped).toBe(true);
-    expect((r!.output as { sent: string }).sent).toBe("migrate@test.com");
+    expect(await durable.getIdempotency(idempotencyLedgerKey("sess-migrate", "write:migrate@test.com"))).toMatchObject({ status: "applied", sessionId: "sess-migrate" });
   });
 
-  it("migration compat (#7): bare-key fallback only applies when the prefixed key is absent", async () => {
-    // If the prefixed key DOES exist (normal post-upgrade operation), the bare key is not consulted.
+  it("migration compat (#7): previous prefixed records require exact session ownership metadata", async () => {
     const durable = await makeDurable();
     let runs = 0;
     const writeTool = createTool({
@@ -295,16 +308,18 @@ describe("ToolRegistry durable idempotency", () => {
       execute: async ({ input }) => { runs++; return { sent: input.to, n: runs }; },
     });
     const sessionId = "sess-new";
+    const input = { to: "new@test.com" };
+    const argsHash = await sha256Hex(canonicalJson(input));
+    await durable.recordIntent(`${sessionId}:write:new@test.com`, argsHash, { sessionId });
+    await durable.recordCompletion(`${sessionId}:write:new@test.com`, { sent: input.to, n: 7 }, { sessionId });
     const reg = new ToolRegistry([writeTool], { durable, sessionId });
+    const [result] = await reg.dispatch([{ callId: "c2", name: "write", input }]);
+    expect(runs).toBe(0);
+    expect(result).toMatchObject({ isError: false, output: { sent: input.to, n: 7 }, meta: { durableSkipped: true } });
+  });
 
-    // Normal first run: writes with prefixed key.
-    await reg.dispatch([{ callId: "c1", name: "write", input: { to: "new@test.com" } }]);
-    expect(runs).toBe(1);
-    expect(await durable.getIdempotency(`${sessionId}:write:new@test.com`)).toBeTruthy();
-
-    // Second run: prefixed key exists → skip (no fallback needed, zero bare-key lookup).
-    const [r2] = await reg.dispatch([{ callId: "c2", name: "write", input: { to: "new@test.com" } }]);
-    expect(runs).toBe(1); // not re-executed
-    expect(r2!.meta?.durableSkipped).toBe(true);
+  it("uses an injective versioned key for delimiter-bearing tuple components", () => {
+    expect(idempotencyLedgerKey("a", "b:c")).not.toBe(idempotencyLedgerKey("a:b", "c"));
+    expect(idempotencyLedgerKey("a", "b:c")).toBe('eidentic.idem.v2:["a","b:c"]');
   });
 });

@@ -104,6 +104,7 @@ deliberately minimal, well-tested (§18.4 crash-injection) in-house default.
 ## 9.7 Resume & fork
 
 ```ts
+// docs-check-skip: conceptual resume and future fork API sketch
 // Resume a crashed/suspended run (same cwd/scope):
 for await (const ev of agent.resume(sessionId)) { … }
 

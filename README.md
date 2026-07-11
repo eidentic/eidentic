@@ -23,6 +23,7 @@ import { anthropic } from "@ai-sdk/anthropic";
 
 const agent = new Agent({
   id: "support",
+  instructions: "You are a helpful support assistant.",
   model: new AIModel(anthropic("claude-sonnet-4-5")),
   store: new SqliteStore("./eidentic.sqlite"),
 });
@@ -127,6 +128,7 @@ export const runtime = "nodejs"; // native/edge-safe store; not the edge runtime
 
 const agent = new Agent({
   id: "support",
+  instructions: "You are a helpful support assistant.",
   model: new AIModel(anthropic("claude-sonnet-4-5")),
   store: new LibsqlStore("file:eidentic.db"),
 });
@@ -270,7 +272,7 @@ DEBUG=eidentic:* pnpm --filter eidentic-examples hello
 ## Package layout
 
 The `eidentic` umbrella package bundles **core, types, model, sqlite, and memory** — one
-install for the common case. All 32 packages are in this monorepo; optional adapters are
+install for the common case. All 33 published packages are in this monorepo; optional adapters are
 separate installs so you only pay for what you use. This keeps cold-start footprint small
 and avoids pulling in native addons you don't need.
 

@@ -36,14 +36,6 @@
     "@eidentic/types": "workspace:*",
     "ai": "^7.0.2"
   },
-  "peerDependencies": {
-    "ai-sdk-ollama": "^4.0.0"
-  },
-  "peerDependenciesMeta": {
-    "ai-sdk-ollama": {
-      "optional": true
-    }
-  },
   "devDependencies": {
     "@ai-sdk/anthropic": "^4.0.0",
     "tsx": "^4.19.0"

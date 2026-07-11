@@ -1,7 +1,21 @@
 import { describe, it, expect } from "vitest";
 import { z } from "zod";
 import { createTool, ToolRegistry } from "@eidentic/core";
-import { browserTools, type PageLike } from "../src/index.js";
+import {
+  browserTools as unsafeSharedBrowserTools,
+  type BrowserToolsOptions,
+  type PageLike,
+} from "../src/index.js";
+
+/** Existing behavioral cases exercise the explicitly opted-in compatibility shim. */
+function browserTools(page: PageLike, opts: BrowserToolsOptions = {}) {
+  return unsafeSharedBrowserTools(page, {
+    unsafeAllowAnyPublicHost: opts.allowlist === undefined,
+    allowInsecureHttp: true,
+    ...opts,
+    unsafeSharedPage: true,
+  });
+}
 
 // ---------------------------------------------------------------------------
 // FakePage — faithful in-memory fake of PageLike for tests
@@ -28,6 +42,11 @@ class FakePage implements PageLike {
   readonly clicks: string[] = [];
   /** List of fills made ({ selector, value }). */
   readonly fills: { selector: string; value: string }[] = [];
+  private routeHandler?: (route: {
+    request(): { url(): string };
+    continue(): Promise<void>;
+    abort(): Promise<void>;
+  }) => Promise<void>;
 
   constructor(pages: CannedPage[]) {
     const defaultPage: CannedPage = {
@@ -45,6 +64,15 @@ class FakePage implements PageLike {
   }
 
   async goto(url: string): Promise<void> {
+    if (this.routeHandler) {
+      let aborted = false;
+      await this.routeHandler({
+        request: () => ({ url: () => url }),
+        continue: async () => undefined,
+        abort: async () => { aborted = true; },
+      });
+      if (aborted) throw new Error("request aborted by route");
+    }
     this.navHistory.push(url);
     const page = this.pages.get(url);
     if (page) {
@@ -92,6 +120,17 @@ class FakePage implements PageLike {
   async title(): Promise<string> {
     return this.currentTitle;
   }
+
+  async route(
+    _pattern: string,
+    handler: (route: {
+      request(): { url(): string };
+      continue(): Promise<void>;
+      abort(): Promise<void>;
+    }) => Promise<void>,
+  ): Promise<void> {
+    this.routeHandler = handler;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -108,6 +147,42 @@ function byId(tools: ReturnType<typeof browserTools>, id: string) {
 // ---------------------------------------------------------------------------
 
 describe("browser_navigate — basic navigation", () => {
+  it("does not expose query credentials from navigation errors", async () => {
+    class ThrowingPage extends FakePage {
+      override async goto(): Promise<void> {
+        throw new Error("failed https://example.com/path?token=super-secret");
+      }
+    }
+    const page = new ThrowingPage([]);
+    const tools = browserTools(page, { resolveHost: async () => ["93.184.216.34"] });
+    let thrown: unknown;
+    try {
+      await byId(tools, "browser_navigate").execute({
+        url: "https://example.com/path?token=super-secret",
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    const message = thrown instanceof Error ? thrown.message : String(thrown);
+    expect(message).not.toContain("super-secret");
+    expect(message).toContain("https://example.com/path");
+  });
+
+  it("strips query strings and fragments from returned browser URLs", async () => {
+    const page = new FakePage([
+      {
+        url: "https://example.com/callback?token=secret#fragment",
+        title: "Callback",
+        content: { body: "ok" },
+      },
+    ]);
+    const tools = browserTools(page, { resolveHost: async () => ["93.184.216.34"] });
+    const result = await byId(tools, "browser_navigate").execute({
+      url: "https://example.com/callback?token=secret#fragment",
+    }) as { url: string };
+    expect(result.url).toBe("https://example.com/callback");
+  });
+
   it("navigates to an allowlisted URL successfully", async () => {
     const page = new FakePage([
       { url: "https://example.com/", title: "Example", content: { body: "Hello!" } },
@@ -134,11 +209,21 @@ describe("browser_navigate — basic navigation", () => {
     ).rejects.toThrow(/allowlist/);
   });
 
-  it("omitted allowlist allows any public host", async () => {
+  it("denies an omitted allowlist by default", async () => {
+    const page = new FakePage([]);
+    const tools = unsafeSharedBrowserTools(page, {
+      unsafeSharedPage: true,
+      resolveHosts: false,
+    });
+    await expect(byId(tools, "browser_navigate").execute({ url: "https://example.com/" }))
+      .rejects.toThrow(/allowlist/i);
+  });
+
+  it("explicit unsafe compatibility mode allows any public host", async () => {
     const page = new FakePage([
       { url: "https://anything.example.org/", title: "Anything", content: { body: "open" } },
     ]);
-    const tools = browserTools(page); // no allowlist
+    const tools = browserTools(page, { resolveHosts: false }); // deterministic fake; no allowlist
     const result = await byId(tools, "browser_navigate").execute({ url: "https://anything.example.org/" });
     expect((result as { navigated: boolean }).navigated).toBe(true);
   });
@@ -156,6 +241,27 @@ describe("browser_navigate — basic navigation", () => {
 });
 
 describe("browser_navigate — private-host guard (SSRF defense)", () => {
+  it("rejects a public-looking hostname when DNS includes a private address", async () => {
+    const page = new FakePage([]);
+    const tools = browserTools(page, {
+      resolveHost: async () => ["93.184.216.34", "127.0.0.1"],
+    });
+    await expect(
+      byId(tools, "browser_navigate").execute({ url: "https://files.example/document" }),
+    ).rejects.toThrow(/resolved host|non-global|blocked/i);
+    expect(page.navHistory).toHaveLength(0);
+  });
+
+  it("rejects URL credentials", async () => {
+    const page = new FakePage([]);
+    const tools = browserTools(page, {
+      resolveHost: async () => ["93.184.216.34"],
+    });
+    await expect(
+      byId(tools, "browser_navigate").execute({ url: "https://user:secret@example.com/" }),
+    ).rejects.toThrow(/credentials/i);
+  });
+
   it("blocks loopback (127.0.0.1)", async () => {
     const page = new FakePage([]);
     const tools = browserTools(page);
@@ -200,6 +306,78 @@ describe("browser_navigate — private-host guard (SSRF defense)", () => {
   });
 });
 
+describe("browser network interception", () => {
+  it("blocks private subresource requests before they leave the page", async () => {
+    class SubresourcePage extends FakePage {
+      private handler?: (route: {
+        request(): { url(): string };
+        continue(): Promise<void>;
+        abort(): Promise<void>;
+      }) => Promise<void>;
+      privateRequests = 0;
+
+      override async route(
+        _pattern: string,
+        handler: (route: {
+          request(): { url(): string };
+          continue(): Promise<void>;
+          abort(): Promise<void>;
+        }) => Promise<void>,
+      ): Promise<void> {
+        this.handler = handler;
+        await super.route(_pattern, handler);
+      }
+
+      override async goto(url: string): Promise<void> {
+        await super.goto(url);
+        if (!this.handler) {
+          this.privateRequests++;
+          return;
+        }
+        let aborted = false;
+        await this.handler({
+          request: () => ({ url: () => "http://127.0.0.1/private" }),
+          continue: async () => { this.privateRequests++; },
+          abort: async () => { aborted = true; },
+        });
+        expect(aborted).toBe(true);
+      }
+    }
+
+    const page = new SubresourcePage([
+      { url: "https://example.com/", title: "Example", content: { body: "ok" } },
+    ]);
+    const tools = browserTools(page, {
+      allowlist: ["example.com"],
+      resolveHost: async () => ["93.184.216.34"],
+    });
+    await expect(
+      byId(tools, "browser_navigate").execute({ url: "https://example.com/" }),
+    ).rejects.toThrow(/blocked/i);
+    expect(page.privateRequests).toBe(0);
+  });
+
+  it("fails closed when the injected page cannot intercept network requests", async () => {
+    class UnroutedPage implements PageLike {
+      private current = "about:blank";
+      async goto(url: string) { this.current = url; }
+      async content() { return ""; }
+      async innerText() { return ""; }
+      async click() {}
+      async fill() {}
+      url() { return this.current; }
+      async title() { return ""; }
+    }
+    const page = new UnroutedPage();
+    const tools = browserTools(page, {
+      resolveHost: async () => ["93.184.216.34"],
+    });
+    await expect(
+      byId(tools, "browser_navigate").execute({ url: "https://example.com/" }),
+    ).rejects.toThrow(/interception|route/i);
+  });
+});
+
 describe("browser_navigate — redirect escape detection", () => {
   it("detects redirect to a blocked private host and errors", async () => {
     // Simulate a server-side redirect: goto sets currentUrl to a private IP.
@@ -217,7 +395,11 @@ describe("browser_navigate — redirect escape detection", () => {
       async title() { return "Internal"; }
     }
     const page = new RedirectingPage();
-    const tools = browserTools(page, { allowlist: ["example.com"] });
+    const tools = browserTools(page, {
+      allowlist: ["example.com"],
+      requireNetworkInterception: false,
+      resolveHosts: false,
+    });
     await expect(
       byId(tools, "browser_navigate").execute({ url: "https://example.com/redirect" }),
     ).rejects.toThrow(/redirect.*blocked|redirect.*disallowed/i);
@@ -237,7 +419,11 @@ describe("browser_navigate — redirect escape detection", () => {
       async title() { return "Evil"; }
     }
     const page = new OffAllowlistRedirect();
-    const tools = browserTools(page, { allowlist: ["example.com"] });
+    const tools = browserTools(page, {
+      allowlist: ["example.com"],
+      requireNetworkInterception: false,
+      resolveHosts: false,
+    });
     await expect(
       byId(tools, "browser_navigate").execute({ url: "https://example.com/r" }),
     ).rejects.toThrow(/redirect.*blocked|redirect.*disallowed/i);
@@ -258,7 +444,11 @@ describe("browser_navigate — redirect escape detection", () => {
       async title() { return "Example New"; }
     }
     const page = new SameHostRedirect();
-    const tools = browserTools(page, { allowlist: ["example.com"] });
+    const tools = browserTools(page, {
+      allowlist: ["example.com"],
+      requireNetworkInterception: false,
+      resolveHosts: false,
+    });
     const result = await byId(tools, "browser_navigate").execute({ url: "https://example.com/old" });
     expect((result as { navigated: boolean }).navigated).toBe(true);
     expect((result as { url: string }).url).toBe("https://www.example.com/new-path");
@@ -270,6 +460,16 @@ describe("browser_navigate — redirect escape detection", () => {
 // ---------------------------------------------------------------------------
 
 describe("browser_read — content reading", () => {
+  it("does not expose query-string credentials in the returned URL", async () => {
+    const page = new FakePage([
+      { url: "https://example.com/page?api_key=secret", title: "Page", content: { body: "ok" } },
+    ]);
+    await page.goto("https://example.com/page?api_key=secret");
+    const tools = browserTools(page, { resolveHost: async () => ["93.184.216.34"] });
+    const result = await byId(tools, "browser_read").execute({}) as { url: string };
+    expect(result.url).toBe("https://example.com/page");
+  });
+
   it("returns title, url, and body text", async () => {
     const page = new FakePage([
       { url: "https://example.com/", title: "My Page", content: { body: "Hello world" } },
@@ -332,6 +532,19 @@ describe("browser_read — content reading", () => {
     };
     expect(result.truncated).toBe(false);
     expect(result.text).toBe(content);
+  });
+
+  it("keeps multibyte text within maxContentBytes", async () => {
+    const page = new FakePage([
+      { url: "https://example.com/", title: "Unicode", content: { body: "🙂".repeat(100) } },
+    ]);
+    await page.goto("https://example.com/");
+    const tools = browserTools(page, {
+      maxContentBytes: 64,
+      resolveHost: async () => ["93.184.216.34"],
+    });
+    const result = await byId(tools, "browser_read").execute({}) as { text: string };
+    expect(Buffer.byteLength(result.text, "utf8")).toBeLessThanOrEqual(64);
   });
 
   it("browser_read is read-only", () => {

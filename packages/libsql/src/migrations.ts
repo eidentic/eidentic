@@ -155,6 +155,65 @@ export const MIGRATIONS: ReadonlyArray<{ version: number; sql: string[] }> = [
       `ALTER TABLE sessions ADD COLUMN api_key TEXT`,
     ],
   },
+  {
+    version: 13,
+    sql: [
+      `ALTER TABLE idempotency_keys ADD COLUMN scope_key TEXT`,
+      `ALTER TABLE idempotency_keys ADD COLUMN session_id TEXT`,
+      `ALTER TABLE idempotency_keys ADD COLUMN owner_key TEXT`,
+      `CREATE INDEX idx_idempotency_scope ON idempotency_keys(scope_key)`,
+      `CREATE INDEX idx_idempotency_session ON idempotency_keys(session_id)`,
+      `CREATE INDEX idx_sessions_agent ON sessions(agent_id)`,
+      `CREATE INDEX idx_sessions_agent_user ON sessions(agent_id, user_id)`,
+      `CREATE INDEX idx_sessions_agent_org ON sessions(agent_id, org_id)`,
+      `CREATE INDEX idx_checkpoints_session ON checkpoints(session_id)`,
+      `CREATE INDEX idx_suspension_decisions_session ON suspension_decisions(session_id)`,
+      // Backfill only an unambiguous session prefix. Opaque/ambiguous legacy keys remain unowned
+      // rather than being guessed and potentially erased across a tenant boundary.
+      `UPDATE idempotency_keys
+       SET session_id = (
+         SELECT sessions.id
+         FROM sessions
+         WHERE substr(idempotency_keys.key, 1, length(sessions.id) + 1) = sessions.id || ':'
+         LIMIT 1
+       )
+       WHERE session_id IS NULL
+         AND 1 = (
+           SELECT count(*)
+           FROM sessions
+           WHERE substr(idempotency_keys.key, 1, length(sessions.id) + 1) = sessions.id || ':'
+         )`,
+    ],
+  },
+  {
+    version: 14,
+    // Repair duplicate current facts left by the old read-then-batch implementation before
+    // adding the database invariant. Newest valid_from wins; id is a deterministic tie-breaker.
+    sql: [
+      `WITH ranked AS MATERIALIZED (
+         SELECT
+           id,
+           FIRST_VALUE(valid_from) OVER (
+             PARTITION BY scope_key, subject, predicate
+             ORDER BY valid_from DESC, id DESC
+           ) AS survivor_valid_from,
+           ROW_NUMBER() OVER (
+             PARTITION BY scope_key, subject, predicate
+             ORDER BY valid_from DESC, id DESC
+           ) AS position
+         FROM facts
+         WHERE valid_until IS NULL
+       )
+       UPDATE facts
+       SET valid_until = (
+         SELECT survivor_valid_from FROM ranked WHERE ranked.id = facts.id
+       )
+       WHERE id IN (SELECT id FROM ranked WHERE position > 1)`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_facts_one_current
+         ON facts (scope_key, subject, predicate)
+         WHERE valid_until IS NULL`,
+    ],
+  },
 ];
 
 export async function runMigrations(client: Client): Promise<void> {

@@ -24,10 +24,11 @@ export function bashTool(sandbox: SandboxPort, opts?: BashToolOptions): Tool {
       "Executes off the host process; refuses if no real sandbox is configured.",
     inputSchema: z.object({ command: z.string().describe("The bash command line to execute") }),
     sideEffect: "destructive",
-    execute: async ({ input }) => {
+    execute: async ({ input, ctx }) => {
       const res = await sandbox.run(input.command, {
         language: "bash",
         ...(opts?.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+        ...(ctx?.signal !== undefined ? { signal: ctx.signal } : {}),
       });
       // NoopSandbox (and other refusals) return exitCode 1 + a populated `error` with empty streams.
       if (res.exitCode !== 0 && res.error !== undefined && res.stdout === "" && res.stderr === "") {

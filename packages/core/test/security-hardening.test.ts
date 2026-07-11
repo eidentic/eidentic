@@ -9,7 +9,7 @@ import { z } from "zod";
 import { InMemoryStore, MockModel } from "@eidentic/types/testing";
 import { textBlock, toolUseBlock, type StreamEvent } from "@eidentic/types";
 import { Agent } from "../src/agent.js";
-import { createTool } from "../src/tool.js";
+import { createTool, idempotencyLedgerKey } from "../src/tool.js";
 import { redactFields } from "../src/logger.js";
 import type { LogLevel, LogFields, LoggerPort } from "../src/logger.js";
 import { skillTools } from "../src/skill-tools.js";
@@ -122,8 +122,8 @@ describe("A7 — cross-session idempotency isolation", () => {
       { content: [textBlock("sent B")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
 
-    const agentA = new Agent({ id: "ag", instructions: "", model: modelA, store, tools: [emailTool], durable: true, now: () => "t", newId: ((n) => () => `eA${n++}`)(0) });
-    const agentB = new Agent({ id: "ag", instructions: "", model: modelB, store, tools: [emailTool], durable: true, now: () => "t", newId: ((n) => () => `eB${n++}`)(0) });
+    const agentA = new Agent({ id: "ag", instructions: "", model: modelA, store, tools: [emailTool], permissions: { mode: "bypass" }, durable: true, now: () => "t", newId: ((n) => () => `eA${n++}`)(0) });
+    const agentB = new Agent({ id: "ag", instructions: "", model: modelB, store, tools: [emailTool], permissions: { mode: "bypass" }, durable: true, now: () => "t", newId: ((n) => () => `eB${n++}`)(0) });
 
     // Session A runs first and sends the email.
     await drain(agentA, "send to x@test.com", "sess-A");
@@ -135,8 +135,8 @@ describe("A7 — cross-session idempotency isolation", () => {
     expect(execCount).toBe(2); // executed AGAIN — no cross-session suppression
 
     // The ledger must have two distinct keys, one per session.
-    const keyA = await store.getIdempotency("sess-A:email:x@test.com");
-    const keyB = await store.getIdempotency("sess-B:email:x@test.com");
+    const keyA = await store.getIdempotency(idempotencyLedgerKey("sess-A", "email:x@test.com"));
+    const keyB = await store.getIdempotency(idempotencyLedgerKey("sess-B", "email:x@test.com"));
     expect(keyA?.status).toBe("applied");
     expect(keyB?.status).toBe("applied");
 
@@ -297,8 +297,8 @@ describe("H6 — memory block value containing </memory> is escaped in system pr
     ]);
     const origComplete = model.complete.bind(model);
     (model as unknown as { complete: typeof model.complete }).complete = async (req) => {
-      const sys = req.messages.find((m) => m.role === "system");
-      if (sys) capturedSystem = typeof sys.content === "string" ? sys.content : "";
+      const context = req.messages.find((m) => m.role === "user" && String(m.content).includes("<memory>"));
+      if (context) capturedSystem = typeof context.content === "string" ? context.content : "";
       return origComplete(req);
     };
 

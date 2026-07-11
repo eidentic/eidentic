@@ -21,11 +21,13 @@ import { Agent } from "eidentic";
 const sandbox = await E2BSandbox.create({
   client: Sandbox,
   apiKey: process.env.E2B_API_KEY,
-  defaultTimeoutMs: 10_000,
+  defaultTimeoutMs: 10_000, // optional; defaults to 60 seconds
+  maxOutputBytes: 512 * 1024, // per stdout/stderr/error field
 });
 
 const agent = new Agent({
   id: "coder",
+  instructions: "Run requested code only in the configured sandbox.",
   model,
   store,
   sandbox,
@@ -36,6 +38,11 @@ for await (const ev of agent.query("Run: print(1 + 1)", { sessionId: "s-1" })) {
   if (ev.type === "stream.delta") process.stdout.write(ev.delta.text);
 }
 ```
+
+Abort signals are honored during both provisioning and execution. If an abort wins while E2B is
+still creating the microVM, the late handle is killed as soon as it arrives. Returned stdout,
+stderr, and execution-error text are independently capped by `maxOutputBytes`.
+Large line arrays are accumulated only up to that cap rather than joined into an unbounded string.
 
 ## Links
 

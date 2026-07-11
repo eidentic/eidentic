@@ -204,6 +204,60 @@ describe("suspend / resume (HITL via replay)", () => {
     ).rejects.toThrow(/not suspended/);
   });
 
+  it("claims a suspension atomically so concurrent resumes execute side effects once", async () => {
+    const registry = createWorkflowRunRegistry();
+    let sideEffects = 0;
+    const wf = workflow("single-resume", async (_n: number, { suspend }) => {
+      await suspend!<boolean>("approve");
+      sideEffects += 1;
+      return sideEffects;
+    });
+    const suspended = await runCapturing(wf, 0, registry);
+
+    const attempts = await Promise.allSettled([
+      resumeWorkflow(wf, suspended.id, { registry, decision: true }),
+      resumeWorkflow(wf, suspended.id, { registry, decision: false }),
+    ]);
+
+    expect(attempts.filter((attempt) => attempt.status === "fulfilled")).toHaveLength(1);
+    const rejected = attempts.find((attempt) => attempt.status === "rejected");
+    expect(rejected?.status === "rejected" && rejected.reason?.name).toBe("WorkflowResumeConflictError");
+    expect(sideEffects).toBe(1);
+  });
+
+  it("renews a short resume lease while a long step is still running", async () => {
+    const registry = createWorkflowRunRegistry({ resumeLeaseMs: 30 });
+    let sideEffects = 0;
+    const wf = workflow("renewed-resume", async (_n: number, { step, suspend }) => {
+      await suspend!<boolean>("approve");
+      return step!("slow-effect", async () => {
+        await new Promise<void>((resolve) => setTimeout(resolve, 90));
+        sideEffects += 1;
+        return sideEffects;
+      });
+    });
+    const suspended = await runCapturing(wf, 0, registry);
+
+    const first = resumeWorkflow(wf, suspended.id, { registry, decision: true });
+    await new Promise<void>((resolve) => setTimeout(resolve, 55));
+    await expect(
+      resumeWorkflow(wf, suspended.id, { registry, decision: false }),
+    ).rejects.toMatchObject({ name: "WorkflowResumeConflictError" });
+    await expect(first).resolves.toMatchObject({ kind: "completed", output: 1 });
+    expect(sideEffects).toBe(1);
+  });
+
+  it("rejects renewal after a resume claim has expired", async () => {
+    const registry = createWorkflowRunRegistry({ resumeLeaseMs: 5 });
+    const wf = workflow("expired-resume", async (_n: number, { suspend }) => suspend!("approve"));
+    const suspended = await runCapturing(wf, 0, registry);
+    const claim = await registry.claimResume(suspended.id, "approve");
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await expect(registry.renewResume(suspended.id, claim.claimId)).rejects.toMatchObject({
+      name: "WorkflowResumeConflictError",
+    });
+  });
+
   it("retry() does not swallow a suspend signal", async () => {
     const registry = createWorkflowRunRegistry();
     // A step whose body suspends — wrapped in retry. The suspend must escape,
@@ -269,6 +323,37 @@ describe("suspend persistence across registry restart (file store)", () => {
       expect(resumed.kind).toBe("completed");
       if (resumed.kind === "completed") expect(resumed.output).toBe(6);
       expect(draftFn).not.toHaveBeenCalled();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("coordinates a single resume claim across independent file-store registries", async () => {
+    const { fileWorkflowRunStore } = await import("@eidentic/workflow");
+    const dir = mkdtempSync(join(tmpdir(), "eidentic-resume-race-"));
+    const path = join(dir, "runs.json");
+    try {
+      let sideEffects = 0;
+      const wf = workflow("cross-process-resume", async (_n: number, { suspend }) => {
+        await suspend!<boolean>("approve");
+        sideEffects += 1;
+        return sideEffects;
+      });
+      const seed = createWorkflowRunRegistry({ store: fileWorkflowRunStore(path) });
+      const suspended = await runCapturing(wf, 0, seed);
+      await seed.flush();
+
+      const registryA = createWorkflowRunRegistry({ store: fileWorkflowRunStore(path) });
+      const registryB = createWorkflowRunRegistry({ store: fileWorkflowRunStore(path) });
+      await Promise.all([registryA.hydrate(), registryB.hydrate()]);
+
+      const attempts = await Promise.allSettled([
+        resumeWorkflow(wf, suspended.id, { registry: registryA, decision: true }),
+        resumeWorkflow(wf, suspended.id, { registry: registryB, decision: false }),
+      ]);
+      expect(attempts.filter((attempt) => attempt.status === "fulfilled")).toHaveLength(1);
+      expect(attempts.filter((attempt) => attempt.status === "rejected")).toHaveLength(1);
+      expect(sideEffects).toBe(1);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

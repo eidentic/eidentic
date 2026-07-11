@@ -158,6 +158,7 @@ export type ResultDetails =
       errorName?: string;
       errorKind?: "structured_output_parse" | "structured_output_validation";
       validationIssues?: string[];
+      /** @deprecated No longer populated because raw model output may contain secrets/PII. */
       rawOutput?: string;
     }
   | { subtype: "suspended"; callId?: string; toolName?: string }
@@ -182,7 +183,18 @@ export type ResultDetails =
  * - Tool calls are embedded in the assistant event's content, not logged as separate events.
  * Keep them in the union — removing them would be a breaking change.
  */
-export type EventKind = "user" | "assistant" | "tool_call" | "tool_result" | "checkpoint" | "compaction" | "suspension";
+export type EventKind =
+  | "user"
+  | "assistant"
+  | "tool_call"
+  | "tool_result"
+  | "checkpoint"
+  | "compaction"
+  | "suspension"
+  /** Versioned boundary identifying one query/resume execution within a long-lived session. */
+  | "run_started"
+  /** Durable copy of the exact terminal result emitted for the corresponding run. */
+  | "terminal_result";
 
 export interface StoredEvent {
   id: string;
@@ -198,9 +210,18 @@ export interface StoredEvent {
 export const EVENT_SCHEMA_VERSION = 1;
 
 // --- Stream events (what Agent.query yields) ---
+export interface StreamEventMetadata {
+  /**
+   * Sequence of the durable StoredEvent represented by this stream event. Present only when the
+   * event was successfully persisted first; consumers may use it as a replay cursor.
+   */
+  eventSeq?: number;
+}
+
 export type StreamEvent =
   | {
       type: "session.init";
+      eventSeq?: number;
       sessionId: string;
       agentId: string;
       tools: string[];
@@ -213,9 +234,10 @@ export type StreamEvent =
        */
       greeting?: string;
     }
-  | { type: "stream.delta"; delta: StreamDelta }
+  | { type: "stream.delta"; delta: StreamDelta; eventSeq?: number }
   | {
       type: "assistant";
+      eventSeq?: number;
       content: ContentBlock[];
       /**
        * Per-turn token usage for this model response. Present on every assistant event so
@@ -223,9 +245,10 @@ export type StreamEvent =
        */
       usage: Usage;
     }
-  | { type: "tool.result"; callId: string; toolName: string; output: unknown; isError: boolean }
+  | { type: "tool.result"; callId: string; toolName: string; output: unknown; isError: boolean; eventSeq?: number }
   | {
       type: "result";
+      eventSeq?: number;
       subtype: TerminationSubtype;
       output?: unknown;
       usage: Usage;
@@ -260,6 +283,7 @@ export type StreamEvent =
        * from this point is accepted and rare).
        */
       type: "compaction";
+      eventSeq?: number;
       sessionId: string;
       before: number;
       after: number;

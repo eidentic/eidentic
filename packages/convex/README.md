@@ -149,8 +149,13 @@ export const {
 });
 ```
 
-The bare `export * from "@eidentic/convex/server"` path is still supported, but treat it as
-legacy/trusted-only. In multi-tenant products, use `eidenticFunctions({ authorize })`.
+The bare named handlers exported by `@eidentic/convex/server` now fail closed. Public invocations
+throw until the host registers `eidenticFunctions({ authorize })`; the authorization hook must
+authenticate the caller and enforce ownership for every referenced scope, session, and owner key.
+
+For a short, controlled migration only, `eidenticFunctions({ unsafeAllowUnauthenticated: true })`
+and `unsafeLegacyPublicEidenticFunctions` restore the old behavior. Both are deliberately named as
+unsafe and must not be exposed by a multi-tenant deployment.
 
 ### HTTP runner
 
@@ -190,17 +195,23 @@ For production semantic memory at scale, prefer an external `VectorPort` such as
 
 ## Migration Notes
 
-- Existing app-functions installs can upgrade without code changes.
+- Existing app-functions imports still compile, but bare named public handlers now deny at runtime.
+  Migrate the host module to `eidenticFunctions({ authorize })` before deploying this version.
 - New Convex apps should use the component path.
 - Existing app-functions installs that want prefixed table names need a data migration or a fresh
   Convex deployment; changing table names is not automatic.
-- The bare public handler re-export remains available for compatibility, but multi-tenant apps
-  should migrate to `eidenticFunctions({ authorize })` or to the component path.
+- The unsafe compatibility factory/object is temporary migration scaffolding, not a production
+  authorization boundary. Prefer `eidenticFunctions({ authorize })` or the component path.
 
 ## Testing
 
 This package is covered by Convex store/vector/durable conformance tests via `convex-test`, plus
 tests for table-name factories, authorization metadata, and in-process runners.
+
+`test/live.test.ts` runs the same store, durable, vector, and fail-closed authorization checks
+against a real Convex backend when `EIDENTIC_TEST_CONVEX_URL` is set. The target must be a disposable
+test deployment that exposes a destructive test-only `reset:all` mutation; never point the live
+suite at shared development or production data.
 
 ## License
 

@@ -3,7 +3,7 @@ import { z } from "zod";
 import { InMemoryStore } from "@eidentic/types/testing";
 import { textBlock, toolUseBlock, type ModelPort, type ModelRequest, type ModelResponse } from "@eidentic/types";
 import { Agent } from "../src/agent.js";
-import { createTool } from "../src/tool.js";
+import { createTool, idempotencyLedgerKey } from "../src/tool.js";
 
 /** A model whose Nth `complete` call throws, simulating a crash mid-run. */
 class CrashingModel implements ModelPort {
@@ -20,8 +20,8 @@ class CrashingModel implements ModelPort {
   }
 }
 
-describe("§18.4 crash-injection: exactly-once side effects across resume", () => {
-  it("applied side effect is skipped on resume (counter stays 1) and the run completes", async () => {
+describe("durable terminal errors", () => {
+  it("a caught model error is final and replay does not duplicate an applied side effect", async () => {
     const store = new InMemoryStore();
     await store.migrate();
     let counter = 0; // the external side effect
@@ -37,7 +37,7 @@ describe("§18.4 crash-injection: exactly-once side effects across resume", () =
       [{ content: [toolUseBlock("c1", "send_email", { to: "a@b.com" })], usage: { inputTokens: 1, outputTokens: 1 } }],
       2,
     );
-    const agentCrash = new Agent({ id: "a", instructions: "", model: crashing, store, tools: [sendEmail], durable: true, now: () => "t", newId: ((n) => () => `e${n++}`)(0) });
+    const agentCrash = new Agent({ permissions: { mode: "bypass" }, id: "a", instructions: "", model: crashing, store, tools: [sendEmail], durable: true, now: () => "t", newId: ((n) => () => `e${n++}`)(0) });
 
     const firstEvents = [];
     for await (const e of agentCrash.query("email a@b.com", { sessionId: "s" })) firstEvents.push(e);
@@ -45,22 +45,24 @@ describe("§18.4 crash-injection: exactly-once side effects across resume", () =
     expect(firstEvents.at(-1)).toMatchObject({ type: "result", subtype: "error" });
     expect(counter).toBe(1); // the tool ran exactly once
     // A7: the effective stored key is now ${sessionId}:${tool.idempotencyKey(input)}.
-    expect((await store.getIdempotency("s:send_email:a@b.com"))?.status).toBe("applied");
+    expect((await store.getIdempotency(idempotencyLedgerKey("s", "send_email:a@b.com")))?.status).toBe("applied");
 
-    // Resume with a fresh (non-crashing) model that, when re-asked, would re-issue the tool then finish.
+    // A caught model error is not a process crash: it has an authoritative terminal_result.
+    // A fresh model must therefore never be invoked by resume().
     const resumeModel = new MockModelLike([
       { content: [toolUseBlock("c1", "send_email", { to: "a@b.com" })], usage: { inputTokens: 1, outputTokens: 1 } },
       { content: [textBlock("email sent")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
-    const agentResume = new Agent({ id: "a", instructions: "", model: resumeModel, store, tools: [sendEmail], durable: true, now: () => "t", newId: ((n) => () => `r${n++}`)(0) });
+    const agentResume = new Agent({ permissions: { mode: "bypass" }, id: "a", instructions: "", model: resumeModel, store, tools: [sendEmail], durable: true, now: () => "t", newId: ((n) => () => `r${n++}`)(0) });
 
     const resumed = [];
     for await (const e of agentResume.resume("s")) resumed.push(e);
-    expect(resumed.at(-1)).toMatchObject({ type: "result", subtype: "success", output: "email sent" });
-    expect(counter).toBe(1); // SKIPPED on resume — exactly-once side effect (the §18.4 guarantee)
+    expect(resumed.at(-1)).toMatchObject({ type: "result", subtype: "error", output: "simulated crash" });
+    expect(resumeModel.calls).toHaveLength(0);
+    expect(counter).toBe(1);
   });
 
-  it("intent-without-completion re-runs on resume (documented v1 policy)", async () => {
+  it("a terminal error does not retry an intent-only destructive call implicitly", async () => {
     const store = new InMemoryStore();
     await store.migrate();
     let counter = 0;
@@ -81,22 +83,23 @@ describe("§18.4 crash-injection: exactly-once side effects across resume", () =
       [{ content: [toolUseBlock("c1", "charge", { amount: 10 })], usage: { inputTokens: 1, outputTokens: 1 } }],
       2, // crash on call 2, after the tool's intent-only record is in the ledger
     );
-    const agent = new Agent({ id: "a", instructions: "", model: crashModel, store, tools: [flaky], durable: true, now: () => "t", newId: ((n) => () => `e${n++}`)(0) });
+    const agent = new Agent({ permissions: { mode: "bypass" }, id: "a", instructions: "", model: crashModel, store, tools: [flaky], durable: true, now: () => "t", newId: ((n) => () => `e${n++}`)(0) });
     for await (const _ of agent.query("charge 10", { sessionId: "s" })) { /* drain */ }
     expect(counter).toBe(1);
     // A7: the effective stored key is now ${sessionId}:${tool.idempotencyKey(input)}.
-    expect((await store.getIdempotency("s:charge:10"))?.status).toBe("intent"); // intent only, no completion
+    expect((await store.getIdempotency(idempotencyLedgerKey("s", "charge:10")))?.status).toBe("intent");
 
-    // Resume: model2 re-issues the same tool. Since status is "intent" (not "applied") the tool re-runs.
+    // Resume replays the persisted model error. Retrying an intent-only destructive operation
+    // requires an explicit new run, never an implicit terminal-state reinterpretation.
     const model2 = new MockModelLike([
       { content: [toolUseBlock("c1", "charge", { amount: 10 })], usage: { inputTokens: 1, outputTokens: 1 } },
       { content: [textBlock("charged on retry")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
-    const agent2 = new Agent({ id: "a", instructions: "", model: model2, store, tools: [flaky], durable: true, now: () => "t", newId: ((n) => () => `r${n++}`)(0) });
+    const agent2 = new Agent({ permissions: { mode: "bypass" }, id: "a", instructions: "", model: model2, store, tools: [flaky], durable: true, now: () => "t", newId: ((n) => () => `r${n++}`)(0) });
     for await (const _ of agent2.resume("s")) { /* drain */ }
-    expect(counter).toBe(2); // re-ran because completion was never recorded (v1 policy)
-    // A7: the effective stored key is now ${sessionId}:${tool.idempotencyKey(input)}.
-    expect((await store.getIdempotency("s:charge:10"))?.status).toBe("applied");
+    expect(model2.calls).toHaveLength(0);
+    expect(counter).toBe(1);
+    expect((await store.getIdempotency(idempotencyLedgerKey("s", "charge:10")))?.status).toBe("intent");
   });
 });
 

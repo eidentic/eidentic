@@ -183,20 +183,17 @@ describe("Fix 1 — resume carries over prior cost/token budget", () => {
     const store = new InMemoryStore();
     await store.migrate();
 
-    // First run: produce 40 input tokens in one call, end with a tool-use so the session is non-terminal.
-    const firstModel = new MockModel([
-      { content: [toolUseBlock("c1", "ping", {})], usage: { inputTokens: 40, outputTokens: 0 } },
-      // Model script intentionally exhausted here; resume will use the second model.
-    ]);
+    // Seed a genuinely interrupted run: it has a run boundary and persisted work, but no
+    // terminal_result. A normal model error is terminal now and must not be resumed.
     const session = await Session.open(store, { sessionId: "resume-budget", agentId: "a1", now: () => "t", newId: ((n) => () => `id${n++}`)(10) });
-    // Run the first turn; it will get an error when the model runs out of scripted responses — that's fine,
-    // we only care that the assistant event (40 tokens) was persisted before the crash.
-    const firstEvents: StreamEvent[] = [];
-    for await (const e of runTurn({
-      agentId: "a1", instructions: "x", input: "go", model: firstModel,
-      registry: new ToolRegistry([ping]), session, scope: { kind: "agent", agentId: "a1" },
-      store, maxTurns: 16, // no policy here — budget will be enforced on resume
-    })) firstEvents.push(e);
+    await session.append("run_started", { version: 1, mode: "query" });
+    await session.append("user", "go");
+    await session.append(
+      "assistant",
+      { content: [toolUseBlock("c1", "ping", {})] },
+      { usage: { inputTokens: 40, outputTokens: 0 } },
+    );
+    await session.append("tool_result", { callId: "c1", toolName: "ping", output: { reply: "pong" } });
 
     // Confirm the assistant event with 40 tokens was persisted.
     const storedEvents = await store.readEvents("resume-budget");

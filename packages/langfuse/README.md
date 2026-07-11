@@ -31,6 +31,7 @@ const tracer = langfuseTracer({
 
 const agent = new Agent({
   id: "my-agent",
+  instructions: "You are a helpful assistant.",
   model,
   store,
   tracer,

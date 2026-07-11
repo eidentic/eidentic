@@ -1,4 +1,4 @@
-import { readdir } from "node:fs/promises";
+import { opendir } from "node:fs/promises";
 import { join, sep } from "node:path";
 
 /** Hard cap on pattern and path lengths to prevent algorithmic DoS. */
@@ -88,24 +88,29 @@ export function matchGlobPattern(pattern: string, path: string): boolean {
 }
 
 /** Recursively list files under `root` as `/`-separated relative paths. Skips symlinked dirs (§5.6). */
-export async function walkDir(root: string, sub = ""): Promise<string[]> {
-  const dir = sub ? join(root, sub) : root;
-  let entries;
-  try {
-    entries = await readdir(dir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
+export async function walkDir(root: string, sub = "", maxResults = 100_000): Promise<string[]> {
   const out: string[] = [];
-  for (const e of entries) {
-    if (e.isSymbolicLink()) continue; // never traverse symlinks out of the workspace
-    const relPath = sub ? `${sub}/${e.name}` : e.name;
-    if (e.isDirectory()) {
-      out.push(...(await walkDir(root, relPath)));
-    } else if (e.isFile()) {
-      out.push(relPath);
+  async function visit(relativeDir: string): Promise<void> {
+    if (out.length >= maxResults) return;
+    const dir = relativeDir ? join(root, relativeDir) : root;
+    let entries;
+    try {
+      entries = await opendir(dir);
+    } catch {
+      return;
+    }
+    for await (const entry of entries) {
+      if (out.length >= maxResults) break;
+      if (entry.isSymbolicLink()) continue;
+      const relPath = relativeDir ? `${relativeDir}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        await visit(relPath);
+      } else if (entry.isFile()) {
+        out.push(relPath);
+      }
     }
   }
+  await visit(sub);
   return out;
 }
 

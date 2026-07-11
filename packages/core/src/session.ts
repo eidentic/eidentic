@@ -1,4 +1,5 @@
 import { EVENT_SCHEMA_VERSION, StoreConflictError, upcastEvents, type EventKind, type StoredEvent, type StorePort, type Upcaster, type Usage } from "@eidentic/types";
+import { sha256Hex } from "./sha256.js";
 
 export interface SessionDeps {
   sessionId: string;
@@ -13,6 +14,39 @@ export interface SessionDeps {
   orgId?: string;
   /** H1 fix: API key recorded into SessionRecord so apiKey-only principals own their sessions. */
   apiKey?: string;
+  /**
+   * Unsafe migration escape hatch for opening legacy ownerless sessions as an authenticated
+   * principal. Keep disabled unless the caller has independently authorized the session id.
+   */
+  unsafeAllowOwnerlessSessionAccess?: boolean;
+}
+
+type SessionOwner = { userId?: string; orgId?: string; apiKey?: string };
+
+const CREDENTIAL_FINGERPRINT_PREFIX = "eidentic.credential.sha256:";
+
+export async function credentialFingerprint(credential: string): Promise<string> {
+  return CREDENTIAL_FINGERPRINT_PREFIX + await sha256Hex(credential);
+}
+
+export async function fingerprintSessionOwner(owner: SessionOwner): Promise<SessionOwner> {
+  if (owner.apiKey === undefined || owner.apiKey.startsWith(CREDENTIAL_FINGERPRINT_PREFIX)) return owner;
+  return { ...owner, apiKey: await credentialFingerprint(owner.apiKey) };
+}
+
+/**
+ * Match a caller to the canonical owner recorded on a session.
+ *
+ * Ownership uses the most specific recorded identifier. A user-owned session
+ * cannot be opened merely because the caller belongs to the same organisation;
+ * org ownership is consulted only when no user owner was recorded. API-key
+ * ownership is the legacy fallback when neither user nor org identity exists.
+ */
+export function matchesSessionOwner(owner: SessionOwner, caller: SessionOwner): boolean {
+  if (owner.userId !== undefined) return caller.userId === owner.userId;
+  if (owner.orgId !== undefined) return caller.orgId === owner.orgId;
+  if (owner.apiKey !== undefined) return caller.apiKey === owner.apiKey;
+  return caller.userId === undefined && caller.orgId === undefined && caller.apiKey === undefined;
 }
 
 export class Session {
@@ -25,6 +59,7 @@ export class Session {
 
   static async open(store: StorePort, deps: SessionDeps): Promise<Session> {
     let session = await store.getSession(deps.sessionId);
+    const caller = await fingerprintSessionOwner(deps);
     if (!session) {
       session = {
         id: deps.sessionId,
@@ -32,7 +67,7 @@ export class Session {
         createdAt: deps.now(),
         ...(deps.userId !== undefined ? { userId: deps.userId } : {}),
         ...(deps.orgId !== undefined ? { orgId: deps.orgId } : {}),
-        ...(deps.apiKey !== undefined ? { apiKey: deps.apiKey } : {}),
+        ...(caller.apiKey !== undefined ? { apiKey: caller.apiKey } : {}),
       };
       await store.createSession(session);
     } else if (session.agentId !== deps.agentId) {
@@ -40,41 +75,35 @@ export class Session {
         `session ${deps.sessionId} belongs to a different agent (owner: ${session.agentId}, requester: ${deps.agentId})`,
       );
     } else {
-      // Defense-in-depth for Finding #1 (IDOR): if the stored session has an owner identity
-      // and the caller's identity is set but does NOT match, reject the open.
+      // Defense-in-depth for Finding #1 (IDOR): if the stored session has an owner identity,
+      // the caller MUST provide the matching canonical identity. Identity omission is not a
+      // trusted bypass: it would let any caller with a guessed session id replay another user.
       // This covers core/nextjs/A2A/MCP entry points that bypass the HTTP server ownership check.
       //
       // Rules:
-      //  - If the session has no recorded userId/orgId/apiKey (legacy/NoAuth), always allow (back-compat).
-      //  - If the caller supplies a userId and the session has a userId → they must match.
-      //  - If the caller supplies an orgId and the session has an orgId → they must match.
-      //  - If the caller supplies an apiKey and the session has an apiKey → they must match.
-      //  - A mismatch on any set pair is a conflict.
+      //  - Ownerless sessions remain available to ownerless trusted/single-tenant callers.
+      //  - An authenticated principal may claim an ownerless id only through the explicitly unsafe
+      //    migration escape hatch after independent authorization.
+      //  - userId is canonical when present; orgId cannot override a user mismatch.
+      //  - otherwise orgId is canonical, then apiKey as the legacy fallback.
       const sessionOwned = session.userId !== undefined || session.orgId !== undefined || session.apiKey !== undefined;
-      if (sessionOwned) {
-        const userIdMismatch =
-          deps.userId !== undefined &&
-          session.userId !== undefined &&
-          deps.userId !== session.userId;
-        const orgIdMismatch =
-          deps.orgId !== undefined &&
-          session.orgId !== undefined &&
-          deps.orgId !== session.orgId;
-        const apiKeyMismatch =
-          deps.apiKey !== undefined &&
-          session.apiKey !== undefined &&
-          deps.apiKey !== session.apiKey;
-        const callerHasIdentity =
-          deps.userId !== undefined || deps.orgId !== undefined || deps.apiKey !== undefined;
-        const anyMatch =
-          (deps.userId !== undefined && session.userId === deps.userId) ||
-          (deps.orgId !== undefined && session.orgId === deps.orgId) ||
-          (deps.apiKey !== undefined && session.apiKey === deps.apiKey);
-        if (userIdMismatch || orgIdMismatch || apiKeyMismatch || (callerHasIdentity && !anyMatch)) {
-          throw new StoreConflictError(
-            `session ${deps.sessionId} is owned by a different principal`,
-          );
-        }
+      const callerOwned = caller.userId !== undefined || caller.orgId !== undefined || caller.apiKey !== undefined;
+      // A verified use of a legacy plaintext row upgrades it with compare-and-swap. New writes
+      // above always contain only the fingerprint.
+      if (session.apiKey !== undefined && deps.apiKey !== undefined && session.apiKey === deps.apiKey) {
+        const upgraded = await store.replaceSessionApiKey(session.id, session.apiKey, caller.apiKey!);
+        if (!upgraded) throw new StoreConflictError(`session ${deps.sessionId} credential migration conflicted`);
+        session = { ...session, apiKey: caller.apiKey };
+      }
+      if (sessionOwned && !matchesSessionOwner(session, caller)) {
+        throw new StoreConflictError(
+          `session ${deps.sessionId} is owned by a different principal`,
+        );
+      }
+      if (!sessionOwned && callerOwned && deps.unsafeAllowOwnerlessSessionAccess !== true) {
+        throw new StoreConflictError(
+          `session ${deps.sessionId} has no recorded owner; authenticated access is denied`,
+        );
       }
     }
     const raw = await store.readEvents(deps.sessionId);

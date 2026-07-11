@@ -111,6 +111,12 @@ describe("§16.4 cancellation (stream): mid-stream abort — no-final path", () 
 
     // Usage on the aborted terminal should be zero (no model response was received).
     expect(result.usage).toMatchObject({ inputTokens: 0, outputTokens: 0 });
+    const stored = await store.readEvents("s-stream-abort");
+    expect(stored.find((event) => event.kind === "assistant")?.payload).toMatchObject({
+      partial: true,
+      interrupted: "aborted",
+      content: [textBlock("partial...")],
+    });
   });
 
   it("pre-aborted signal on a streaming model → aborted before any delta (top-of-turn boundary)", async () => {
@@ -295,7 +301,7 @@ describe("§16.4 cancellation (stream): catch-block signal classification", () =
 // ---------------------------------------------------------------------------
 
 describe("§16.4 cancellation: checkpoint-on-abort is resumable", () => {
-  it("durable run aborted after tool batch is resumable to a clean success terminal", async () => {
+  it("durable run aborted after tool batch replays the persisted aborted terminal", async () => {
     const store = await freshStore();
     const controller = new AbortController();
 
@@ -365,24 +371,20 @@ describe("§16.4 cancellation: checkpoint-on-abort is resumable", () => {
       }
     }
 
-    // Run 2: resume from the checkpoint. Must complete without throwing.
+    // Aborted is terminal: resume replays it exactly and never re-calls the model.
     const resumedEvents = await collect(agent.resume("s-resume"));
     const resumedResult = terminal(resumedEvents);
-    expect(resumedResult.subtype).toBe("success");
-    expect((resumedResult as Extract<StreamEvent, { type: "result"; subtype: "success" }>).output).toBe("resumed successfully");
+    expect(resumedResult).toEqual(abortedResult);
 
-    // The model was called exactly once during the aborted run (1 turn),
-    // then once more on resume.
-    expect(callCount).toBe(2);
+    expect(callCount).toBe(1);
   });
 
-  it("abort BEFORE any model call on a durable run: no orphaned events, resume returns aborted-fast-path", async () => {
+  it("abort BEFORE any model call on a durable run: no orphaned events and exact terminal replay", async () => {
     // Pre-abort: the top-of-turn boundary fires before the model call.
     // The user event IS appended (before runLoop), and a checkpoint IS written
     // (runTurn seeds the rolling hash from the user event and checkpoints).
     // emitAborted then writes another checkpoint. The session has [user] event only.
-    // resume() sees the last event is "user", not "assistant", so it calls the model
-    // and completes the run.
+    // The durable terminal marker makes a later resume an exact replay.
     const store = await freshStore();
     const controller = new AbortController();
     controller.abort(); // pre-abort
@@ -417,11 +419,10 @@ describe("§16.4 cancellation: checkpoint-on-abort is resumable", () => {
     const storedEvents = await store.readEvents("s-preabort-durable");
     expect(storedEvents.some((e) => e.kind === "assistant")).toBe(false);
 
-    // Resume: model is called once, run completes.
+    // Resume: the persisted abort is authoritative; no model call is made.
     const resumedEvents = await collect(agent.resume("s-preabort-durable"));
     const resumedResult = terminal(resumedEvents);
-    expect(resumedResult.subtype).toBe("success");
-    expect((resumedResult as Extract<StreamEvent, { type: "result"; subtype: "success" }>).output).toBe("completed on resume");
-    expect(callCount).toBe(1);
+    expect(resumedResult).toEqual(terminal(abortedEvents));
+    expect(callCount).toBe(0);
   });
 });

@@ -35,4 +35,12 @@ describe("scopeKey", () => {
     expect(scopeKey(agent1)).toBe(scopeKey(agent2));
     expect(scopeKey(agent1)).toBe("shared:shared-kb");
   });
+
+  it("uses a versioned injective tuple when legacy delimiters would collide", () => {
+    const left: Scope = { kind: "user", agentId: "tenant:alpha", userId: "u" };
+    const right: Scope = { kind: "user", agentId: "tenant", userId: "alpha:u" };
+    expect(scopeKey(left)).not.toBe(scopeKey(right));
+    expect(scopeKey(left)).toBe('eidentic.scope.v2:["user","tenant:alpha","u"]');
+    expect(scopeKey(right)).toBe('eidentic.scope.v2:["user","tenant","alpha:u"]');
+  });
 });

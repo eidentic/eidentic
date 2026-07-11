@@ -48,7 +48,9 @@ Do not tag `v1.0.0` until these checks are true:
 - Cross-runtime smoke is green for Node, Bun, and Deno.
 - `pnpm audit --audit-level low` reports no known vulnerabilities.
 - `pnpm run perf:budget` passes after `pnpm -r build`.
-- README and package README examples match the current public API.
+- Public Markdown TypeScript examples match the current built API.
+- Packed ESM/CJS runtime and Node16/NodeNext declaration consumers work outside workspace symlinks.
+- Generated CLI templates compile against their declared dependencies.
 - Fresh install quickstarts work from outside the monorepo.
 - Launch feedback is triaged using [LAUNCH-FEEDBACK.md](LAUNCH-FEEDBACK.md); every open `p1`
   has an owner and explicit release decision.
@@ -80,8 +82,10 @@ The `v*` tag triggers `.github/workflows/publish.yml`, which runs:
 pnpm run release:publish
 ```
 
-That command installs with the frozen lockfile, builds, tests, typechecks, checks README examples,
-runs `pnpm audit --audit-level low`, and publishes only versioned packages with:
+That command installs with the frozen lockfile, builds, tests, typechecks, compiles generated CLI
+templates and public documentation examples, enforces performance budgets, installs every packed
+tarball in isolated ESM/CJS and Node16/NodeNext consumers, runs `pnpm audit --audit-level low`, and
+publishes only versioned packages with:
 
 ```sh
 pnpm changeset publish

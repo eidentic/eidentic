@@ -21,7 +21,7 @@ describe("spawn_agent — agent-as-tool (§8.2)", () => {
     const childModel = new MockModel([
       { content: [textBlock("the capital is Paris")], usage: { inputTokens: 3, outputTokens: 2 } },
     ]);
-    const child = new Agent({ id: "researcher", instructions: "You research facts.", model: childModel, store: childStore });
+    const child = new Agent({ permissions: { mode: "bypass" }, id: "researcher", instructions: "You research facts.", model: childModel, store: childStore });
 
     const parentStore = new InMemoryStore(); await parentStore.migrate();
     const parentModel = new MockModel([
@@ -29,6 +29,7 @@ describe("spawn_agent — agent-as-tool (§8.2)", () => {
       { content: [textBlock("Done: Paris.")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
     const parent = new Agent({
+      permissions: { mode: "bypass" },
       id: "lead", instructions: "Coordinate.", model: parentModel, store: parentStore,
       subAgents: { researcher: { agent: child, description: "Answers research questions." } },
     });
@@ -41,10 +42,11 @@ describe("spawn_agent — agent-as-tool (§8.2)", () => {
   });
 
   it("spawn_agent description lists each sub-agent name + description", async () => {
-    const a = new Agent({ id: "a", instructions: "", model: new MockModel([]), store: await (async () => { const s = new InMemoryStore(); await s.migrate(); return s; })() });
+    const a = new Agent({ permissions: { mode: "bypass" }, id: "a", instructions: "", model: new MockModel([]), store: await (async () => { const s = new InMemoryStore(); await s.migrate(); return s; })() });
     const parentModel = new MockModel([{ content: [textBlock("ok")], usage: { inputTokens: 1, outputTokens: 1 } }]);
     const parentStore = new InMemoryStore(); await parentStore.migrate();
     const parent = new Agent({
+      permissions: { mode: "bypass" },
       id: "lead", instructions: "", model: parentModel, store: parentStore,
       subAgents: {
         searcher: { agent: a, description: "Searches the web." },
@@ -68,7 +70,7 @@ describe("context isolation (§8.3)", () => {
     const childModel = new MockModel([
       { content: [textBlock("child answer")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
-    const child = new Agent({ id: "worker", instructions: "WORKER_SECRET_INSTRUCTIONS", model: childModel, store: childStore });
+    const child = new Agent({ permissions: { mode: "bypass" }, id: "worker", instructions: "WORKER_SECRET_INSTRUCTIONS", model: childModel, store: childStore });
 
     const parentStore = new InMemoryStore(); await parentStore.migrate();
     const parentModel = new MockModel([
@@ -76,6 +78,7 @@ describe("context isolation (§8.3)", () => {
       { content: [textBlock("synthesized")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
     const parent = new Agent({
+      permissions: { mode: "bypass" },
       id: "boss", instructions: "PARENT_SYSTEM_PROMPT_DO_NOT_LEAK", model: parentModel, store: parentStore,
       subAgents: { worker: { agent: child, description: "does work" } },
     });
@@ -99,7 +102,7 @@ describe("maxDepth via schema (§8.3)", () => {
   it("a sub-agent invoked at depth 1 has NO spawn_agent in its schema; the parent's schema has it", async () => {
     // Grandchild config (would be spawnable IF depth allowed) — but default maxDepth=1 blocks the child from spawning.
     const grandStore = new InMemoryStore(); await grandStore.migrate();
-    const grandchild = new Agent({ id: "grand", instructions: "", model: new MockModel([]), store: grandStore });
+    const grandchild = new Agent({ permissions: { mode: "bypass" }, id: "grand", instructions: "", model: new MockModel([]), store: grandStore });
 
     const childStore = new InMemoryStore(); await childStore.migrate();
     const childModel = new MockModel([
@@ -107,6 +110,7 @@ describe("maxDepth via schema (§8.3)", () => {
     ]);
     // The child itself declares subAgents — but at depth 1 with maxDepth 1 it must NOT receive spawn_agent.
     const child = new Agent({
+      permissions: { mode: "bypass" },
       id: "child", instructions: "", model: childModel, store: childStore,
       subAgents: { grand: { agent: grandchild, description: "deep" } },
     });
@@ -117,6 +121,7 @@ describe("maxDepth via schema (§8.3)", () => {
       { content: [textBlock("parent done")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
     const parent = new Agent({
+      permissions: { mode: "bypass" },
       id: "parent", instructions: "", model: parentModel, store: parentStore,
       subAgents: { child: { agent: child, description: "mid" } },
     });
@@ -132,11 +137,12 @@ describe("maxDepth via schema (§8.3)", () => {
 
   it("maxDepth=2 lets the child spawn (its schema includes spawn_agent)", async () => {
     const grandStore = new InMemoryStore(); await grandStore.migrate();
-    const grandchild = new Agent({ id: "grand", instructions: "", model: new MockModel([{ content: [textBlock("g")], usage: { inputTokens: 1, outputTokens: 1 } }]), store: grandStore });
+    const grandchild = new Agent({ permissions: { mode: "bypass" }, id: "grand", instructions: "", model: new MockModel([{ content: [textBlock("g")], usage: { inputTokens: 1, outputTokens: 1 } }]), store: grandStore });
 
     const childStore = new InMemoryStore(); await childStore.migrate();
     const childModel = new MockModel([{ content: [textBlock("c")], usage: { inputTokens: 1, outputTokens: 1 } }]);
     const child = new Agent({
+      permissions: { mode: "bypass" },
       id: "child", instructions: "", model: childModel, store: childStore, maxDepth: 2,
       subAgents: { grand: { agent: grandchild, description: "deep" } },
     });
@@ -147,6 +153,7 @@ describe("maxDepth via schema (§8.3)", () => {
       { content: [textBlock("done")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
     const parent = new Agent({
+      permissions: { mode: "bypass" },
       id: "parent", instructions: "", model: parentModel, store: parentStore, maxDepth: 2,
       subAgents: { child: { agent: child, description: "mid" } },
     });
@@ -163,7 +170,7 @@ describe("typed structured output (§8.2)", () => {
     const childModel = new MockModel([
       { content: [textBlock('{"steps":["a","b","c"]}')], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
-    const planner = new Agent({ id: "planner", instructions: "Return JSON.", model: childModel, store: childStore });
+    const planner = new Agent({ permissions: { mode: "bypass" }, id: "planner", instructions: "Return JSON.", model: childModel, store: childStore });
 
     const parentStore = new InMemoryStore(); await parentStore.migrate();
     const parentModel = new MockModel([
@@ -171,6 +178,7 @@ describe("typed structured output (§8.2)", () => {
       { content: [textBlock("ok")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
     const parent = new Agent({
+      permissions: { mode: "bypass" },
       id: "lead", instructions: "", model: parentModel, store: parentStore,
       subAgents: { planner: { agent: planner, description: "plans", outputSchema: z.object({ steps: z.array(z.string()) }) } },
     });
@@ -186,7 +194,7 @@ describe("typed structured output (§8.2)", () => {
     const childModel = new MockModel([
       { content: [textBlock("not json at all")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
-    const planner = new Agent({ id: "planner", instructions: "", model: childModel, store: childStore });
+    const planner = new Agent({ permissions: { mode: "bypass" }, id: "planner", instructions: "", model: childModel, store: childStore });
 
     const parentStore = new InMemoryStore(); await parentStore.migrate();
     const parentModel = new MockModel([
@@ -194,6 +202,7 @@ describe("typed structured output (§8.2)", () => {
       { content: [textBlock("ok")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
     const parent = new Agent({
+      permissions: { mode: "bypass" },
       id: "lead", instructions: "", model: parentModel, store: parentStore,
       subAgents: { planner: { agent: planner, description: "plans", outputSchema: z.object({ steps: z.array(z.string()) }) } },
     });

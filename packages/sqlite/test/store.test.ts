@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { SqliteStore } from "../src/index.js";
-import { EVENT_SCHEMA_VERSION, type Scope } from "@eidentic/types";
+import { EVENT_SCHEMA_VERSION, legacyScopeKey, scopeKey, type Scope } from "@eidentic/types";
 import { storeConformanceCases, durableConformanceCases } from "@eidentic/types/testing";
 
 describe("SqliteStore conformance", () => {
@@ -15,6 +15,24 @@ let store: SqliteStore;
 afterEach(async () => { await store?.close(); });
 
 describe("SqliteStore sessions & events", () => {
+  it("explicitly migrates an authoritative ambiguous legacy scope and refuses target merges", async () => {
+    store = new SqliteStore(":memory:");
+    await store.migrate();
+    const scope: Scope = { kind: "user", agentId: "acme:west", userId: "alice" };
+    const db = (store as unknown as { db: { prepare(sql: string): { run(...args: unknown[]): unknown } } }).db;
+    db.prepare("INSERT INTO blocks(scope_key,label,value,version,updated_at) VALUES(?,?,?,?,?)")
+      .run(legacyScopeKey(scope), "profile", "legacy", 0, "2026-01-01T00:00:00.000Z");
+
+    await expect(store.getBlock(scope, "profile")).resolves.toBeNull();
+    await expect(store.migrateLegacyScope(scope)).resolves.toEqual({ migrated: 1 });
+    await expect(store.getBlock(scope, "profile")).resolves.toMatchObject({ value: "legacy" });
+    expect(scopeKey(scope)).not.toBe(legacyScopeKey(scope));
+
+    db.prepare("INSERT INTO blocks(scope_key,label,value,version,updated_at) VALUES(?,?,?,?,?)")
+      .run(legacyScopeKey(scope), "other", "legacy-2", 0, "2026-01-01T00:00:00.000Z");
+    await expect(store.migrateLegacyScope(scope)).rejects.toThrow(/target is not empty/i);
+  });
+
   it("migrates, stores a session, appends and reads ordered events", async () => {
     store = new SqliteStore(":memory:");
     await store.migrate();

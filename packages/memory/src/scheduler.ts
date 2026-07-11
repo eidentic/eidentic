@@ -17,6 +17,8 @@ export interface MaintenanceResult {
   merged: number;
   /** Sum of distillation usage + dedupe usage (sweep adds none). Account to cost.background. */
   usage: Usage;
+  /** Full archival-dedup outcome when configured, including comparison-budget truncation signals. */
+  dedupe?: DedupeResult;
 }
 
 export interface ConsolidationSchedulerOptions {
@@ -98,6 +100,12 @@ export class ConsolidationScheduler {
       dedupe = await this.opts.memory.deduplicateArchival(scope, this.opts.dedupe);
     }
     const usage = addUsage(distillation.usage, dedupe.usage);
-    return { distillation, swept, merged: dedupe.merged, usage };
+    return {
+      distillation,
+      swept,
+      merged: dedupe.merged,
+      usage,
+      ...(this.opts.dedupe ? { dedupe } : {}),
+    };
   }
 }

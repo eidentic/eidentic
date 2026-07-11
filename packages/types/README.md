@@ -14,7 +14,7 @@ pnpm add @eidentic/types
 ## Usage
 
 ```ts
-// docs-check-skip
+// docs-check-skip: illustrative partial StorePort implementation
 import type {
   StorePort,
   VectorPort,

@@ -135,6 +135,53 @@ describe("Session", () => {
     expect(reloaded.events().length).toBe(1);
   });
 
+  it("rejects opening an owned session when the caller provides no identity", async () => {
+    const store = new InMemoryStore();
+    await store.migrate();
+
+    await Session.open(store, {
+      sessionId: "owned-without-caller",
+      agentId: "a1",
+      now: () => "t0",
+      newId: () => "id0",
+      userId: "alice",
+    });
+
+    await expect(
+      Session.open(store, {
+        sessionId: "owned-without-caller",
+        agentId: "a1",
+        now: () => "t1",
+        newId: () => "id1",
+      }),
+    ).rejects.toThrow(/owned by a different principal/);
+  });
+
+  it("does not let an org match override a mismatched user owner", async () => {
+    const store = new InMemoryStore();
+    await store.migrate();
+
+    await Session.open(store, {
+      sessionId: "user-and-org-owned",
+      agentId: "a1",
+      now: () => "t0",
+      newId: () => "id0",
+      userId: "alice",
+      orgId: "acme",
+    });
+
+    await expect(
+      Session.open(store, {
+        sessionId: "user-and-org-owned",
+        agentId: "a1",
+        now: () => "t1",
+        newId: () => "id1",
+        userId: "bob",
+        orgId: "acme",
+      }),
+    ).rejects.toThrow(/owned by a different principal/);
+  });
+
   it("H1 — throws StoreConflictError when a different apiKey opens an existing owned session", async () => {
     const store = new InMemoryStore();
     await store.migrate();
@@ -146,6 +193,8 @@ describe("Session", () => {
       newId: () => "id0",
       apiKey: "key-a",
     });
+    expect((await store.getSession("apikey-owned-sess"))?.apiKey).toMatch(/^eidentic\.credential\.sha256:[0-9a-f]{64}$/);
+    expect((await store.getSession("apikey-owned-sess"))?.apiKey).not.toContain("key-a");
 
     await expect(
       Session.open(store, {
@@ -158,21 +207,40 @@ describe("Session", () => {
     ).rejects.toThrow(StoreConflictError);
   });
 
-  it("Finding #1 — session with no owner (legacy) is openable by any identity (back-compat)", async () => {
+  it("upgrades a verified legacy plaintext credential in place", async () => {
+    const store = new InMemoryStore();
+    await store.createSession({ id: "legacy-key", agentId: "a1", createdAt: "t0", apiKey: "raw-secret" });
+    await Session.open(store, {
+      sessionId: "legacy-key",
+      agentId: "a1",
+      now: () => "t1",
+      newId: () => "id1",
+      apiKey: "raw-secret",
+    });
+    expect((await store.getSession("legacy-key"))?.apiKey).toMatch(/^eidentic\.credential\.sha256:[0-9a-f]{64}$/);
+    expect((await store.getSession("legacy-key"))?.apiKey).not.toContain("raw-secret");
+  });
+
+  it("Finding #1 — authenticated callers cannot take over ownerless legacy sessions by default", async () => {
     const store = new InMemoryStore();
     await store.migrate();
 
     // Create a legacy session with no userId/orgId.
     await store.createSession({ id: "legacy-sess", agentId: "a1", createdAt: "t0" });
 
-    // Bob can open it — back-compat path.
-    const s = await Session.open(store, {
-      sessionId: "legacy-sess",
-      agentId: "a1",
-      now: () => "t1",
-      newId: () => "id1",
-      userId: "bob",
-    });
-    expect(s.id).toBe("legacy-sess");
+    await expect(Session.open(store, {
+      sessionId: "legacy-sess", agentId: "a1", now: () => "t1", newId: () => "id1", userId: "bob",
+    })).rejects.toThrow(/no recorded owner/);
+
+    // Ownerless trusted/single-tenant use remains compatible.
+    await expect(Session.open(store, {
+      sessionId: "legacy-sess", agentId: "a1", now: () => "t1", newId: () => "id2",
+    })).resolves.toMatchObject({ id: "legacy-sess" });
+
+    // Operators can opt in only after performing an independent authorization check.
+    await expect(Session.open(store, {
+      sessionId: "legacy-sess", agentId: "a1", now: () => "t1", newId: () => "id3",
+      userId: "bob", unsafeAllowOwnerlessSessionAccess: true,
+    })).resolves.toMatchObject({ id: "legacy-sess" });
   });
 });

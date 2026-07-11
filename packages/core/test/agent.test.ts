@@ -20,6 +20,21 @@ const remember = createTool({
 });
 
 describe("Agent durable resume", () => {
+  it("rejects an unknown session without creating an orphan record", async () => {
+    const store = new InMemoryStore();
+    const agent = new Agent({
+      id: "a",
+      instructions: "",
+      model: new MockModel([]),
+      store,
+      durable: true,
+    });
+    await expect((async () => {
+      for await (const _ of agent.resume("typo")) { /* drain */ }
+    })()).rejects.toThrow(/unknown session/i);
+    expect(await store.getSession("typo")).toBeNull();
+  });
+
   it("durable: true with a non-durable store throws a clear error on query", async () => {
     // A bare StorePort without DurablePort methods.
     const bare = {
@@ -81,8 +96,10 @@ describe("Agent", () => {
       now: () => "t", newId: ((n) => () => `id2_${n++}`)(0),
     });
     await run(agent2, "hello again", "s2");
-    const system = (model2.calls[0]!.messages[0]!.content as string);
-    expect(system).toContain("name: Baran");
+    const context = String(model2.calls[0]!.messages.find((message) =>
+      message.role === "user" && String(message.content).includes("<memory>"),
+    )?.content);
+    expect(context).toContain("name: Baran");
   });
 
   it("replays prior turns into the next query on the same session", async () => {
@@ -103,5 +120,60 @@ describe("Agent", () => {
     expect(userContents).toContain("first");
     expect(userContents).toContain("second");
     expect(msgs.some((m) => m.role === "assistant")).toBe(true);
+  });
+
+  it("serializes concurrent queries targeting the same session in one process", async () => {
+    const store = new InMemoryStore();
+    await store.migrate();
+    let releaseFirst!: () => void;
+    const firstMayFinish = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let signalFirstStarted!: () => void;
+    const firstStarted = new Promise<void>((resolve) => { signalFirstStarted = resolve; });
+    let calls = 0;
+    const model: import("@eidentic/types").ModelPort = {
+      async complete() {
+        calls++;
+        if (calls === 1) {
+          signalFirstStarted();
+          await firstMayFinish;
+        }
+        return {
+          content: [textBlock(`answer-${calls}`)],
+          usage: { inputTokens: 1, outputTokens: 1 },
+        };
+      },
+    };
+    const firstAgent = new Agent({
+      id: "serialized-agent",
+      instructions: "",
+      model,
+      store,
+      now: () => "t",
+      newId: ((n) => () => `serial-a-${n++}`)(0),
+    });
+    const secondAgent = new Agent({
+      id: "serialized-agent",
+      instructions: "",
+      model,
+      store,
+      now: () => "t",
+      newId: ((n) => () => `serial-b-${n++}`)(0),
+    });
+
+    const first = run(firstAgent, "first", "shared-session");
+    const second = run(secondAgent, "second", "shared-session");
+    await firstStarted;
+    await Promise.resolve();
+    expect(calls).toBe(1);
+    releaseFirst();
+
+    const [firstEvents, secondEvents] = await Promise.all([first, second]);
+    expect(firstEvents.at(-1)).toMatchObject({ type: "result", subtype: "success" });
+    expect(secondEvents.at(-1)).toMatchObject({ type: "result", subtype: "success" });
+    const stored = await store.readEvents("shared-session");
+    expect(stored.filter((event) => event.kind === "user").map((event) => event.payload)).toEqual([
+      "first",
+      "second",
+    ]);
   });
 });

@@ -330,7 +330,8 @@ describe("H1: apiKey-only session ownership", () => {
     // Verify session has apiKey recorded
     const session = await store.getSession("apikey-sess-a");
     expect(session).not.toBeNull();
-    expect(session?.apiKey).toBe("key-tenant-a");
+    expect(session?.apiKey).toMatch(/^eidentic\.credential\.sha256:[0-9a-f]{64}$/);
+    expect(session?.apiKey).not.toContain("key-tenant-a");
 
     // Tenant B tries to read A's events → 403
     const evRes = await app.request("/v1/agents/demo/sessions/apikey-sess-a/events", {
@@ -365,7 +366,7 @@ describe("H1: apiKey-only session ownership", () => {
     expect(body.events.length).toBeGreaterThan(0);
   });
 
-  it("legacy ownerless session (no userId/orgId/apiKey) is still accessible (back-compat)", async () => {
+  it("legacy ownerless session is denied by default when auth is configured", async () => {
     const store = new InMemoryStore();
     const { agent } = makeAgent([], store);
     const app = createServer({
@@ -379,11 +380,11 @@ describe("H1: apiKey-only session ownership", () => {
     await store.migrate();
     await store.createSession({ id: "ownerless-legacy", agentId: "test-agent", createdAt: new Date().toISOString() });
 
-    // Any authenticated principal can read it → 200 (back-compat)
+    // Authenticated multi-tenant mode fails closed for ownerless legacy data.
     const evRes = await app.request("/v1/agents/demo/sessions/ownerless-legacy/events", {
       headers: { authorization: "Bearer any-key" },
     });
-    expect(evRes.status).toBe(200);
+    expect(evRes.status).toBe(403);
   });
 
   it("apiKey tenant B cannot query into apiKey tenant A's session", async () => {
@@ -592,7 +593,7 @@ describe("M7: per-field input length cap", () => {
     expect(body.error).toContain("50");
   });
 
-  it("/resume: string decision over maxInputChars → 400", async () => {
+  it("/resume: legacy string decisions are rejected by the typed HITL contract", async () => {
     const { agent } = makeAgent([]);
     const app = createServer({
       agents: { demo: agent },
@@ -607,7 +608,7 @@ describe("M7: per-field input length cap", () => {
     });
     expect(res.status).toBe(400);
     const body = await res.json() as { error: string };
-    expect(body.error).toContain("20");
+    expect(body.error).toContain("approved: boolean");
   });
 
   it("/resume: non-string decision is not checked against maxInputChars", async () => {
@@ -766,9 +767,7 @@ describe("M9: Last-Event-ID validation", () => {
     expect(r2.status).toBe(200);
     const text = await r2.text();
     const events = parseSseEvents(text);
-    // Should get the synthesized result only (no stored events to replay)
-    const resultEvent = events.find((e) => e.event === "result");
-    expect(resultEvent).toBeDefined();
+    expect(events).toEqual([]);
   });
 
   it("/query: valid non-negative Last-Event-ID replays correct events", async () => {
@@ -788,7 +787,7 @@ describe("M9: Last-Event-ID validation", () => {
     const stored = await store.readEvents("m9-valid-leid");
     const lastSeq = stored[stored.length - 1]!.seq;
 
-    // Reconnect with lastSeq → nothing new to replay, just the synthetic result
+    // Reconnect with lastSeq → the terminal was already acknowledged; emit no duplicate.
     const r2 = await app.request("/v1/agents/demo/query", {
       method: "POST",
       headers: { "content-type": "application/json", "last-event-id": String(lastSeq) },
@@ -797,9 +796,7 @@ describe("M9: Last-Event-ID validation", () => {
     expect(r2.status).toBe(200);
     const text = await r2.text();
     const events = parseSseEvents(text);
-    const resultEvent = events.find((e) => e.event === "result");
-    expect(resultEvent).toBeDefined();
-    expect((resultEvent!.data as { subtype: string }).subtype).toBe("success");
+    expect(events).toEqual([]);
   });
 
   it("/resume: negative Last-Event-ID → 400", async () => {

@@ -10,7 +10,7 @@ import { z } from "zod";
 import { InMemoryStore } from "@eidentic/types/testing";
 import { textBlock, toolUseBlock, type ModelPort, type ModelRequest, type ModelResponse } from "@eidentic/types";
 import { Agent } from "../src/agent.js";
-import { createTool } from "../src/tool.js";
+import { createTool, idempotencyLedgerKey } from "../src/tool.js";
 
 /** Minimal scripted model; tracks calls so tests can assert model was NOT called for re-emit. */
 class ScriptModel implements ModelPort {
@@ -54,7 +54,7 @@ describe("resume re-dispatch — suspension resume (no model re-emit)", () => {
     const m1 = new ScriptModel([
       { content: [toolUseBlock("tc1", "approve_action", { action: "deploy" })], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
-    const a1 = new Agent({ id: "ag", instructions: "", model: m1, store, tools: [approveTool], durable: true, now: () => "t", newId: newIdFactory("e") });
+    const a1 = new Agent({ permissions: { mode: "bypass" }, id: "ag", instructions: "", model: m1, store, tools: [approveTool], durable: true, now: () => "t", newId: newIdFactory("e") });
     const firstEvents = [];
     for await (const e of a1.query("do deploy", { sessionId: "sess1" })) firstEvents.push(e);
 
@@ -69,7 +69,7 @@ describe("resume re-dispatch — suspension resume (no model re-emit)", () => {
       // No tool_use re-emission scripted — only the final answer.
       { content: [textBlock("action approved and done")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
-    const a2 = new Agent({ id: "ag", instructions: "", model: m2, store, tools: [approveTool], durable: true, now: () => "t", newId: newIdFactory("r") });
+    const a2 = new Agent({ permissions: { mode: "bypass" }, id: "ag", instructions: "", model: m2, store, tools: [approveTool], durable: true, now: () => "t", newId: newIdFactory("r") });
 
     const resumed = [];
     for await (const e of a2.resume("sess1", { decision: { approved: true } })) resumed.push(e);
@@ -108,14 +108,14 @@ describe("resume re-dispatch — suspension resume (no model re-emit)", () => {
     const m1 = new ScriptModel([
       { content: [toolUseBlock("tc2", "approve_action", { action: "delete" })], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
-    const a1 = new Agent({ id: "ag", instructions: "", model: m1, store, tools: [approveTool], durable: true, now: () => "t", newId: newIdFactory("e") });
+    const a1 = new Agent({ permissions: { mode: "bypass" }, id: "ag", instructions: "", model: m1, store, tools: [approveTool], durable: true, now: () => "t", newId: newIdFactory("e") });
     for await (const _ of a1.query("do delete", { sessionId: "sess2" })) { /* drain */ }
     expect(state.approvals).toBe(0);
 
     const m2 = new ScriptModel([
       { content: [textBlock("action declined")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
-    const a2 = new Agent({ id: "ag", instructions: "", model: m2, store, tools: [approveTool], durable: true, now: () => "t", newId: newIdFactory("r") });
+    const a2 = new Agent({ permissions: { mode: "bypass" }, id: "ag", instructions: "", model: m2, store, tools: [approveTool], durable: true, now: () => "t", newId: newIdFactory("r") });
     const resumed = [];
     for await (const e of a2.resume("sess2", { decision: { approved: false } })) resumed.push(e);
 
@@ -165,6 +165,7 @@ describe("resume re-dispatch — crash mid-tool-batch (persisted assistant with 
       { content: [textBlock("work completed")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
     const agentResume = new Agent({
+      permissions: { mode: "bypass" },
       id: "ag", instructions: "", model: resumeModel, store,
       tools: [doWork], durable: true, now: () => "t",
       newId: newIdFactory("r"),
@@ -188,7 +189,7 @@ describe("resume re-dispatch — crash mid-tool-batch (persisted assistant with 
 
     // The idempotency ledger now has "applied" for the work key.
     // A7: key is prefixed with the sessionId ("crash-sess") by ToolRegistry.runOne.
-    const idem = await store.getIdempotency("crash-sess:work:build");
+    const idem = await store.getIdempotency(idempotencyLedgerKey("crash-sess", "work:build"));
     expect(idem?.status).toBe("applied");
   });
 
@@ -235,13 +236,14 @@ describe("resume re-dispatch — crash mid-tool-batch (persisted assistant with 
     ]);
     // Seed the idempotency for c4 as "applied" to reflect it completed.
     // A7: key must include the sessionId prefix ("batch-sess") to match what ToolRegistry.runOne stores.
-    await store.recordIntent("batch-sess:count:alpha");
-    await store.recordCompletion("batch-sess:count:alpha");
+    await store.recordIntent(idempotencyLedgerKey("batch-sess", "count:alpha"), "", { sessionId: "batch-sess" });
+    await store.recordCompletion(idempotencyLedgerKey("batch-sess", "count:alpha"), undefined, { sessionId: "batch-sess" });
 
     const resumeModel = new ScriptModel([
       { content: [textBlock("both done")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
     const agentResume = new Agent({
+      permissions: { mode: "bypass" },
       id: "ag", instructions: "", model: resumeModel, store,
       tools: [countTool], durable: true, now: () => "t",
       newId: newIdFactory("rb"),

@@ -32,6 +32,38 @@ const result = await memory.retrieve({ text: "budget decisions", scope, topK: 5 
 console.log(result.snippets);
 ```
 
+## Bounded archival deduplication
+
+`deduplicateArchival` preserves exhaustive pair matching for small scopes, but caps one maintenance
+pass at 100,000 candidate pairs by default. Large scopes use a deterministic widening-window order
+so the budget covers the whole list before considering more distant entries. A partial pass is never
+silent:
+
+```ts
+const maintenanceAbort = new AbortController();
+const dedupe = await memory.deduplicateArchival(scope, {
+  mergeModel,
+  threshold: 0.95,
+  maxComparisons: 100_000,
+  maxMerges: 100,
+  maxMergeTokens: 100_000,
+  signal: maintenanceAbort.signal,
+});
+
+if (dedupe.truncated) {
+  console.warn(
+    `Archival dedup used ${dedupe.comparisons}/${dedupe.totalPairs} comparisons; ` +
+    "partition the scope or schedule another pass.",
+  );
+}
+```
+
+The result reports comparison, merge, and token budgets plus `truncated`. Duplicate lexical rows
+are physically deleted after a successful canonical merge. `ConsolidationScheduler.runNow()` also
+exposes the same object as `result.dedupe` when
+deduplication is configured. Raising the budget is explicit; use a larger value only in a bounded
+offline maintenance window.
+
 ## Links
 
 - [GitHub](https://github.com/eidentic/eidentic)

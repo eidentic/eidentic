@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import { createRequire } from "node:module";
 import {
   StoreConflictError,
+  legacyScopeKey,
   scopeKey,
   tokenize,
   type StorePort,
@@ -18,6 +19,7 @@ import {
   type DurablePort,
   type Checkpoint,
   type IdempotencyRecord,
+  type IdempotencyMetadata,
   type IdempotencyStatus,
   type SuspendDecision,
 } from "@eidentic/types";
@@ -26,8 +28,10 @@ import { runMigrations } from "./migrations.js";
 /** Lazy loader for better-sqlite3: only fires when SqliteStore is constructed. */
 function loadBetterSqlite(): typeof import("better-sqlite3") {
   try {
-    // CJS bundle: `require` exists; ESM bundle: derive it from import.meta.url
-    const req = typeof require === "function" ? require : createRequire(import.meta.url);
+    // In a CJS bundle __filename is available; in native ESM import.meta.url is the stable base.
+    // Do not probe `require`: esbuild's ESM require shim is a function but cannot load native CJS
+    // addons, which made the published ESM entry fail at runtime.
+    const req = createRequire(typeof __filename === "string" ? __filename : import.meta.url);
     // eslint-disable-next-line @typescript-eslint/no-unsafe-return
     return req("better-sqlite3");
   } catch (e) {
@@ -37,6 +41,14 @@ function loadBetterSqlite(): typeof import("better-sqlite3") {
       "@eidentic/postgres instead. Original: " + (e as Error).message,
     );
   }
+}
+
+function sessionSelection(scope: Scope): { where: string; args: string[] } | null {
+  if (scope.kind === "agent") return { where: "agent_id = ?", args: [scope.agentId] };
+  if (scope.kind === "user") return { where: "agent_id = ? AND user_id = ?", args: [scope.agentId, scope.userId] };
+  if (scope.kind === "org") return { where: "agent_id = ? AND org_id = ?", args: [scope.agentId, scope.orgId] };
+  if (scope.kind === "thread") return { where: "agent_id = ? AND id = ?", args: [scope.agentId, scope.sessionId] };
+  return null;
 }
 
 /** Turn arbitrary user text into a safe FTS5 MATCH expression (OR of quoted tokens), or null if no tokens. */
@@ -112,6 +124,36 @@ export class SqliteStore implements StorePort, GraphPort, DurablePort {
     }));
   }
 
+  async listMemory(scope: Scope) {
+    const rows = this.db.prepare(
+      `SELECT memories.ext_id AS id, memories.text AS text, mm.ingested_at, mm.metadata
+       FROM memories
+       LEFT JOIN memory_meta mm ON mm.scope_key = memories.scope_key AND mm.ext_id = memories.ext_id
+       WHERE memories.scope_key = ? ORDER BY memories.ext_id`,
+    ).all(scopeKey(scope)) as Array<{ id: string; text: string; ingested_at: number | null; metadata: string | null }>;
+    return rows.map((row) => ({
+      id: row.id,
+      text: row.text,
+      ...(row.ingested_at !== null ? { ingestedAt: row.ingested_at } : {}),
+      ...(row.metadata !== null ? { metadata: JSON.parse(row.metadata) as Record<string, unknown> } : {}),
+    }));
+  }
+
+  async deleteMemory(scope: Scope, ids: string[]): Promise<number> {
+    if (ids.length === 0) return 0;
+    const sk = scopeKey(scope);
+    const delMemory = this.db.prepare(`DELETE FROM memories WHERE scope_key = ? AND ext_id = ?`);
+    const delMeta = this.db.prepare(`DELETE FROM memory_meta WHERE scope_key = ? AND ext_id = ?`);
+    return this.db.transaction((targets: string[]) => {
+      let deleted = 0;
+      for (const id of new Set(targets)) {
+        deleted += delMemory.run(sk, id).changes;
+        delMeta.run(sk, id);
+      }
+      return deleted;
+    })(ids);
+  }
+
   async close() {
     this.db.close();
   }
@@ -134,6 +176,10 @@ export class SqliteStore implements StorePort, GraphPort, DurablePort {
       ...(row.org_id !== null ? { orgId: row.org_id } : {}),
       ...(row.api_key !== null ? { apiKey: row.api_key } : {}),
     };
+  }
+  async replaceSessionApiKey(sessionId: string, expected: string, replacement: string): Promise<boolean> {
+    return this.db.prepare(`UPDATE sessions SET api_key = ? WHERE id = ? AND api_key = ?`)
+      .run(replacement, sessionId, expected).changes === 1;
   }
 
   async appendEvents(events: StoredEvent[]) {
@@ -471,21 +517,37 @@ export class SqliteStore implements StorePort, GraphPort, DurablePort {
       total += this.db.prepare(`DELETE FROM memory_meta WHERE scope_key = ?`).run(key).changes;
       total += this.db.prepare(`DELETE FROM block_history WHERE scope_key = ?`).run(key).changes;
       total += this.db.prepare(`DELETE FROM blocks WHERE scope_key = ?`).run(key).changes;
-      // Sessions + events: delete sessions for this scope's agentId, then cascade events.
-      // sessions.agent_id is the agentId from the scope (present for agent/user/thread/org kinds).
-      const agentId = "agentId" in scope ? (scope as { agentId: string }).agentId : null;
-      if (agentId !== null) {
-        const sessions = this.db
-          .prepare(`SELECT id FROM sessions WHERE agent_id = ?`)
-          .all(agentId) as Array<{ id: string }>;
-        for (const sess of sessions) {
-          total += this.db.prepare(`DELETE FROM events WHERE session_id = ?`).run(sess.id).changes;
-        }
-        total += this.db.prepare(`DELETE FROM sessions WHERE agent_id = ?`).run(agentId).changes;
+      total += this.db.prepare(`DELETE FROM idempotency_keys WHERE scope_key = ?`).run(key).changes;
+
+      const selection = sessionSelection(scope);
+      if (selection) {
+        const selectedSessions = `SELECT id FROM sessions WHERE ${selection.where}`;
+        total += this.db.prepare(`DELETE FROM idempotency_keys WHERE session_id IN (${selectedSessions})`).run(...selection.args).changes;
+        total += this.db.prepare(`DELETE FROM suspension_decisions WHERE session_id IN (${selectedSessions})`).run(...selection.args).changes;
+        total += this.db.prepare(`DELETE FROM checkpoints WHERE session_id IN (${selectedSessions})`).run(...selection.args).changes;
+        total += this.db.prepare(`DELETE FROM events WHERE session_id IN (${selectedSessions})`).run(...selection.args).changes;
+        total += this.db.prepare(`DELETE FROM sessions WHERE ${selection.where}`).run(...selection.args).changes;
       }
       return total;
     });
     return { deleted: tx() };
+  }
+
+  async migrateLegacyScope(scope: Scope): Promise<{ migrated: number }> {
+    const from = legacyScopeKey(scope);
+    const to = scopeKey(scope);
+    if (from === to) return { migrated: 0 };
+    const tables = ["facts", "memories", "memory_meta", "block_history", "blocks", "idempotency_keys"] as const;
+    const tx = this.db.transaction(() => {
+      for (const table of tables) {
+        const target = this.db.prepare(`SELECT 1 FROM ${table} WHERE scope_key = ? LIMIT 1`).get(to);
+        if (target) throw new StoreConflictError(`legacy scope migration target is not empty: ${to}`);
+      }
+      let migrated = 0;
+      for (const table of tables) migrated += this.db.prepare(`UPDATE ${table} SET scope_key = ? WHERE scope_key = ?`).run(to, from).changes;
+      return migrated;
+    });
+    return { migrated: tx() };
   }
 
   async writeCheckpoint(sessionId: string, seq: number, hash: string): Promise<void> {
@@ -504,31 +566,61 @@ export class SqliteStore implements StorePort, GraphPort, DurablePort {
     return row ? { sessionId: row.session_id, seq: row.seq, hash: row.hash, createdAt: row.created_at } : null;
   }
 
-  async recordIntent(key: string, argsHash: string): Promise<void> {
-    // INSERT OR IGNORE: intent is write-once; an existing (intent or applied) row is left untouched.
-    this.db
-      .prepare(`INSERT OR IGNORE INTO idempotency_keys (key, args_hash, status, result, created_at) VALUES (?, ?, 'intent', NULL, ?)`)
-      .run(key, argsHash, this.graphNow());
+  async recordIntent(key: string, argsHash: string, metadata?: IdempotencyMetadata): Promise<void> {
+    // Intent lifecycle fields are write-once; missing ownership metadata may be enriched but never reassigned.
+    const tx = this.db.transaction(() => {
+      this.db
+        .prepare(`INSERT OR IGNORE INTO idempotency_keys
+          (key, args_hash, status, result, created_at, scope_key, session_id, owner_key)
+          VALUES (?, ?, 'intent', NULL, ?, ?, ?, ?)`)
+        .run(key, argsHash, this.graphNow(), metadata?.scopeKey ?? null, metadata?.sessionId ?? null, metadata?.ownerKey ?? null);
+      this.db
+        .prepare(`UPDATE idempotency_keys SET
+          scope_key = COALESCE(scope_key, ?), session_id = COALESCE(session_id, ?), owner_key = COALESCE(owner_key, ?)
+          WHERE key = ?`)
+        .run(metadata?.scopeKey ?? null, metadata?.sessionId ?? null, metadata?.ownerKey ?? null, key);
+    });
+    tx();
   }
 
-  async recordCompletion(key: string, result: unknown): Promise<void> {
+  async claimIntent(key: string, argsHash: string, metadata?: IdempotencyMetadata): Promise<boolean> {
+    const result = this.db
+      .prepare(`INSERT OR IGNORE INTO idempotency_keys
+        (key, args_hash, status, result, created_at, scope_key, session_id, owner_key)
+        VALUES (?, ?, 'intent', NULL, ?, ?, ?, ?)`)
+      .run(key, argsHash, this.graphNow(), metadata?.scopeKey ?? null, metadata?.sessionId ?? null, metadata?.ownerKey ?? null);
+    return result.changes === 1;
+  }
+
+  async releaseIntent(key: string, argsHash: string): Promise<boolean> {
+    const result = this.db.prepare(
+      `DELETE FROM idempotency_keys WHERE key = ? AND args_hash = ? AND status = 'intent'`,
+    ).run(key, argsHash);
+    return result.changes === 1;
+  }
+
+  async recordCompletion(key: string, result: unknown, metadata?: IdempotencyMetadata): Promise<void> {
     const serialized = JSON.stringify(result ?? null);
     const tx = this.db.transaction(() => {
       // Ensure a row exists (covers completion without a prior intent), then flip to applied.
       this.db
-        .prepare(`INSERT OR IGNORE INTO idempotency_keys (key, args_hash, status, result, created_at) VALUES (?, '', 'intent', NULL, ?)`)
-        .run(key, this.graphNow());
+        .prepare(`INSERT OR IGNORE INTO idempotency_keys
+          (key, args_hash, status, result, created_at, scope_key, session_id, owner_key)
+          VALUES (?, '', 'intent', NULL, ?, ?, ?, ?)`)
+        .run(key, this.graphNow(), metadata?.scopeKey ?? null, metadata?.sessionId ?? null, metadata?.ownerKey ?? null);
       this.db
-        .prepare(`UPDATE idempotency_keys SET status = 'applied', result = ? WHERE key = ?`)
-        .run(serialized, key);
+        .prepare(`UPDATE idempotency_keys SET status = 'applied', result = ?,
+          scope_key = COALESCE(scope_key, ?), session_id = COALESCE(session_id, ?), owner_key = COALESCE(owner_key, ?)
+          WHERE key = ?`)
+        .run(serialized, metadata?.scopeKey ?? null, metadata?.sessionId ?? null, metadata?.ownerKey ?? null, key);
     });
     tx();
   }
 
   async getIdempotency(key: string): Promise<IdempotencyRecord | null> {
     const row = this.db
-      .prepare(`SELECT key, args_hash, status, result, created_at FROM idempotency_keys WHERE key = ?`)
-      .get(key) as { key: string; args_hash: string; status: string; result: string | null; created_at: string } | undefined;
+      .prepare(`SELECT key, args_hash, status, result, created_at, scope_key, session_id, owner_key FROM idempotency_keys WHERE key = ?`)
+      .get(key) as { key: string; args_hash: string; status: string; result: string | null; created_at: string; scope_key: string | null; session_id: string | null; owner_key: string | null } | undefined;
     if (!row) return null;
     return {
       key: row.key,
@@ -536,6 +628,9 @@ export class SqliteStore implements StorePort, GraphPort, DurablePort {
       status: row.status as IdempotencyStatus,
       ...(row.result !== null ? { result: JSON.parse(row.result) } : {}),
       createdAt: row.created_at,
+      ...(row.scope_key !== null ? { scopeKey: row.scope_key } : {}),
+      ...(row.session_id !== null ? { sessionId: row.session_id } : {}),
+      ...(row.owner_key !== null ? { ownerKey: row.owner_key } : {}),
     };
   }
 

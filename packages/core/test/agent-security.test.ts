@@ -72,19 +72,25 @@ describe("Agent schema filtering with permissions", () => {
     expect(toolsInSchema).toContain("safe_op");
   });
 
-  it("no permissions config: all tools in schema (unchanged baseline)", async () => {
+  it("no permissions config keeps tools discoverable but gates mutating dispatch", async () => {
     const store = new InMemoryStore(); await store.migrate();
-    const model = new MockModel([{ content: [textBlock("done")], usage: { inputTokens: 1, outputTokens: 1 } }]);
+    const model = new MockModel([
+      { content: [toolUseBlock("c1", "danger_rm", {})], usage: { inputTokens: 1, outputTokens: 1 } },
+      { content: [textBlock("done")], usage: { inputTokens: 1, outputTokens: 1 } },
+    ]);
 
     const agent = new Agent({
       id: "a", instructions: "", model, store, tools: [safeTool, dangerTool],
       now: () => "t", newId: ((n) => () => `e${n++}`)(0),
     });
 
-    await run(agent, "hello", "s1");
+    const events = await run(agent, "hello", "s1");
     const toolsInSchema = model.calls[0]!.tools.map((t) => t.name);
     expect(toolsInSchema).toContain("safe_op");
     expect(toolsInSchema).toContain("danger_rm");
+    const result = events.find((event) => event.type === "tool.result" && event.toolName === "danger_rm");
+    expect(result?.isError).toBe(true);
+    expect((result?.output as { error?: string })?.error).toMatch(/permission denied/i);
   });
 
   it("denied tool attempted at dispatch still returns permission-denied (defense in depth)", async () => {
@@ -228,12 +234,11 @@ describe("Fix 4 — ctx.signal threading", () => {
 // ─── EnvSecrets ───────────────────────────────────────────────────────────────
 
 describe("EnvSecrets", () => {
-  it("reads from process.env", async () => {
+  it("reads only explicitly allowed environment refs", async () => {
     const { EnvSecrets } = await import("../src/index.js");
-    const env = new EnvSecrets();
-    process.env["TEST_SECRET_XYZ"] = "hello-env";
+    const env = new EnvSecrets(["TEST_SECRET_XYZ"], { TEST_SECRET_XYZ: "hello-env", OTHER: "hidden" });
     expect(await env.get("TEST_SECRET_XYZ")).toBe("hello-env");
-    expect(await env.get("DEFINITELY_NOT_SET_ABCDEF")).toBeUndefined();
-    delete process.env["TEST_SECRET_XYZ"];
+    await expect(env.get("OTHER")).rejects.toThrow(/not allowed/i);
+    await expect(env.get("../INVALID")).rejects.toThrow(/invalid secret ref/i);
   });
 });

@@ -14,6 +14,7 @@
  */
 import {
   StoreConflictError,
+  legacyScopeKey,
   scopeKey,
   type StorePort,
   type Scope,
@@ -69,6 +70,7 @@ export interface ConvexRunner {
 export interface ConvexStoreFns {
   createSession: FnRef;
   getSession: FnRef;
+  replaceSessionApiKey: FnRef;
   listSessions: FnRef;
   appendEvents: FnRef;
   readEvents: FnRef;
@@ -80,15 +82,20 @@ export interface ConvexStoreFns {
   listBlocks: FnRef;
   indexMemory: FnRef;
   searchMemory: FnRef;
+  listMemory: FnRef;
+  deleteMemory: FnRef;
   assertFact: FnRef;
   queryFacts: FnRef;
   corroborate: FnRef;
   expireFacts: FnRef;
   sweepExpired: FnRef;
   eraseScope: FnRef;
+  migrateLegacyScope: FnRef;
   writeCheckpoint: FnRef;
   lastCheckpoint: FnRef;
   recordIntent: FnRef;
+  claimIntent: FnRef;
+  releaseIntent: FnRef;
   recordCompletion: FnRef;
   getIdempotency: FnRef;
   recordDecision: FnRef;
@@ -105,11 +112,11 @@ export interface ConvexVectorFns {
 }
 
 const STORE_FN_NAMES: (keyof ConvexStoreFns)[] = [
-  "createSession", "getSession", "listSessions", "appendEvents", "readEvents",
+  "createSession", "getSession", "replaceSessionApiKey", "listSessions", "appendEvents", "readEvents",
   "getBlocks", "getBlock", "upsertBlock", "appendBlock", "getBlockHistory", "listBlocks",
-  "indexMemory", "searchMemory", "assertFact", "queryFacts", "corroborate", "expireFacts",
-  "sweepExpired", "eraseScope",
-  "writeCheckpoint", "lastCheckpoint", "recordIntent", "recordCompletion", "getIdempotency",
+  "indexMemory", "searchMemory", "listMemory", "deleteMemory", "assertFact", "queryFacts", "corroborate", "expireFacts",
+  "sweepExpired", "eraseScope", "migrateLegacyScope",
+  "writeCheckpoint", "lastCheckpoint", "recordIntent", "claimIntent", "releaseIntent", "recordCompletion", "getIdempotency",
   "recordDecision", "getDecision",
 ];
 
@@ -323,6 +330,10 @@ export class ConvexStore implements StorePort, GraphPort, DurablePort {
     return (await this.runner.query(this.fns.getSession, { id })) as SessionRecord | null;
   }
 
+  async replaceSessionApiKey(sessionId: string, expected: string, replacement: string): Promise<boolean> {
+    return (await this.runner.mutation(this.fns.replaceSessionApiKey, { sessionId, expected, replacement })) as boolean;
+  }
+
   async listSessions(opts?: { agentId?: string; limit?: number; userId?: string; orgId?: string; apiKey?: string }): Promise<SessionRecord[]> {
     const args: Record<string, unknown> = {};
     if (opts?.agentId !== undefined) args["agentId"] = opts.agentId;
@@ -408,10 +419,51 @@ export class ConvexStore implements StorePort, GraphPort, DurablePort {
     return (await this.runner.query(this.fns.searchMemory, { scopeKey: scopeKey(scope), query, topK })) as MemorySnippet[];
   }
 
+  async listMemory(scope: Scope) {
+    return (await this.runner.query(this.fns.listMemory, { scopeKey: scopeKey(scope) })) as Array<{
+      id: string;
+      text: string;
+      ingestedAt?: number;
+      metadata?: Record<string, unknown>;
+    }>;
+  }
+
+  async deleteMemory(scope: Scope, ids: string[]): Promise<number> {
+    if (ids.length === 0) return 0;
+    return (await this.runner.mutation(this.fns.deleteMemory, {
+      scopeKey: scopeKey(scope),
+      ids: [...new Set(ids)],
+    })) as number;
+  }
+
   async eraseScope(scope: Scope): Promise<{ deleted: number }> {
     const args: Record<string, unknown> = { scopeKey: scopeKey(scope) };
-    if ("agentId" in scope) args["agentId"] = (scope as { agentId: string }).agentId;
+    // Preserve the old wire shape for agent/shared scopes so a newer client remains compatible
+    // with already-deployed Convex functions. Narrower scopes require the new discriminator and
+    // therefore fail closed against an old backend instead of falling back to agent-wide erasure.
+    if (scope.kind === "agent") {
+      args["agentId"] = scope.agentId;
+    } else if (scope.kind === "user") {
+      args["kind"] = scope.kind;
+      args["agentId"] = scope.agentId;
+      args["userId"] = scope.userId;
+    } else if (scope.kind === "org") {
+      args["kind"] = scope.kind;
+      args["agentId"] = scope.agentId;
+      args["orgId"] = scope.orgId;
+    } else if (scope.kind === "thread") {
+      args["kind"] = scope.kind;
+      args["agentId"] = scope.agentId;
+      args["sessionId"] = scope.sessionId;
+    }
     return (await this.runner.mutation(this.fns.eraseScope, args)) as { deleted: number };
+  }
+
+  async migrateLegacyScope(scope: Scope): Promise<{ migrated: number }> {
+    const fromScopeKey = legacyScopeKey(scope);
+    const toScopeKey = scopeKey(scope);
+    if (fromScopeKey === toScopeKey) return { migrated: 0 };
+    return (await this.runner.mutation(this.fns.migrateLegacyScope, { fromScopeKey, toScopeKey })) as { migrated: number };
   }
 
   // --- Graph (Facts) ---
@@ -483,6 +535,23 @@ export class ConvexStore implements StorePort, GraphPort, DurablePort {
       now: this.now(),
       ...idempotencyMetadataArgs(metadata),
     });
+  }
+
+  async claimIntent(key: string, argsHash: string, metadata?: IdempotencyMetadata): Promise<boolean> {
+    return (await this.runner.mutation(this.fns.claimIntent, {
+      key,
+      argsHash,
+      now: this.now(),
+      ...idempotencyMetadataArgs(metadata),
+    })) as boolean;
+  }
+
+  async releaseIntent(key: string, argsHash: string, metadata?: IdempotencyMetadata): Promise<boolean> {
+    return (await this.runner.mutation(this.fns.releaseIntent, {
+      key,
+      argsHash,
+      ...idempotencyMetadataArgs(metadata),
+    })) as boolean;
   }
 
   async recordCompletion(key: string, result: unknown, metadata?: IdempotencyMetadata): Promise<void> {

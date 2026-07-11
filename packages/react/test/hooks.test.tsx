@@ -89,6 +89,40 @@ describe("sessionId is non-empty on first render", () => {
   });
 });
 
+describe("browser identity fields", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("strips caller-controlled identity fields from query bodies by default", () => {
+    const mockFetch = vi.fn(() => new Promise<Response>(() => {}));
+    vi.stubGlobal("fetch", mockFetch);
+    const { result } = renderHook(() => useEidenticStream("/query", { userId: "option-user" }));
+
+    act(() => result.current.send("hello", {
+      body: { userId: "body-user", orgId: "body-org", apiKey: "body-key" },
+    }));
+    const body = JSON.parse(mockFetch.mock.calls[0]?.[1]?.body as string);
+    expect(body).not.toHaveProperty("userId");
+    expect(body).not.toHaveProperty("orgId");
+    expect(body).not.toHaveProperty("apiKey");
+  });
+
+  it("keeps legacy userId forwarding behind an explicit unsafe opt-in", () => {
+    const mockFetch = vi.fn(() => new Promise<Response>(() => {}));
+    vi.stubGlobal("fetch", mockFetch);
+    const { result } = renderHook(() => useEidenticStream("/query", {
+      userId: "legacy-user",
+      allowUntrustedIdentityBody: true,
+    }));
+
+    act(() => result.current.send("hello"));
+    const body = JSON.parse(mockFetch.mock.calls[0]?.[1]?.body as string);
+    expect(body.userId).toBe("legacy-user");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // (a) unmount during in-flight stream → fetch aborted, no setState-after-unmount
 // ---------------------------------------------------------------------------
@@ -378,5 +412,32 @@ describe("StrictMode: no duplicate sends", () => {
     // The hook guard (statusRef === "streaming") prevents a second concurrent send.
     // Even in StrictMode where effects re-run, a single send() call should issue exactly one POST.
     expect(fetchCallCount).toBe(1);
+  });
+
+  it("coalesces two send() calls made in the same tick", async () => {
+    let release!: () => void;
+    const responseReady = new Promise<void>((resolve) => { release = resolve; });
+    const sse = buildSSE([["result", {
+      subtype: "success",
+      usage: { inputTokens: 1, outputTokens: 1 },
+      numTurns: 1,
+      sessionId: "same-tick",
+    }]]);
+    const mockFetch = vi.fn(async () => {
+      await responseReady;
+      return { ok: true, body: makeStreamBody(sse) } as Response;
+    });
+    vi.stubGlobal("fetch", mockFetch);
+    const { result } = renderHook(() =>
+      useEidenticStream("http://localhost/v1/agents/test/query"),
+    );
+
+    act(() => {
+      result.current.send("first");
+      result.current.send("second");
+    });
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    release();
+    await waitFor(() => expect(result.current.status).toBe("done"));
   });
 });

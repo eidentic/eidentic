@@ -1,6 +1,7 @@
 import type { Step, StepContext, StepRetryPolicy, StepTrace } from "./types.js";
 import type { ReplayCache } from "./suspend.js";
 import { isWorkflowSuspended } from "./suspend.js";
+import { assertPositiveSafeInteger, sleepWithSignal } from "./runtime.js";
 
 // ─── Internal interface for trace collector ──────────────────────────────────
 
@@ -9,6 +10,8 @@ export interface CtxWithCollector extends StepContext {
   _traces?: StepTrace[];
   /** Replay controller for suspend/resume (present only on imperative runs). */
   _replay?: ReplayController;
+  /** Resume-lease fence invoked immediately before an uncached effect. */
+  _beforeEffect?: () => Promise<void>;
 }
 
 // ─── Replay controller ───────────────────────────────────────────────────────
@@ -76,6 +79,7 @@ export function childCtx(parent: StepContext, name: string): StepContext {
     path: [...parent.path, name],
     _traces: (parent as CtxWithCollector)._traces,
     _replay: (parent as CtxWithCollector)._replay,
+    _beforeEffect: (parent as CtxWithCollector)._beforeEffect,
     // Forward imperative helpers so nested ctx.step/ctx.all work inside named steps
     step: parent.step,
     all: parent.all,
@@ -113,7 +117,15 @@ export function isAbortError(err: unknown): boolean {
  * replay the fn is NOT re-invoked and no new trace entry is emitted.
  */
 export function step<I, O>(name: string, fn: Step<I, O>, opts?: { retry?: StepRetryPolicy }): Step<I, O> {
-  const retry = opts?.retry;
+  if (opts?.retry !== undefined) {
+    assertPositiveSafeInteger(opts.retry.maxAttempts, "step retry maxAttempts");
+    if (opts.retry.backoffMs !== undefined) {
+      assertPositiveSafeInteger(opts.retry.backoffMs, "step retry backoffMs");
+    }
+  }
+  // Snapshot validated scalar options so later caller mutation cannot bypass
+  // the construction-time validation.
+  const retry = opts?.retry !== undefined ? { ...opts.retry } : undefined;
   return async (input: I, ctx: StepContext): Promise<O> => {
     const path = [...ctx.path, name];
 
@@ -131,6 +143,8 @@ export function step<I, O>(name: string, fn: Step<I, O>, opts?: { retry?: StepRe
     ctx.emit({ type: "step.start", name, path, at });
     let attempts = 0;
     try {
+      checkSignal(ctx.signal);
+      await (ctx as CtxWithCollector)._beforeEffect?.();
       checkSignal(ctx.signal);
       const child = childCtx(ctx, name);
       const invoke = (): Promise<O> => {
@@ -203,22 +217,4 @@ async function runWithRetry<O>(
     }
   }
   throw lastErr;
-}
-
-function sleepWithSignal(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    if (signal?.aborted) {
-      const err = new Error("AbortError") as Error & { name: string };
-      err.name = "AbortError";
-      reject(err);
-      return;
-    }
-    const id = setTimeout(resolve, ms);
-    signal?.addEventListener("abort", () => {
-      clearTimeout(id);
-      const err = new Error("AbortError") as Error & { name: string };
-      err.name = "AbortError";
-      reject(err);
-    });
-  });
 }

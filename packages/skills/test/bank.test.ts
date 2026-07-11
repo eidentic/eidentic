@@ -165,7 +165,7 @@ describe("SkillBank code-string execution via SandboxPort (§7.6)", () => {
     };
     const r = await bank.register(skill, { author: "agent" });
     expect(r.ok).toBe(true);
-    expect(r.lock!.quarantined).toBe(true);               // agent-authored ⇒ quarantined (Task 3 gates use)
+    expect(r.lock!.quarantined).toBe(true);               // agent-authored ⇒ quarantined until explicit approval
   });
 
   it("a code-string skill with NO sandbox refuses (NoopSandbox default) ⇒ test fails", async () => {
@@ -380,5 +380,158 @@ describe("M3 fix — code-string skill: sandbox receives injected INPUT preamble
     expect(preambleMatch).not.toBeNull();
     const parsed = JSON.parse(preambleMatch![1]!);
     expect(parsed).toEqual(trickyInput);
+  });
+});
+
+describe("SkillBank immutable provenance hardening", () => {
+  it("snapshots agent provenance before the asynchronous test gate", async () => {
+    let releaseSandbox!: () => void;
+    const sandboxStarted = new Promise<void>((resolve) => {
+      releaseSandbox = resolve;
+    });
+    let letSandboxFinish!: () => void;
+    const sandboxMayFinish = new Promise<void>((resolve) => {
+      letSandboxFinish = resolve;
+    });
+    const bank = new SkillBank({
+      now: FIXED,
+      sandbox: {
+        async run() {
+          releaseSandbox();
+          await sandboxMayFinish;
+          return { stdout: "EIDENTIC_RESULT:1", stderr: "", exitCode: 0 };
+        },
+      },
+    });
+    const options: { author: "human" | "agent" } = { author: "agent" };
+    const registration = bank.register({
+      name: "provenance-snapshot",
+      description: "must retain its original author",
+      code: "RESULT 1",
+      tests: [{ name: "returns one", input: null, check: (output) => output === 1 }],
+    }, options);
+
+    await sandboxStarted;
+    options.author = "human";
+    letSandboxFinish();
+
+    const result = await registration;
+    expect(result.ok).toBe(true);
+    expect(result.lock?.author).toBe("agent");
+    expect(result.lock?.quarantined).toBe(true);
+  });
+
+  it("does not let a returned lock release an agent-authored skill from quarantine", async () => {
+    const bank = new SkillBank({ now: FIXED, sandbox: new FakeJsSandbox() });
+    const result = await bank.register({
+      name: "quarantine-copy",
+      description: "must remain quarantined internally",
+      code: "RESULT 1",
+      tests: [{ name: "returns one", input: null, check: (output) => output === 1 }],
+    }, { author: "agent" });
+    expect(result.ok).toBe(true);
+
+    result.lock!.quarantined = false;
+
+    await expect(bank.use("quarantine-copy", null)).rejects.toThrow(/quarantined/);
+    expect(bank.get("quarantine-copy")?.quarantined).toBe(true);
+  });
+
+  it("does not expose nested mutable lock state through get() or list()", async () => {
+    const bank = new SkillBank({ now: FIXED });
+    await bank.register(doubler);
+
+    const fromGet = bank.get("doubler")!;
+    const fromList = bank.list()[0]!;
+    fromGet.tests[0]!.passed = false;
+    fromList.tests.push({ name: "forged", passed: true });
+
+    expect(bank.get("doubler")!.tests).toEqual([
+      { name: "doubles 2", passed: true },
+      { name: "doubles 0", passed: true },
+    ]);
+  });
+
+  it("executes the tested code/capability snapshot even if the caller mutates the original definition", async () => {
+    const sandbox = new FakeJsSandbox();
+    const bank = new SkillBank({ now: FIXED, sandbox });
+    const definition: ExecutableSkillDef = {
+      name: "definition-snapshot",
+      description: "immutable after registration",
+      allowedTools: ["read_*"],
+      code: "RESULT 1",
+      tests: [{ name: "returns one", input: null, check: (output) => output === 1 }],
+    };
+    const result = await bank.register(definition, { author: "agent" });
+    expect(result.ok).toBe(true);
+
+    definition.code = "RESULT 999";
+    definition.allowedTools!.push("*");
+    definition.tests[0]!.name = "forged-test";
+    bank.approve("definition-snapshot");
+
+    await expect(bank.use("definition-snapshot", null)).resolves.toBe(1);
+    expect(bank.get("definition-snapshot")!.contentHash).toBe(result.lock!.contentHash);
+  });
+
+  it("does not widen a trusted function's tool capabilities when its source array is mutated", async () => {
+    const definition: ExecutableSkillDef = {
+      name: "capability-snapshot",
+      description: "capabilities are registration-time state",
+      allowedTools: ["read_*"],
+      tests: [{ name: "delete stays blocked", input: null, check: (output) => output === "blocked" }],
+      run: async (_input, ctx) => {
+        try {
+          await ctx.callTool!("delete_all", {});
+          return "allowed";
+        } catch {
+          return "blocked";
+        }
+      },
+    };
+    const bank = new SkillBank({ now: FIXED });
+    expect((await bank.register(definition)).ok).toBe(true);
+
+    definition.allowedTools!.push("*");
+
+    await expect(bank.use("capability-snapshot", null, {
+      callTool: async () => "deleted",
+    })).resolves.toBe("blocked");
+  });
+
+  it("keeps records and signature policy in runtime-private fields", async () => {
+    const bank = new SkillBank({ now: FIXED, sandbox: new FakeJsSandbox() });
+    await bank.register({
+      name: "private-state",
+      description: "policy state is not a mutable public object property",
+      code: "RESULT 1",
+      tests: [{ name: "returns one", input: null, check: (output) => output === 1 }],
+    }, { author: "agent" });
+
+    expect(Object.getOwnPropertyNames(bank)).not.toEqual(expect.arrayContaining([
+      "records",
+      "requireSigned",
+      "verifyKey",
+    ]));
+    expect((bank as unknown as Record<string, unknown>)["records"]).toBeUndefined();
+  });
+
+  it("keeps trusted typed functions compatible in an unsigned bank", async () => {
+    const bank = new SkillBank({ now: FIXED });
+    expect((await bank.register(doubler)).ok).toBe(true);
+    await expect(bank.use("doubler", 4)).resolves.toBe(8);
+  });
+
+  it("fails closed instead of claiming a typed function is covered by requireSigned", async () => {
+    const { publicKey } = await import("../src/sign.js").then((module) => module.generateSkillKeypair());
+    const bank = new SkillBank({ now: FIXED, requireSigned: true, verifyKey: publicKey });
+
+    const result = await bank.register(doubler);
+
+    expect(result.ok).toBe(false);
+    expect(result.failures).toEqual(expect.arrayContaining([
+      expect.stringMatching(/requireSigned|serialized code|function body/i),
+    ]));
+    expect(bank.get("doubler")).toBeNull();
   });
 });

@@ -63,6 +63,7 @@ over SSE, and what the tracer consumes. One protocol, three consumers.
 ## 3.3 The loop (pseudocode)
 
 ```ts
+// docs-check-skip: implementation-agnostic agent-loop pseudocode
 async function* runTurn(agent, session, input, opts): AsyncIterable<EidenticEvent> {
   yield emitInit(session, agent)
   session.append(userEvent(input))                  // checkpoint
@@ -202,6 +203,7 @@ Cautionary patterns to avoid: looping 5 identical tool calls, or silently removi
 ## 3.8 Public API surface (embedded mode)
 
 ```ts
+// docs-check-skip: aspirational embedded API sketch, not the current constructor contract
 import { Agent } from '@eidentic/core'
 
 const agent = new Agent({

@@ -121,7 +121,7 @@ describe("GET /api/health", () => {
   it("returns {ok:true} without auth", async () => {
     const app = createStudioApi({
       agents: { [AGENT_ID]: agent },
-      auth: ApiKeyAuth({ "test-key": { userId: "u1" } }),
+      adminAuth: ApiKeyAuth({ "test-key": { userId: "u1" } }),
     });
     const res = await app.request("/api/health");
     expect(res.status).toBe(200);
@@ -151,7 +151,7 @@ describe("Auth enforcement", () => {
   it("returns 401 on protected routes without key", async () => {
     const app = createStudioApi({
       agents: { [AGENT_ID]: agent },
-      auth: ApiKeyAuth({ "test-key": { userId: "u1" } }),
+      adminAuth: ApiKeyAuth({ "test-key": { userId: "u1" } }),
     });
     const res = await app.request("/api/agents");
     expect(res.status).toBe(401);
@@ -160,12 +160,144 @@ describe("Auth enforcement", () => {
   it("allows access with valid key", async () => {
     const app = createStudioApi({
       agents: { [AGENT_ID]: agent },
-      auth: ApiKeyAuth({ "test-key": { userId: "u1" } }),
+      adminAuth: ApiKeyAuth({ "test-key": { userId: "u1" } }),
     });
     const res = await app.request("/api/agents", {
       headers: { authorization: "Bearer test-key" },
     });
     expect(res.status).toBe(200);
+  });
+
+  it("never promotes a run-route credential to Studio admin by default", async () => {
+    const app = createStudioApi({
+      agents: { [AGENT_ID]: agent },
+      auth: ApiKeyAuth({ "run-key": { userId: "runner" } }),
+    });
+
+    const res = await app.request("http://studio.example/api/agents", {
+      headers: { authorization: "Bearer run-key" },
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("keeps shared run/admin auth behind an explicit unsafe migration option", async () => {
+    const app = createStudioApi({
+      agents: { [AGENT_ID]: agent },
+      auth: ApiKeyAuth({ "legacy-key": { userId: "legacy-admin" } }),
+      allowRunAuthAsAdmin: true,
+    });
+
+    const denied = await app.request("http://studio.example/api/agents");
+    const allowed = await app.request("http://studio.example/api/agents", {
+      headers: { authorization: "Bearer legacy-key" },
+    });
+    expect(denied.status).toBe(401);
+    expect(allowed.status).toBe(200);
+  });
+
+  it("runs an explicit admin authorizer after authentication", async () => {
+    const seen: unknown[] = [];
+    const app = createStudioApi({
+      agents: { [AGENT_ID]: agent },
+      adminAuth: ApiKeyAuth({
+        "reader-key": { userId: "reader" },
+        "admin-key": { userId: "admin" },
+      }),
+      authorizeAdmin: (principal, req) => {
+        seen.push({ principal, path: new URL(req.url).pathname });
+        return principal.userId === "admin";
+      },
+    });
+
+    const denied = await app.request("/api/agents", {
+      headers: { authorization: "Bearer reader-key" },
+    });
+    const allowed = await app.request("/api/agents", {
+      headers: { authorization: "Bearer admin-key" },
+    });
+    expect(denied.status).toBe(403);
+    expect(allowed.status).toBe(200);
+    expect(seen).toEqual([
+      { principal: { userId: "reader" }, path: "/api/agents" },
+      { principal: { userId: "admin" }, path: "/api/agents" },
+    ]);
+  });
+
+  it("keeps NoAuth in local-only mode unless remote access is explicitly opted in", async () => {
+    const safe = createStudioApi({ agents: { [AGENT_ID]: agent } });
+    const remote = await safe.request("http://studio.example/api/agents");
+    expect(remote.status).toBe(403);
+
+    const optedIn = createStudioApi({
+      agents: { [AGENT_ID]: agent },
+      allowRemoteNoAuth: true,
+    });
+    const legacy = await optedIn.request("http://studio.example/api/agents");
+    expect(legacy.status).toBe(200);
+  });
+
+  it("uses the TCP peer instead of a spoofable localhost Host header", async () => {
+    const app = createStudioApi({ agents: { [AGENT_ID]: agent } });
+    const remoteNodeEnv = {
+      incoming: {
+        socket: {
+          remoteAddress: "203.0.113.8",
+          remotePort: 44321,
+          remoteFamily: "IPv4",
+        },
+      },
+    };
+
+    const response = await app.request(
+      "http://localhost/api/agents",
+      undefined,
+      remoteNodeEnv,
+    );
+
+    expect(response.status).toBe(403);
+  });
+});
+
+describe("credential redaction", () => {
+  it("redacts ownership credentials and nested query tokens from management responses", async () => {
+    await store.createSession({
+      id: "credential-session",
+      agentId: AGENT_ID,
+      apiKey: "raw-session-secret",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    await store.appendEvents([{
+      id: "credential-event",
+      sessionId: "credential-session",
+      seq: 0,
+      kind: "tool_result",
+      schemaVersion: 1,
+      payload: {
+        authorization: "Bearer raw-bearer-secret",
+        callbackUrl: "https://example.test/callback?token=raw-query-secret&safe=ok",
+        basicAuth: "Basic dXNlcjpwYXNzd29yZA==",
+        userInfoUrl: "https://db-user:db-password@example.test/private",
+        nested: { apiKey: "raw-nested-secret" },
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+    }]);
+    const app = createStudioApi({ agents: { [AGENT_ID]: agent } });
+
+    const sessionsText = await (await app.request(`/api/agents/${AGENT_ID}/sessions`)).text();
+    const eventsText = await (await app.request(
+      `/api/agents/${AGENT_ID}/sessions/credential-session/events`,
+    )).text();
+    const combined = sessionsText + eventsText;
+
+    expect(combined).not.toContain("raw-session-secret");
+    expect(combined).not.toContain("raw-bearer-secret");
+    expect(combined).not.toContain("raw-query-secret");
+    expect(combined).not.toContain("raw-nested-secret");
+    expect(combined).not.toContain("dXNlcjpwYXNzd29yZA==");
+    expect(combined).not.toContain("db-user");
+    expect(combined).not.toContain("db-password");
+    expect(combined).toContain("[REDACTED]");
+    expect(eventsText).toContain("safe=ok");
   });
 });
 
@@ -553,10 +685,10 @@ describe("GET /api/agents/:id", () => {
     expect(res.status).toBe(404);
   });
 
-  it("returns 401 for unauthenticated request when auth is configured", async () => {
+  it("returns 401 for unauthenticated request when admin auth is configured", async () => {
     const app = createStudioApi({
       agents: { [AGENT_ID]: agent },
-      auth: ApiKeyAuth({ "test-key": { userId: "u1" } }),
+      adminAuth: ApiKeyAuth({ "test-key": { userId: "u1" } }),
     });
     const res = await app.request(`/api/agents/${AGENT_ID}`);
     expect(res.status).toBe(401);

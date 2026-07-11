@@ -141,4 +141,47 @@ describe("LibsqlStore concurrency", () => {
       );
     }),
   );
+
+  it("assertFact coordinates current-fact transitions across store instances", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "eidentic-libsql-multi-store-"));
+    const url = `file:${join(dir, "test.db")}`;
+    let firstId = 0;
+    let secondId = 0;
+    const first = new LibsqlStore({ url, newId: () => `first-${firstId++}` });
+    const second = new LibsqlStore({ url, newId: () => `second-${secondId++}` });
+    try {
+      await first.migrate();
+      const validFrom = "2026-01-01T00:00:00.000Z";
+      const stores = [first, second] as const;
+      const assertions = Array.from({ length: 20 }, (_, index) =>
+        stores[index % stores.length]!.assertFact(scope, {
+          subject: "Agent",
+          predicate: "multi-instance-status",
+          object: `state-${index}`,
+          validFrom,
+        }));
+      const results = await Promise.all(assertions);
+
+      assert(results.length === assertions.length, "every serialized assertion must complete");
+      const current = await first.queryFacts({
+        scope,
+        subject: "Agent",
+        predicate: "multi-instance-status",
+      });
+      const history = await first.factHistory(scope, "Agent", "multi-instance-status");
+      assert(current.length === 1, `expected one current fact, got ${current.length}`);
+      assert(
+        history.length === assertions.length,
+        `expected ${assertions.length} historical facts, got ${history.length}`,
+      );
+      assert(
+        history.filter((fact) => fact.validUntil === undefined).length === 1,
+        "exactly one fact must remain current",
+      );
+    } finally {
+      await first.close();
+      await second.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

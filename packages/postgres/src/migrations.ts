@@ -1,6 +1,12 @@
 /** Minimal client surface — must match the PgClient interface in index.ts. */
 interface PgClient {
   query(text: string, params?: unknown[]): Promise<{ rows: any[] }>;
+  connect?(): Promise<PgTransactionClient>;
+}
+
+interface PgTransactionClient {
+  query(text: string, params?: unknown[]): Promise<{ rows: any[] }>;
+  release(): void;
 }
 
 export const MIGRATIONS: ReadonlyArray<{ version: number; sql: string }> = [
@@ -147,35 +153,108 @@ export const MIGRATIONS: ReadonlyArray<{ version: number; sql: string }> = [
       ALTER TABLE sessions ADD COLUMN IF NOT EXISTS api_key TEXT;
     `,
   },
+  {
+    version: 11,
+    sql: `
+      ALTER TABLE idempotency_keys ADD COLUMN IF NOT EXISTS scope_key TEXT;
+      ALTER TABLE idempotency_keys ADD COLUMN IF NOT EXISTS session_id TEXT;
+      ALTER TABLE idempotency_keys ADD COLUMN IF NOT EXISTS owner_key TEXT;
+      CREATE INDEX IF NOT EXISTS idx_idempotency_scope ON idempotency_keys(scope_key);
+      CREATE INDEX IF NOT EXISTS idx_idempotency_session ON idempotency_keys(session_id);
+      CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent_id);
+      CREATE INDEX IF NOT EXISTS idx_sessions_agent_user ON sessions(agent_id, user_id);
+      CREATE INDEX IF NOT EXISTS idx_sessions_agent_org ON sessions(agent_id, org_id);
+      CREATE INDEX IF NOT EXISTS idx_checkpoints_session ON checkpoints(session_id);
+      CREATE INDEX IF NOT EXISTS idx_suspension_decisions_session ON suspension_decisions(session_id);
+      UPDATE idempotency_keys AS idem
+      SET session_id = (
+        SELECT sessions.id
+        FROM sessions
+        WHERE left(idem.key, length(sessions.id) + 1) = sessions.id || ':'
+        LIMIT 1
+      )
+      WHERE idem.session_id IS NULL
+        AND 1 = (
+          SELECT count(*)
+          FROM sessions
+          WHERE left(idem.key, length(sessions.id) + 1) = sessions.id || ':'
+        );
+    `,
+  },
+  {
+    version: 12,
+    // A fact transition is a single-writer state machine per
+    // (scope_key, subject, predicate). Older releases did not enforce that invariant in the
+    // database, so first repair legacy duplicates deterministically: the newest valid_from
+    // wins, with id as a stable tie-breaker. Only then add the partial unique index.
+    sql: `
+      WITH ranked AS MATERIALIZED (
+        SELECT
+          id,
+          FIRST_VALUE(valid_from) OVER (
+            PARTITION BY scope_key, subject, predicate
+            ORDER BY valid_from DESC, id DESC
+          ) AS survivor_valid_from,
+          ROW_NUMBER() OVER (
+            PARTITION BY scope_key, subject, predicate
+            ORDER BY valid_from DESC, id DESC
+          ) AS position
+        FROM facts
+        WHERE valid_until IS NULL
+      )
+      UPDATE facts AS fact
+      SET valid_until = ranked.survivor_valid_from
+      FROM ranked
+      WHERE fact.id = ranked.id AND ranked.position > 1;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_facts_one_current
+        ON facts (scope_key, subject, predicate)
+        WHERE valid_until IS NULL;
+    `,
+  },
 ];
 
 export async function runMigrations(client: PgClient): Promise<void> {
-  await client.query(`
-    CREATE TABLE IF NOT EXISTS _eidentic_migrations (
-      version INTEGER PRIMARY KEY
-    )
-  `);
-  const { rows } = await client.query(`SELECT version FROM _eidentic_migrations`);
-  const applied = new Set(rows.map((r: { version: number }) => r.version));
+  // A pg.Pool may route each pool.query() call to a different socket. Check out
+  // one connection for the whole migration transaction so BEGIN/body/COMMIT and
+  // the advisory lock share the same server session. PGlite has no connect().
+  const dedicated = client.connect ? await client.connect() : undefined;
+  const connection = dedicated ?? client;
+  let began = false;
+  try {
+    await connection.query("BEGIN");
+    began = true;
+    if (dedicated !== undefined) {
+      // Stable project-specific transaction lock. This serializes competing
+      // application instances without holding a session lock after commit.
+      await connection.query("SELECT pg_advisory_xact_lock($1)", [0x4549444e]);
+    }
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS _eidentic_migrations (
+        version INTEGER PRIMARY KEY
+      )
+    `);
+    const { rows } = await connection.query(`SELECT version FROM _eidentic_migrations`);
+    const applied = new Set(rows.map((r: { version: number }) => r.version));
 
-  for (const m of MIGRATIONS) {
-    if (!applied.has(m.version)) {
-      await client.query("BEGIN");
-      try {
+    for (const m of MIGRATIONS) {
+      if (!applied.has(m.version)) {
         // Split on statement boundaries and run each — pglite handles batches better one-by-one
         const stmts = m.sql
           .split(";")
           .map((s) => s.trim())
           .filter((s) => s.length > 0);
         for (const stmt of stmts) {
-          await client.query(stmt);
+          await connection.query(stmt);
         }
-        await client.query(`INSERT INTO _eidentic_migrations (version) VALUES ($1)`, [m.version]);
-        await client.query("COMMIT");
-      } catch (err) {
-        await client.query("ROLLBACK");
-        throw err;
+        await connection.query(`INSERT INTO _eidentic_migrations (version) VALUES ($1)`, [m.version]);
       }
     }
+    await connection.query("COMMIT");
+    began = false;
+  } catch (err) {
+    if (began) await connection.query("ROLLBACK").catch(() => undefined);
+    throw err;
+  } finally {
+    dedicated?.release();
   }
 }

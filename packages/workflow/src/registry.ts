@@ -1,5 +1,6 @@
 import type { StepTrace, WorkflowResult } from "./types.js";
 import type { ReplayCache } from "./suspend.js";
+import { assertPositiveSafeInteger } from "./runtime.js";
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -21,7 +22,24 @@ export interface WorkflowRunOwner {
  *  - `"suspended"` — the run hit a `ctx.suspend(...)` gate and is awaiting a
  *                    human-in-the-loop decision (resumable via `resumeWorkflow`).
  */
-export type WorkflowRunStatus = "completed" | "error" | "suspended";
+export type WorkflowRunStatus = "completed" | "error" | "suspended" | "resuming";
+
+export interface WorkflowResumeClaim {
+  id: string;
+  suspensionToken: string;
+  claimedAt: number;
+  expiresAt: number;
+}
+
+/** Typed conflict raised when a suspension token has already been claimed/consumed. */
+export class WorkflowResumeConflictError extends Error {
+  readonly runId: string;
+  constructor(runId: string, message = "resume is already claimed or no longer suspended") {
+    super(`resumeWorkflow: run "${runId}" ${message}`);
+    this.name = "WorkflowResumeConflictError";
+    this.runId = runId;
+  }
+}
 
 /**
  * State persisted for a suspended run so it can be deterministically resumed.
@@ -68,6 +86,8 @@ export interface WorkflowRunRecord {
   owner?: WorkflowRunOwner;
   /** Replay state for a suspended run. Present iff `runStatus === "suspended"`. */
   suspension?: WorkflowSuspension;
+  /** Single-owner lease while a suspended run is being replayed. */
+  resumeClaim?: WorkflowResumeClaim;
   /**
    * Monotonic insertion sequence number. Assigned by the registry at record time
    * and persisted alongside the record. Used as a deterministic tiebreaker when
@@ -128,6 +148,12 @@ export interface WorkflowRunRegistry {
    * completed / error / re-suspended.
    */
   update(id: string, rec: WorkflowRunRecord): WorkflowRunRecord;
+  /** Atomically transition suspended → resuming and return the single-use claim id. */
+  claimResume(id: string, expectedToken: string): Promise<{ record: WorkflowRunRecord; claimId: string }>;
+  /** Renew a live resume lease. Expired or superseded claims fail closed. */
+  renewResume(id: string, claimId: string): Promise<WorkflowRunRecord>;
+  /** Atomically complete/re-suspend/error a run owned by `claimId`. */
+  finishResume(id: string, claimId: string, rec: WorkflowRunRecord): Promise<WorkflowRunRecord>;
   /** Retrieve a single run record by id. Returns `undefined` for unknown ids. */
   get(id: string): WorkflowRunRecord | undefined;
   /** List stored run records, newest first. Optionally filtered. */
@@ -168,12 +194,22 @@ export interface WorkflowRunStore {
   list(filter?: WorkflowRunFilter): Promise<WorkflowRunRecord[]>;
   /** Optionally delete a record by id. */
   delete?(id: string): Promise<void>;
+  /** Optional durable CAS used to coordinate resume across processes. */
+  claimResume?(
+    id: string,
+    expectedToken: string,
+    claim: WorkflowResumeClaim,
+  ): Promise<WorkflowRunRecord>;
+  /** Optional durable CAS that extends a matching, unexpired resume claim. */
+  renewResume?(id: string, claimId: string, expiresAt: number): Promise<WorkflowRunRecord>;
+  /** Optional durable CAS that consumes a matching resume claim. */
+  finishResume?(id: string, claimId: string, record: WorkflowRunRecord): Promise<WorkflowRunRecord>;
 }
 
 // ─── Factory ──────────────────────────────────────────────────────────────────
 
 export interface WorkflowRunRegistryOptions {
-  /** Maximum number of records to keep in memory (ring-buffer eviction). Default 100. */
+  /** Positive safe integer record limit for ring-buffer eviction. Default 100. */
   limit?: number;
   /**
    * @deprecated alias for {@link limit}; kept for back-compat. `limit` wins if both set.
@@ -187,6 +223,8 @@ export interface WorkflowRunRegistryOptions {
    * record is still kept regardless).
    */
   onStoreError?: (err: unknown, record: WorkflowRunRecord) => void;
+  /** Positive safe integer resume-claim lease duration. Default 300_000 ms. */
+  resumeLeaseMs?: number;
 }
 
 /**
@@ -213,8 +251,18 @@ export interface WorkflowRunRegistryOptions {
 export function createWorkflowRunRegistry(
   opts?: WorkflowRunRegistryOptions,
 ): WorkflowRunRegistry {
+  if (opts?.limit !== undefined) {
+    assertPositiveSafeInteger(opts.limit, "createWorkflowRunRegistry limit");
+  }
+  if (opts?.maxRuns !== undefined) {
+    assertPositiveSafeInteger(opts.maxRuns, "createWorkflowRunRegistry maxRuns");
+  }
+  if (opts?.resumeLeaseMs !== undefined) {
+    assertPositiveSafeInteger(opts.resumeLeaseMs, "createWorkflowRunRegistry resumeLeaseMs");
+  }
   const limit = opts?.limit ?? opts?.maxRuns ?? 100;
   const store = opts?.store;
+  const resumeLeaseMs = opts?.resumeLeaseMs ?? 300_000;
   const onStoreError =
     opts?.onStoreError ??
     ((err: unknown, record: WorkflowRunRecord) => {
@@ -354,6 +402,78 @@ export function createWorkflowRunRegistry(
       mem.set(id, rec);
       writeThrough(rec);
       return rec;
+    },
+
+    async claimResume(id: string, expectedToken: string): Promise<{ record: WorkflowRunRecord; claimId: string }> {
+      const current = mem.get(id);
+      if (!current) throw new WorkflowResumeConflictError(id, "is unknown");
+      const now = Date.now();
+      const reclaimable = current.runStatus === "resuming" &&
+        current.resumeClaim !== undefined && current.resumeClaim.expiresAt <= now;
+      if ((!reclaimable && current.runStatus !== "suspended") || current.suspension?.token !== expectedToken) {
+        throw new WorkflowResumeConflictError(id);
+      }
+      const claim: WorkflowResumeClaim = {
+        id: crypto.randomUUID(),
+        suspensionToken: expectedToken,
+        claimedAt: now,
+        expiresAt: now + resumeLeaseMs,
+      };
+      const claimed: WorkflowRunRecord = { ...current, runStatus: "resuming", resumeClaim: claim };
+
+      // Publish the claim synchronously before awaiting persistence so two callers sharing this
+      // registry cannot both pass the suspended-state check.
+      mem.set(id, claimed);
+      try {
+        const durableClaimed = store?.claimResume
+          ? await store.claimResume(id, expectedToken, claim)
+          : claimed;
+        if (store && !store.claimResume) await store.save(durableClaimed);
+        mem.set(id, durableClaimed);
+        return { record: durableClaimed, claimId: claim.id };
+      } catch (error) {
+        if (mem.get(id)?.resumeClaim?.id === claim.id) mem.set(id, current);
+        if (error instanceof WorkflowResumeConflictError) throw error;
+        throw error;
+      }
+    },
+
+    async finishResume(id: string, claimId: string, rec: WorkflowRunRecord): Promise<WorkflowRunRecord> {
+      const current = mem.get(id);
+      if (current?.runStatus !== "resuming" || current.resumeClaim?.id !== claimId) {
+        throw new WorkflowResumeConflictError(id, "does not belong to this resume claim");
+      }
+      const finished = { ...rec };
+      delete finished.resumeClaim;
+      const durableFinished = store?.finishResume
+        ? await store.finishResume(id, claimId, finished)
+        : finished;
+      if (store && !store.finishResume) await store.save(durableFinished);
+      mem.set(id, durableFinished);
+      return durableFinished;
+    },
+
+    async renewResume(id: string, claimId: string): Promise<WorkflowRunRecord> {
+      const current = mem.get(id);
+      const now = Date.now();
+      if (
+        current?.runStatus !== "resuming" ||
+        current.resumeClaim?.id !== claimId ||
+        current.resumeClaim.expiresAt <= now
+      ) {
+        throw new WorkflowResumeConflictError(id, "resume claim is expired or no longer owned");
+      }
+      const expiresAt = now + resumeLeaseMs;
+      const renewed: WorkflowRunRecord = {
+        ...current,
+        resumeClaim: { ...current.resumeClaim, expiresAt },
+      };
+      const durableRenewed = store?.renewResume
+        ? await store.renewResume(id, claimId, expiresAt)
+        : renewed;
+      if (store && !store.renewResume) await store.save(durableRenewed);
+      mem.set(id, durableRenewed);
+      return durableRenewed;
     },
 
     get(id: string): WorkflowRunRecord | undefined {

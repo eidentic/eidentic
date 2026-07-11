@@ -37,6 +37,11 @@ import { ollama } from "ai-sdk-ollama";
 const local = new AIModel(ollama("llama3.2"));
 ```
 
+Remote image URLs are denied at the model boundary. Resolve untrusted URLs through a guarded,
+size-bounded fetcher and pass base64 data to the Agent's multimodal policy. The deprecated
+`unsafeAllowRemoteImageUrls: true` option restores provider-side URL fetching only for controlled
+legacy deployments with an equivalent egress boundary.
+
 ## Links
 
 - [GitHub](https://github.com/eidentic/eidentic)

@@ -106,6 +106,37 @@ describe("fileTools", () => {
     await rm(outside, { recursive: true, force: true });
   });
 
+  it("write_file rejects a symlink leaf without changing its outside target", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "eidentic-outside-"));
+    const outsideFile = join(outside, "target.txt");
+    await writeFile(outsideFile, "before");
+    await symlink(outsideFile, join(root, "link.txt"), "file");
+
+    const tools = fileTools({ root });
+    await expect(
+      byId(tools, "write_file").execute({ path: "link.txt", content: "after" }),
+    ).rejects.toThrow(/symlink|confinement/i);
+    expect(await readFile(outsideFile, "utf8")).toBe("before");
+
+    await rm(outside, { recursive: true, force: true });
+  });
+
+  it("edit_file rejects a symlink leaf without changing its target", async () => {
+    const target = join(root, "target.txt");
+    await writeFile(target, "before VALUE after");
+    await symlink(target, join(root, "alias.txt"), "file");
+
+    const tools = fileTools({ root });
+    await expect(
+      byId(tools, "edit_file").execute({
+        path: "alias.txt",
+        oldString: "VALUE",
+        newString: "CHANGED",
+      }),
+    ).rejects.toThrow(/symlink|confinement/i);
+    expect(await readFile(target, "utf8")).toBe("before VALUE after");
+  });
+
   // ---- grep pattern-length cap (ReDoS defense) ----
 
   it("grep rejects patterns longer than 1024 chars", async () => {
@@ -128,5 +159,31 @@ describe("fileTools", () => {
     // No files match, but it should not throw
     const out = (await byId(tools, "grep").execute({ pattern: edgePattern })) as { matches: unknown[] };
     expect(Array.isArray(out.matches)).toBe(true);
+  });
+
+  it("grep rejects nested quantified expressions that can catastrophically backtrack", async () => {
+    const tools = fileTools({ root });
+    await expect(byId(tools, "grep").execute({ pattern: "(a+)+$" }))
+      .rejects.toThrow(/unsafe|backtracking|ReDoS/i);
+  });
+
+  it("terminates catastrophic patterns that evade the static heuristic", async () => {
+    await writeFile(join(root, "attack.txt"), `${"a".repeat(30)}!`);
+    const tools = fileTools({ root });
+    await expect(byId(tools, "grep").execute({ pattern: "((a+))+$" }))
+      .rejects.toThrow(/timed out|ReDoS/i);
+  });
+
+  it("grep skips oversized files and reports a truncated scan", async () => {
+    await writeFile(join(root, "huge.txt"), `${"a".repeat(2 * 1024 * 1024)}MATCH`);
+    await writeFile(join(root, "small.txt"), "MATCH");
+    const tools = fileTools({ root });
+
+    const out = await byId(tools, "grep").execute({ pattern: "MATCH" }) as {
+      matches: Array<{ file: string }>;
+      truncated: boolean;
+    };
+    expect(out.matches).toEqual([{ file: "small.txt", line: 1, text: "MATCH" }]);
+    expect(out.truncated).toBe(true);
   });
 });

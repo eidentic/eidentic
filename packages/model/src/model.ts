@@ -46,7 +46,13 @@ type GenerationSettingKey =
  *
  * @example new AIModel(anthropic("claude-sonnet-4-5"), { temperature: 0.2, maxOutputTokens: 1024 })
  */
-export type AIModelOptions = Pick<GenParams, GenerationSettingKey>;
+export type AIModelOptions = Pick<GenParams, GenerationSettingKey> & {
+  /**
+   * @deprecated Unsafe compatibility mode: let the provider fetch user-supplied image URLs.
+   * Prefer Agent multimodal.resolveRemoteImage, which validates and returns bounded base64 bytes.
+   */
+  unsafeAllowRemoteImageUrls?: boolean;
+};
 
 /**
  * A Eidentic `ModelPort` backed by Vercel AI SDK v7.
@@ -56,7 +62,8 @@ export type AIModelOptions = Pick<GenParams, GenerationSettingKey>;
  */
 export class AIModel implements ModelPort {
   private readonly resolve: ModelResolver;
-  private readonly settings: AIModelOptions;
+  private readonly settings: Pick<GenParams, GenerationSettingKey>;
+  private readonly unsafeAllowRemoteImageUrls: boolean;
   /** The model's own identifier, sourced from the AI SDK LanguageModel when a static model is passed. */
   readonly modelId: string | undefined;
   constructor(model: LanguageModel | ModelResolver, options: AIModelOptions = {}) {
@@ -69,12 +76,17 @@ export class AIModel implements ModelPort {
       // AI SDK LanguageModel exposes .modelId for concrete provider models.
       this.modelId = (model as { modelId?: string }).modelId;
     }
-    this.settings = options;
+    const { unsafeAllowRemoteImageUrls, ...settings } = options;
+    this.settings = settings;
+    this.unsafeAllowRemoteImageUrls = unsafeAllowRemoteImageUrls === true;
   }
 
   async complete(request: ModelRequest): Promise<ModelResponse> {
     const model = await this.resolve(request.model);
-    const { instructions, messages } = mapMessages(request.messages, { cacheControl: request.cacheControl });
+    const { instructions, messages } = mapMessages(request.messages, {
+      cacheControl: request.cacheControl,
+      unsafeAllowRemoteImageUrls: this.unsafeAllowRemoteImageUrls,
+    });
     const tools = buildTools(request.tools);
 
     const output = outputArg(request.outputSchema);
@@ -95,7 +107,10 @@ export class AIModel implements ModelPort {
 
   async *stream(request: ModelRequest): AsyncIterable<ModelStreamPart> {
     const model = await this.resolve(request.model);
-    const { instructions, messages } = mapMessages(request.messages, { cacheControl: request.cacheControl });
+    const { instructions, messages } = mapMessages(request.messages, {
+      cacheControl: request.cacheControl,
+      unsafeAllowRemoteImageUrls: this.unsafeAllowRemoteImageUrls,
+    });
     const tools = buildTools(request.tools);
 
     const output = outputArg(request.outputSchema);

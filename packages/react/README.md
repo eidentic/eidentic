@@ -58,7 +58,7 @@ export function Chat() {
   const { messages, status, suspension, send, stop, resume, regenerate } =
     useAgent("my-agent", "https://api.example.com", {
       sessionId: "sess-abc",
-      userId: "user-123",
+      headers: { Authorization: `Bearer ${accessToken}` },
     });
 
   return (
@@ -80,7 +80,7 @@ export function Chat() {
           <input name="q" disabled={status === "streaming"} />
           <button type="submit">Send</button>
           <button type="button" onClick={stop}>Stop</button>
-          <button type="button" onClick={regenerate}>Retry</button>
+          <button type="button" onClick={regenerate}>Regenerate</button>
         </form>
       )}
     </div>
@@ -107,7 +107,8 @@ Lower-level hook. Use when you manage the URL yourself.
 | Option | Type | Description |
 |---|---|---|
 | `sessionId` | `string` | Session ID. Generated client-side if omitted (SSR-safe). |
-| `userId` | `string` | Forwarded to the agent. |
+| `userId` | `string` | Deprecated browser identity; ignored unless `allowUntrustedIdentityBody` is enabled. |
+| `allowUntrustedIdentityBody` | `boolean` | Unsafe legacy opt-in for body identity fields. Prefer auth headers + server-side identity. |
 | `headers` | `Record<string, string>` | Extra request headers (auth tokens, etc.). |
 | `initialMessages` | `TextMessage[]` | Seed the message list on mount (restore history). |
 | `resumeEndpoint` | `string` | Override the resume URL. Default: query URL with `/query` replaced by `/resume`. |
@@ -129,8 +130,8 @@ Lower-level hook. Use when you manage the URL yourself.
 | `suspension` | `SuspensionState \| null` | Set when `status === "suspended"`. Contains `callId` and `request` (reason + optional `present` payload) for rendering an approval card. |
 | `send(input, opts?)` | function | Send a user message. `opts.body` merges extra fields into the POST body (tracing IDs, metadata). No-op while streaming. |
 | `stop()` | function | Abort the in-flight request. |
-| `resume(decision)` | function | Resume after suspension. Sends `"approve"`, `"reject"`, or a custom value. Only valid when `status === "suspended"`. |
-| `regenerate()` | function | Re-send the last user input as a new turn (resets accumulated state). No-op if no prior input or while streaming. |
+| `resume(decision)` | function | Resume after suspension. Accepts `"approve"`, `"reject"`, a boolean, or `{ approved, data? }`; always sends the server DTO. |
+| `regenerate()` | function | Fails locally with an append-only safety error; start a new/forked session explicitly instead of replaying a side-effecting turn. |
 | `setMessages(msgs)` | function | Replace the message list directly — use to clear, restore, or rewrite history. |
 
 ---
@@ -145,20 +146,23 @@ When an agent tool requires human approval, the server emits a terminal
 - `suspension.request.reason` — human-readable reason string
 - `suspension.request.present` — opaque context payload (e.g. the file to delete, the SQL to approve)
 
-Call `resume("approve")` or `resume("reject")` (or any custom decision value)
+Call `resume("approve")`, `resume("reject")`, or pass a typed `{ approved, data? }` decision
 to POST `{ sessionId, decision }` to the resume endpoint and continue
 streaming. The new stream output is merged with the prior accumulated history.
 
 ```tsx
-if (status === "suspended" && suspension) {
-  return (
-    <ApprovalCard
-      reason={suspension.request.reason}
-      context={suspension.request.present}
-      onApprove={() => resume("approve")}
-      onReject={() => resume("reject")}
-    />
-  );
+function ApprovalGate() {
+  if (status === "suspended" && suspension) {
+    return (
+      <ApprovalCard
+        reason={suspension.request.reason}
+        context={suspension.request.present}
+        onApprove={() => resume("approve")}
+        onReject={() => resume("reject")}
+      />
+    );
+  }
+  return null;
 }
 ```
 
@@ -190,6 +194,10 @@ useEidenticStream(endpoint, {
 The `parseEidenticStream` generator also exposes `ParsedStreamState.events`
 (all events) and `ParsedStreamState.lastEvent` (the event that triggered each
 yield) for use in pure/server-side contexts.
+
+The parser accepts both Eidentic SSE and raw NDJSON streams. Automatic retries are limited to
+failures before any response bytes arrive; a partial stream is never replayed because doing so could
+duplicate agent or tool side effects.
 
 ---
 

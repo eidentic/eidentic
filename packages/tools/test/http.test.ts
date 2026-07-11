@@ -205,4 +205,84 @@ describe("fetchJson", () => {
     });
     expect(result).toEqual(payload);
   });
+
+  it("rejects JSON bodies above the configured response cap", async () => {
+    const fake: typeof fetch = (async () =>
+      new Response(JSON.stringify({ value: "x".repeat(4096) }), { status: 200 })) as typeof fetch;
+
+    await expect(fetchJson("https://example.com/large", undefined, {
+      fetchImpl: fake,
+      maxResponseBytes: 512,
+    })).rejects.toThrow(/response body.*512|exceeds.*512/i);
+  });
+});
+
+describe("resilientFetch — retry cleanup", () => {
+  it("cancels a 5xx response body before retrying", async () => {
+    let calls = 0;
+    let cancellations = 0;
+    const fake: typeof fetch = (async () => {
+      calls++;
+      if (calls === 1) {
+        const body = new ReadableStream<Uint8Array>({
+          pull(controller) {
+            controller.enqueue(new TextEncoder().encode("retry body"));
+          },
+          cancel() {
+            cancellations++;
+          },
+        });
+        return new Response(body, { status: 503 });
+      }
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const response = await resilientFetch("https://example.com/retry", undefined, {
+      fetchImpl: fake,
+      retries: 1,
+    });
+
+    expect(response.status).toBe(200);
+    expect(cancellations).toBe(1);
+  });
+
+  it("does not let a stalled body cancel block the retry", async () => {
+    let calls = 0;
+    const fake = (async () => {
+      calls++;
+      if (calls === 1) {
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) { controller.enqueue(new TextEncoder().encode("error")); },
+          cancel: () => new Promise<void>(() => { /* stalled transport cleanup */ }),
+        }), { status: 503 });
+      }
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const response = await resilientFetch("https://example.com/retry", undefined, {
+      fetchImpl: fake,
+      retries: 1,
+    });
+    expect(response.status).toBe(200);
+  }, 250);
+});
+
+describe("resilientFetch — error redaction", () => {
+  it("does not echo credential-bearing fetch error messages", async () => {
+    const fake = (async () => {
+      throw new Error("connect failed for https://example.com/path?token=super-secret");
+    }) as typeof fetch;
+    let thrown: unknown;
+    try {
+      await resilientFetch("https://example.com/path?token=super-secret", undefined, {
+        fetchImpl: fake,
+        retries: 0,
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    const message = thrown instanceof Error ? thrown.message : String(thrown);
+    expect(message).not.toContain("super-secret");
+    expect(message).toContain("https://example.com/path");
+  });
 });

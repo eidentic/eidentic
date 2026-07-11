@@ -1,4 +1,17 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync, readdirSync, copyFileSync, statSync } from "node:fs";
+import {
+  appendFileSync,
+  closeSync,
+  constants,
+  copyFileSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { join, resolve, isAbsolute, dirname, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createJiti } from "jiti";
@@ -185,6 +198,9 @@ export function initProject(
   cwd: string,
   opts: InitOptions = {},
 ): InitResult {
+  if (opts.apiKey !== undefined && /[\r\n\0]/.test(opts.apiKey)) {
+    throw new Error("initProject: apiKey contains an invalid line break or NUL byte");
+  }
   const provider = opts.provider ?? "anthropic";
   const p = INIT_PROVIDERS[provider];
   const modelId = opts.model ?? p.modelId;
@@ -230,12 +246,26 @@ export function initProject(
 
   // 5. .env — only if absent; write key if provided (gitignored above)
   const envAbs = join(cwd, ".env");
-  if (existsSync(envAbs)) {
-    skipped.push(".env");
-  } else {
-    const envValue = opts.apiKey ? opts.apiKey : "";
-    writeFileSync(envAbs, `${p.envVar}=${envValue}\n`, "utf8");
+  const envValue = opts.apiKey ? opts.apiKey : "";
+  let envFd: number | undefined;
+  try {
+    envFd = openSync(
+      envAbs,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0),
+      0o600,
+    );
+    writeFileSync(envFd, `${p.envVar}=${envValue}\n`, "utf8");
+    fsyncSync(envFd);
+    closeSync(envFd);
+    envFd = undefined;
     created.push(".env");
+  } catch (error) {
+    if (envFd !== undefined) closeSync(envFd);
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      skipped.push(".env");
+    } else {
+      throw error;
+    }
   }
 
   return { created, skipped };

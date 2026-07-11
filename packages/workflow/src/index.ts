@@ -56,7 +56,7 @@ export { resumeWorkflow } from "./resume.js";
 export type { ResumeOptions, ResumeResult } from "./resume.js";
 
 // Run registry
-export { createWorkflowRunRegistry, runStatusOf } from "./registry.js";
+export { createWorkflowRunRegistry, runStatusOf, WorkflowResumeConflictError } from "./registry.js";
 export type {
   WorkflowRunRecord,
   WorkflowRunRegistry,
@@ -66,6 +66,7 @@ export type {
   WorkflowRunStore,
   WorkflowRunFilter,
   WorkflowSuspension,
+  WorkflowResumeClaim,
   RecordOptions,
 } from "./registry.js";
 

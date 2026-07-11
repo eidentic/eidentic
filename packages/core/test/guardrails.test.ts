@@ -52,13 +52,18 @@ describe("GuardrailPort wiring", () => {
       expect((result as Extract<StreamEvent, { type: "result" }>).output).toMatch(/blocked.*guardrail/i);
       // Model must NOT have been called
       expect(model.calls).toHaveLength(0);
+      // Rejected content must not cross the persistence boundary either.
+      const stored = await store.readEvents("s1");
+      expect(stored.some((event) => event.kind === "user")).toBe(false);
+      expect(JSON.stringify(stored)).not.toContain("this input is blocked");
     });
 
-    it("redact: model receives the redacted text, not the original", async () => {
+    it("redact: only sanitized text is persisted and replayed", async () => {
       const store = new InMemoryStore();
       await store.migrate();
       const model = new MockModel([
         { content: [textBlock("ok")], usage: { inputTokens: 1, outputTokens: 1 } },
+        { content: [textBlock("ok again")], usage: { inputTokens: 1, outputTokens: 1 } },
       ]);
 
       const redactGuardrail: GuardrailPort = {
@@ -70,12 +75,18 @@ describe("GuardrailPort wiring", () => {
 
       const agent = makeAgent(model, store, redactGuardrail);
       await run(agent, "my secret is 123", "s2");
+      await run(agent, "follow up", "s2");
 
-      expect(model.calls).toHaveLength(1);
+      expect(model.calls).toHaveLength(2);
       const userMsg = model.calls[0]!.messages.find((m) => m.role === "user");
       expect(typeof userMsg?.content).toBe("string");
       expect(userMsg?.content as string).toContain("[REDACTED]");
       expect(userMsg?.content as string).not.toContain("secret");
+
+      const stored = await store.readEvents("s2");
+      expect(JSON.stringify(stored)).toContain("[REDACTED]");
+      expect(JSON.stringify(stored)).not.toContain("my secret");
+      expect(JSON.stringify(model.calls[1]!.messages)).not.toContain("my secret");
     });
 
     it("allow: model receives the original text unchanged", async () => {

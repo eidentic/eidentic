@@ -70,6 +70,7 @@ describe("reflection() + outputSchema", () => {
       { content: [toolUseBlock("c1", "critique", { satisfactory: true, feedback: "good" })], usage },
     ]);
     const agent = new Agent({
+      permissions: { mode: "bypass" },
       id: "a",
       instructions: "answer",
       model,
@@ -107,6 +108,7 @@ describe("reflection() + outputSchema", () => {
       { content: [toolUseBlock("c2", "critique", { satisfactory: true, feedback: "ok" })], usage },
     ]);
     const agent = new Agent({
+      permissions: { mode: "bypass" },
       id: "a",
       instructions: "answer",
       model,
@@ -137,6 +139,7 @@ describe("reflection() + outputSchema", () => {
       { content: [toolUseBlock("c1", "critique", { satisfactory: true, feedback: "ok" })], usage },
     ]);
     const agent = new Agent({
+      permissions: { mode: "bypass" },
       id: "a",
       instructions: "answer",
       model,
@@ -176,6 +179,7 @@ describe("planAndExecute() + outputSchema", () => {
       objResp('{"name":"Ada","age":36}', { name: "Ada", age: 36 }),
     ]);
     const agent = new Agent({
+      permissions: { mode: "bypass" },
       id: "a",
       instructions: "answer",
       model,
@@ -218,6 +222,7 @@ describe("planAndExecute() + outputSchema", () => {
       objResp('{"name":"Ada","age":36}', { name: "Ada", age: 36 }),
     ]);
     const agent = new Agent({
+      permissions: { mode: "bypass" },
       id: "a",
       instructions: "answer",
       model,
@@ -249,6 +254,7 @@ describe("planAndExecute() + outputSchema", () => {
     ]);
     const model = new RecModel([textResp("did step one")]);
     const agent = new Agent({
+      permissions: { mode: "bypass" },
       id: "a",
       instructions: "answer",
       model,
@@ -280,6 +286,7 @@ describe("planAndExecute() + outputSchema", () => {
       objResp('{"name":"Ada","age":"old"}', { name: "Ada", age: "old" }),
     ]);
     const agent = new Agent({
+      permissions: { mode: "bypass" },
       id: "a",
       instructions: "answer",
       model,
@@ -339,7 +346,7 @@ describe("resume() + outputSchema", () => {
     const m1 = new ScriptModel([
       { content: [toolUseBlock("tc1", "approve", { action: "deploy" })], usage },
     ]);
-    const a1 = new Agent({ id: "ag", instructions: "", model: m1, store, tools: [approveTool], durable: true, now: () => "t", newId: newIdFactory("e") });
+    const a1 = new Agent({ permissions: { mode: "bypass" }, id: "ag", instructions: "", model: m1, store, tools: [approveTool], durable: true, now: () => "t", newId: newIdFactory("e") });
     const first: StreamEvent[] = [];
     for await (const e of a1.query("deploy", { sessionId: "rsess" })) first.push(e);
     expect(first.at(-1)).toMatchObject({ type: "result", subtype: "suspended" });
@@ -349,7 +356,7 @@ describe("resume() + outputSchema", () => {
     const m2 = new ScriptModel([
       objResp('{"name":"Ada","age":36}', { name: "Ada", age: 36 }),
     ]);
-    const a2 = new Agent({ id: "ag", instructions: "", model: m2, store, tools: [approveTool], durable: true, now: () => "t", newId: newIdFactory("r") });
+    const a2 = new Agent({ permissions: { mode: "bypass" }, id: "ag", instructions: "", model: m2, store, tools: [approveTool], durable: true, now: () => "t", newId: newIdFactory("r") });
 
     const resumed: StreamEvent[] = [];
     for await (const e of a2.resume("rsess", { decision: { approved: true }, outputSchema: Person })) resumed.push(e);
@@ -365,14 +372,14 @@ describe("resume() + outputSchema", () => {
     const store = await makeStore();
     // Run 1: terminate immediately with a structured-JSON text answer (no tools).
     const m1 = new ScriptModel([textResp('{"name":"Bo","age":7}')]);
-    const a1 = new Agent({ id: "ag", instructions: "", model: m1, store, durable: true, now: () => "t", newId: newIdFactory("e") });
+    const a1 = new Agent({ permissions: { mode: "bypass" }, id: "ag", instructions: "", model: m1, store, durable: true, now: () => "t", newId: newIdFactory("e") });
     const first: StreamEvent[] = [];
     for await (const e of a1.query("answer", { sessionId: "tsess" })) first.push(e);
     expect(first.at(-1)).toMatchObject({ type: "result", subtype: "success" });
 
     // Run 2: resume the FINISHED session with an outputSchema → fast-path replay validates + attaches object.
     const m2 = new ScriptModel([]); // model must NOT be called on the terminal-completion fast-path.
-    const a2 = new Agent({ id: "ag", instructions: "", model: m2, store, durable: true, now: () => "t", newId: newIdFactory("r") });
+    const a2 = new Agent({ permissions: { mode: "bypass" }, id: "ag", instructions: "", model: m2, store, durable: true, now: () => "t", newId: newIdFactory("r") });
     const resumed: StreamEvent[] = [];
     for await (const e of a2.resume("tsess", { outputSchema: Person })) resumed.push(e);
 
@@ -385,12 +392,12 @@ describe("resume() + outputSchema", () => {
   it("back-compat: resume WITHOUT outputSchema yields no object", async () => {
     const store = await makeStore();
     const m1 = new ScriptModel([textResp("plain done")]);
-    const a1 = new Agent({ id: "ag", instructions: "", model: m1, store, durable: true, now: () => "t", newId: newIdFactory("e") });
+    const a1 = new Agent({ permissions: { mode: "bypass" }, id: "ag", instructions: "", model: m1, store, durable: true, now: () => "t", newId: newIdFactory("e") });
     const first: StreamEvent[] = [];
     for await (const e of a1.query("go", { sessionId: "bsess" })) first.push(e);
 
     const m2 = new ScriptModel([]);
-    const a2 = new Agent({ id: "ag", instructions: "", model: m2, store, durable: true, now: () => "t", newId: newIdFactory("r") });
+    const a2 = new Agent({ permissions: { mode: "bypass" }, id: "ag", instructions: "", model: m2, store, durable: true, now: () => "t", newId: newIdFactory("r") });
     const resumed: StreamEvent[] = [];
     for await (const e of a2.resume("bsess")) resumed.push(e);
 

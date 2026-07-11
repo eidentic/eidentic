@@ -24,6 +24,7 @@ const store = await PostgresStore.create({ client: pool });
 
 const agent = new Agent({
   id: "support",
+  instructions: "You are a helpful support assistant.",
   model: new AIModel(anthropic("claude-sonnet-4-5")),
   store,
 });
@@ -32,6 +33,11 @@ for await (const ev of agent.query("Hello", { sessionId: "s-1" })) {
   if (ev.type === "stream.delta") process.stdout.write(ev.delta.text);
 }
 ```
+
+When given a `pg.Pool`, migrations check out one dedicated connection for the complete transaction
+and take a transaction-scoped advisory lock. This prevents concurrent application instances from
+interleaving schema-version checks and DDL on different pool sockets. PGlite uses its single
+connection transaction path.
 
 ## Links
 

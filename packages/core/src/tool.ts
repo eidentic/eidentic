@@ -4,9 +4,15 @@ import type { AuditSink, DurablePort, LoggerPort, PermissionDecision, Permission
 import { canonicalJson, scopeKey } from "@eidentic/types";
 import { evaluatePermission, argScopedDenies, filterToolsForSchema } from "./permission.js";
 import { NoopLogger, envLogger } from "./logger.js";
+import { sanitizeBoundaryText, sanitizeBoundaryValue } from "./boundary.js";
 
 async function stableArgsHash(input: unknown): Promise<string> {
   return sha256Hex(canonicalJson(input));
+}
+
+/** Versioned, injective durable-ledger key for the `(sessionId, toolKey)` tuple. */
+export function idempotencyLedgerKey(sessionId: string | undefined, toolKey: string): string {
+  return `eidentic.idem.v2:${JSON.stringify([sessionId ?? null, toolKey])}`;
 }
 
 export type SideEffect = "read-only" | "idempotent" | "destructive";
@@ -63,6 +69,8 @@ export interface ToolDef<I = unknown, O = unknown> {
   description: string;
   inputSchema: z.ZodType<I>;
   sideEffect?: SideEffect;
+  /** Secret refs this tool may read from `ctx.secrets`. Omitted/empty means no secret access. */
+  requiredSecrets?: readonly string[];
   /**
    * Stable key for exactly-once dispatch (§9.3). Computed from input; required-in-practice for
    * destructive tools under durable runs.
@@ -74,13 +82,10 @@ export interface ToolDef<I = unknown, O = unknown> {
    * than returning stale data, but the silent-skip risk for truly constant input is real. Use a
    * key derived from the inputs that uniquely identify the intended side effect.
    *
-   * **Side-effect window warning**: under the v1 durable policy, if a crash occurs AFTER a
-   * destructive tool's external side effect executes but BEFORE `recordCompletion` is persisted,
-   * the framework will re-run the tool on resume (intent-without-completion policy). This means
-   * the external action (e.g., sending an email) may be triggered twice unless the external
-   * provider deduplicates on this key. **Recommendation**: pass the idempotency key to the
-   * external provider so that the provider can deduplicate the operation, making the end-to-end
-   * effect idempotent regardless of the crash window.
+   * **Side-effect window warning**: an unresolved intent is never re-executed automatically. If a
+   * process crashes after the external side effect but before `recordCompletion`, later calls fail
+   * closed as pending. Pass this key to the external provider and reconcile the intent explicitly
+   * before retrying when end-to-end exactly-once behavior is required.
    */
   idempotencyKey?: (input: I) => string | Promise<string>;
   execute: (args: { input: I; ctx?: ToolContext }) => Promise<O>;
@@ -90,6 +95,8 @@ export interface Tool {
   id: string;
   description: string;
   sideEffect: SideEffect;
+  /** Immutable least-privilege secret capability set. Never included in the model tool schema. */
+  requiredSecrets: readonly string[];
   jsonSchema: Record<string, unknown>;
   idempotencyKey?: (input: unknown) => string | Promise<string>;
   parse: (input: unknown) => { ok: true; value: unknown } | { ok: false; error: string };
@@ -108,19 +115,23 @@ export interface ToolResult {
   output: unknown;
   isError: boolean;
   /** Durable-path and permission annotations (absent on the fast path). */
-  meta?: { durableSkipped?: boolean; durableUnprotected?: boolean; collision?: boolean; permissionDenied?: boolean };
+  meta?: { durableSkipped?: boolean; durablePending?: boolean; durableUnprotected?: boolean; collision?: boolean; permissionDenied?: boolean };
 }
 
 export function createTool<I, O>(def: ToolDef<I, O>): Tool {
+  const requiredSecrets = Object.freeze([...(def.requiredSecrets ?? [])]);
   return {
     id: def.id,
     description: def.description,
     sideEffect: def.sideEffect ?? "read-only",
+    requiredSecrets,
     jsonSchema: z.toJSONSchema(def.inputSchema) as Record<string, unknown>,
     ...(def.idempotencyKey ? { idempotencyKey: (input: unknown) => def.idempotencyKey!(input as I) } : {}),
     parse: (input) => {
       const r = def.inputSchema.safeParse(input);
-      return r.success ? { ok: true, value: r.data } : { ok: false, error: `invalid input: ${r.error.message}` };
+      return r.success
+        ? { ok: true, value: r.data }
+        : { ok: false, error: `invalid input: ${sanitizeBoundaryText(r.error.message, 1_000)}` };
     },
     execute: (input, ctx) => def.execute({ input: input as I, ctx }),
   };
@@ -166,6 +177,8 @@ export interface RegistryOpts {
   sessionId?: string;
   /** Structured logger for tool dispatch + permission decision logging. */
   logger?: LoggerPort;
+  /** Dynamic prompt-skill capability set for this run; null means no skill is active. */
+  activeSkillAllowedTools?: () => readonly string[] | null;
 }
 
 export class ToolRegistry {
@@ -181,6 +194,7 @@ export class ToolRegistry {
   private readonly signal?: AbortSignal;
   private readonly sessionId?: string;
   private readonly logger: LoggerPort;
+  private readonly activeSkillAllowedTools?: () => readonly string[] | null;
 
   constructor(tools: Tool[], opts?: RegistryOpts) {
     for (const t of tools) this.byName.set(t.id, t);
@@ -194,6 +208,7 @@ export class ToolRegistry {
     this.scope = opts?.scope;
     this.signal = opts?.signal;
     this.sessionId = opts?.sessionId;
+    this.activeSkillAllowedTools = opts?.activeSkillAllowedTools;
     // Default to envLogger so warn/error always surface (e.g. "destructive tool without idempotencyKey").
     // When a logger is explicitly injected (via Agent.buildRegistry), it takes precedence.
     this.logger = opts?.logger ?? envLogger();
@@ -205,7 +220,8 @@ export class ToolRegistry {
     const visible = this.permissions
       ? filterToolsForSchema([...this.byName.values()], this.permissions)
       : [...this.byName.values()];
-    return visible.map((t) => ({
+    const skillVisible = visible.filter((tool) => this.skillAllows(tool.id));
+    return skillVisible.map((t) => ({
       name: t.id,
       description: t.description,
       inputSchema: t.jsonSchema,
@@ -214,6 +230,11 @@ export class ToolRegistry {
 
   /** Read-only calls run concurrently; mutating calls run serially. Order preserved. */
   async dispatch(calls: ToolCall[]): Promise<ToolResult[]> {
+    if (calls.some((call) => call.name === "skill_use")) {
+      const sequential: ToolResult[] = [];
+      for (const call of calls) sequential.push(await this.runOne(call));
+      return sequential;
+    }
     const results: ToolResult[] = new Array(calls.length);
     const mutating: number[] = [];
     const readonly: number[] = [];
@@ -227,7 +248,28 @@ export class ToolRegistry {
   }
 
   private async resolvePermission(tool: Tool, input: unknown): Promise<"allow" | "deny"> {
-    // Step 1: onPreToolUse — explicit override wins immediately (checked before policy).
+    // Step 1: policy evaluation. Static and argument-scoped denies are absolute: a hook may
+    // impose an additional denial or approve an "ask", but can never bypass a deny rule.
+    const dec = evaluatePermission(this.permissions, tool);
+
+    // Step 1b: arg-scoped deny patterns — evaluated after bare-name deny check, BEFORE hooks.
+    // These fire even under mode:"bypass" (§10.4: deny beats mode over modes, not over pre-hooks).
+    // Only fires when no bare-name deny already denied (dec !== "deny"), because bare denies
+    // are already terminal; arg-scoped denies are a separate conditional guard.
+    if (dec !== "deny" && this.permissions) {
+      const serialized = JSON.stringify(input) ?? "undefined";
+      if (argScopedDenies(this.permissions, tool.id, serialized)) {
+        this.logger.log("debug", "eidentic:permission", "decision", { tool: tool.id, decision: "deny", reason: "arg-scoped-deny" });
+        return "deny";
+      }
+    }
+
+    if (dec === "deny") {
+      this.logger.log("debug", "eidentic:permission", "decision", { tool: tool.id, decision: "deny", reason: "policy" });
+      return "deny";
+    }
+
+    // Step 2: pre-tool hook can further restrict, or explicitly approve an ask/default decision.
     if (this.onPreToolUse) {
       const pre = await this.onPreToolUse(tool.id, input);
       if (pre === "deny") {
@@ -237,22 +279,6 @@ export class ToolRegistry {
       if (pre === "allow") {
         this.logger.log("debug", "eidentic:permission", "decision", { tool: tool.id, decision: "allow", reason: "onPreToolUse" });
         return "allow";
-      }
-      // void / "ask" → fall through to policy
-    }
-
-    // Step 2: policy evaluation (bare-name deny + mode checks).
-    const dec = evaluatePermission(this.permissions, tool);
-
-    // Step 2b: arg-scoped deny patterns — evaluated after bare-name deny check, BEFORE mode logic.
-    // These fire even under mode:"bypass" (§10.4: deny beats mode over modes, not over pre-hooks).
-    // Only fires when no bare-name deny already denied (dec !== "deny"), because bare denies
-    // are already terminal; arg-scoped denies are a separate conditional guard.
-    if (dec !== "deny" && this.permissions) {
-      const serialized = JSON.stringify(input) ?? "undefined";
-      if (argScopedDenies(this.permissions, tool.id, serialized)) {
-        this.logger.log("debug", "eidentic:permission", "decision", { tool: tool.id, decision: "deny", reason: "arg-scoped-deny" });
-        return "deny";
       }
     }
 
@@ -268,9 +294,8 @@ export class ToolRegistry {
       return finalDec;
     }
 
-    const result = dec === "deny" ? "deny" : "allow";
-    this.logger.log("debug", "eidentic:permission", "decision", { tool: tool.id, decision: result, reason: "policy" });
-    return result;
+    this.logger.log("debug", "eidentic:permission", "decision", { tool: tool.id, decision: "allow", reason: "policy" });
+    return "allow";
   }
 
   private async runOne(call: ToolCall): Promise<ToolResult> {
@@ -278,6 +303,16 @@ export class ToolRegistry {
     if (!tool) {
       const valid = [...this.byName.keys()].join(", ");
       return { callId: call.callId, toolName: call.name, isError: true, output: { error: `unknown tool '${call.name}'. valid tools: ${valid}` } };
+    }
+    if (!this.skillAllows(call.name)) {
+      this.emitDenied(call.name, "denied");
+      return {
+        callId: call.callId,
+        toolName: call.name,
+        isError: true,
+        output: { error: `active skill does not allow tool: ${call.name}` },
+        meta: { permissionDenied: true },
+      };
     }
     const parsed = tool.parse(call.input);
     if (!parsed.ok) {
@@ -295,7 +330,7 @@ export class ToolRegistry {
       try {
         decision = await this.resolvePermission(tool, parsed.value);
       } catch (gateErr) {
-        const raw = gateErr instanceof Error ? gateErr.message : String(gateErr);
+        const raw = sanitizeBoundaryText(gateErr instanceof Error ? gateErr.message : String(gateErr), 500);
         this.logger.log("debug", "eidentic:tool", "result", { tool: call.name, ok: false, reason: "permission-gate-error", error: raw });
         this.emitDenied(tool.id, "gate-error");
         return {
@@ -323,9 +358,10 @@ export class ToolRegistry {
     const durable = this.durable;
     const sessionId = this.sessionId;
     const callId = call.callId;
+    const scopedSecrets = this.secretCapabilitiesFor(tool);
     const ctx: ToolContext = {
       ...(this.scope !== undefined ? { scope: this.scope } : {}),
-      ...(this.secrets !== undefined ? { secrets: this.secrets } : {}),
+      ...(scopedSecrets !== undefined ? { secrets: scopedSecrets } : {}),
       ...(this.signal !== undefined ? { signal: this.signal } : {}),
       suspend: async (request: SuspendRequest): Promise<SuspendDecision> => {
         if (!durable || sessionId === undefined) {
@@ -346,51 +382,84 @@ export class ToolRegistry {
         try {
           toolKey = await tool.idempotencyKey(parsed.value);
         } catch (e) {
-          const raw = e instanceof Error ? e.message : String(e);
+          const raw = sanitizeBoundaryText(e instanceof Error ? e.message : String(e), 500);
           return { callId: call.callId, toolName: call.name, isError: true, output: { error: `idempotencyKey threw: ${raw}` } };
         }
-        // A10/A7: scope the stored key by sessionId so two sessions with identical tool args
-        // do NOT collide in the durable ledger (cross-session result suppression / re-billing).
-        // The sessionId prefix is TRANSPARENT to the tool author's idempotencyKey fn.
-        const key = this.sessionId !== undefined ? `${this.sessionId}:${toolKey}` : toolKey;
+        const key = idempotencyLedgerKey(this.sessionId, toolKey);
         const argsHash = await stableArgsHash(parsed.value);
-        // Migration compat (#7): a ledger written by a version that did NOT prefix keys will have
-        // a bare `toolKey` entry. On a prefixed-key miss we fall back to reading the bare key so
-        // that a previously-settled destructive tool is not re-executed after an upgrade.
-        // New completions are ALWAYS written with the prefixed key so the bare-key path is
-        // purely read-compat and will age out naturally as sessions complete.
         const idempotencyMetadata = this.sessionId !== undefined ? { sessionId: this.sessionId } : undefined;
         let rec = await this.durable.getIdempotency(key, idempotencyMetadata);
-        if (rec == null && this.sessionId !== undefined && toolKey !== key) {
-          const legacyRec = await this.durable.getIdempotency(toolKey);
-          if (legacyRec?.status === "applied") {
-            rec = legacyRec; // honour the legacy entry (read-compat, no re-write)
-          }
+        if (rec == null && this.sessionId !== undefined) {
+          // Read the immediately previous format only when ownership metadata proves the exact
+          // session. Bare pre-session keys are ambiguous and intentionally fail closed.
+          const legacyRec = await this.durable.getIdempotency(
+            `${this.sessionId}:${toolKey}`,
+            idempotencyMetadata,
+          );
+          if (legacyRec?.status === "applied" && legacyRec.sessionId === this.sessionId) rec = legacyRec;
         }
-        if (rec?.status === "applied") {
-          // Exactly-once / skip-on-resume: return the cached result WITHOUT executing.
-          // Guard against user-supplied key collisions: if the stored argsHash differs,
-          // the same key was applied with different arguments — return an error instead of stale data.
-          if (rec.argsHash !== argsHash) {
+
+        const existingResult = async (existing: NonNullable<typeof rec>): Promise<ToolResult> => {
+          if (existing.argsHash !== argsHash) {
             return {
               callId: call.callId,
               toolName: call.name,
               isError: true,
-              output: { error: `idempotency key collision: ${key} was applied with different arguments` },
+              output: { error: "idempotency key collision: the key was claimed with different arguments" },
               meta: { durableSkipped: true, collision: true },
             };
           }
+          if (existing.status === "intent") {
+            return {
+              callId: call.callId,
+              toolName: call.name,
+              isError: true,
+              output: { error: "idempotency operation is already in progress or requires reconciliation" },
+              meta: { durableSkipped: true, durablePending: true },
+            };
+          }
           this.logger.log("debug", "eidentic:tool", "result", { tool: call.name, ok: true, durableSkipped: true });
-          const skippedResult: ToolResult = { callId: call.callId, toolName: call.name, isError: false, output: rec.result, meta: { durableSkipped: true } };
-          await this.firePostHook(tool.id, parsed.value, skippedResult, dispatchStart);
-          return skippedResult;
+          const skipped: ToolResult = {
+            callId: call.callId,
+            toolName: call.name,
+            isError: false,
+            output: sanitizeBoundaryValue(existing.result),
+            meta: { durableSkipped: true },
+          };
+          await this.firePostHook(tool.id, parsed.value, skipped, dispatchStart);
+          return skipped;
+        };
+
+        if (rec) return existingResult(rec);
+
+        const claimed = await this.durable.claimIntent(key, argsHash, idempotencyMetadata);
+        if (!claimed) {
+          const winner = await this.durable.getIdempotency(key, idempotencyMetadata);
+          if (!winner) {
+            return {
+              callId: call.callId,
+              toolName: call.name,
+              isError: true,
+              output: { error: "idempotency claim was lost; execution denied" },
+              meta: { durableSkipped: true, durablePending: true },
+            };
+          }
+          return existingResult(winner);
         }
-        await this.durable.recordIntent(key, argsHash, idempotencyMetadata);
-        const r = await this.execOne(call, tool, parsed.value, ctx);
-        if (!r.isError) await this.durable.recordCompletion(key, r.output, idempotencyMetadata);
-        this.logger.log("debug", "eidentic:tool", "result", { tool: call.name, ok: !r.isError });
-        await this.firePostHook(tool.id, parsed.value, r, dispatchStart);
-        return r;
+
+        try {
+          const r = await this.execOne(call, tool, parsed.value, ctx);
+          if (!r.isError) await this.durable.recordCompletion(key, r.output, idempotencyMetadata);
+          this.logger.log("debug", "eidentic:tool", "result", { tool: call.name, ok: !r.isError });
+          await this.firePostHook(tool.id, parsed.value, r, dispatchStart);
+          return r;
+        } catch (error) {
+          if (error instanceof SuspendSignal) {
+            const released = await this.durable.releaseIntent(key, argsHash, idempotencyMetadata);
+            if (!released) throw new Error("failed to release suspended idempotency claim", { cause: error });
+          }
+          throw error;
+        }
       }
       // Destructive/idempotent tool WITHOUT a key under durable: dispatch normally but mark unprotected (v1 policy).
       if (tool.sideEffect === "destructive") {
@@ -407,6 +476,31 @@ export class ToolRegistry {
     this.logger.log("debug", "eidentic:tool", "result", { tool: call.name, ok: !result.isError });
     await this.firePostHook(tool.id, parsed.value, result, dispatchStart);
     return result;
+  }
+
+  private skillAllows(toolId: string): boolean {
+    const allowed = this.activeSkillAllowedTools?.();
+    if (allowed === null || allowed === undefined) return true;
+    if (toolId === "skill_search" || toolId === "skill_use" || toolId === "skill_read") return true;
+    return allowed.includes("*") || allowed.includes(toolId);
+  }
+
+  /** Expose only refs declared by this tool; never pass the ambient vault object through. */
+  private secretCapabilitiesFor(tool: Tool): SecretsPort | undefined {
+    if (!this.secrets || tool.requiredSecrets.length === 0) return undefined;
+    const source = this.secrets;
+    const allowed = new Set(tool.requiredSecrets);
+    return {
+      get: async (ref: string): Promise<string | undefined> => {
+        if (!allowed.has(ref)) {
+          this.logger.log("warn", "eidentic:secrets", "access denied", { tool: tool.id, ref });
+          throw new Error(`secret capability denied: tool '${tool.id}' did not declare '${ref}'`);
+        }
+        const value = await source.get(ref);
+        this.logger.log("debug", "eidentic:secrets", "access", { tool: tool.id, ref, found: value !== undefined });
+        return value;
+      },
+    };
   }
 
   /**
@@ -426,7 +520,7 @@ export class ToolRegistry {
           sessionId: this.sessionId ?? "",
         });
       } catch (err) {
-        this.logger.log("warn", "eidentic:tool", `onPostToolUse hook threw (swallowed): ${err instanceof Error ? err.message : String(err)}`);
+        this.logger.log("warn", "eidentic:tool", `onPostToolUse hook threw (swallowed): ${sanitizeBoundaryText(err instanceof Error ? err.message : String(err), 500)}`);
       }
     }
     // Audit: one `tool.call` per executed dispatch (success, error, or durable-skip). Denials are
@@ -460,18 +554,17 @@ export class ToolRegistry {
     try {
       this.onAuditEvent(event);
     } catch (err) {
-      this.logger.log("warn", "eidentic:tool", `onAuditEvent sink threw (swallowed): ${err instanceof Error ? err.message : String(err)}`);
+      this.logger.log("warn", "eidentic:tool", `onAuditEvent sink threw (swallowed): ${sanitizeBoundaryText(err instanceof Error ? err.message : String(err), 500)}`);
     }
   }
 
   private async execOne(call: ToolCall, tool: Tool, value: unknown, ctx: ToolContext): Promise<ToolResult> {
     try {
-      const output = await tool.execute(value, ctx);
+      const output = sanitizeBoundaryValue(await tool.execute(value, ctx));
       return { callId: call.callId, toolName: call.name, isError: false, output };
     } catch (e) {
       if (e instanceof SuspendSignal) throw e; // §5.7: NOT a tool error — propagate to the loop.
-      const raw = e instanceof Error ? e.message : String(e);
-      const error = raw.length > 500 ? raw.slice(0, 500) + "…(truncated)" : raw;
+      const error = sanitizeBoundaryText(e instanceof Error ? e.message : String(e), 500);
       return { callId: call.callId, toolName: call.name, isError: true, output: { error } };
     }
   }

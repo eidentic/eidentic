@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, statSync, symlinkSync } from "node:fs";
 import {
   createWorkflowRunRegistry,
   fileWorkflowRunStore,
@@ -110,6 +110,51 @@ describe("durable store — write-through + hydrate", () => {
 // ─── File store crash safety ──────────────────────────────────────────────────
 
 describe("fileWorkflowRunStore — crash safety", () => {
+  it("creates the persisted snapshot with owner-only permissions", async () => {
+    const dir = mkdtemp("eidentic-private-");
+    try {
+      const path = join(dir, "runs.json");
+      const store = fileWorkflowRunStore(path);
+      await store.save({
+        id: "private",
+        name: "w",
+        status: "ok",
+        runStatus: "completed",
+        startedAt: 0,
+        durationMs: 0,
+        stepCount: 0,
+        trace: [],
+      } as WorkflowRunRecord);
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a symlink destination without changing its target", async () => {
+    const dir = mkdtemp("eidentic-symlink-");
+    try {
+      const outside = join(dir, "outside.json");
+      const path = join(dir, "runs.json");
+      writeFileSync(outside, "outside", "utf8");
+      symlinkSync(outside, path, "file");
+      const store = fileWorkflowRunStore(path);
+      await expect(store.save({
+        id: "escape",
+        name: "w",
+        status: "ok",
+        runStatus: "completed",
+        startedAt: 0,
+        durationMs: 0,
+        stepCount: 0,
+        trace: [],
+      } as WorkflowRunRecord)).rejects.toThrow(/symlink/i);
+      expect(readFileSync(outside, "utf8")).toBe("outside");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("survives a simulated crash: write, recreate store, records intact", async () => {
     const dir = mkdtemp("eidentic-crash-");
     try {

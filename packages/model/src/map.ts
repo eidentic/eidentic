@@ -24,7 +24,7 @@ const ANTHROPIC_CACHE_BREAKPOINT: SystemModelMessage["providerOptions"] = {
  */
 export function mapMessages(
   msgs: KMessage[],
-  opts?: { cacheControl?: boolean },
+  opts?: { cacheControl?: boolean; unsafeAllowRemoteImageUrls?: boolean },
 ): { instructions?: Instructions; messages: AIMessage[] } {
   const systemParts: string[] = [];
   const messages: AIMessage[] = [];
@@ -51,6 +51,12 @@ export function mapMessages(
             if (b.type === "text") return [{ type: "text" as const, text: b.text }];
             if (b.type === "image") {
               const img = b.image;
+              if (img.url && opts?.unsafeAllowRemoteImageUrls !== true) {
+                throw new Error(
+                  "remote image URLs are denied at the model boundary; resolve and validate the " +
+                  "image to bounded base64 data first, or explicitly opt into unsafe provider-side fetching",
+                );
+              }
               const source = img.url ? new URL(img.url) : img.data;
               // An image block with neither url nor data has nothing to forward.
               if (source === undefined) return [];
@@ -94,9 +100,9 @@ export function mapMessages(
       content: [
         {
           type: "tool-result",
-          toolCallId: m.callId ?? "",
-          toolName: m.toolName ?? "",
-          output: { type: "text", value: typeof m.content === "string" ? m.content : textOf(m.content) },
+      toolCallId: m.callId,
+      toolName: m.toolName,
+      output: { type: "text", value: m.content },
         },
       ],
     });

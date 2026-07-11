@@ -45,7 +45,7 @@ describe("§5.7/§9.4 human-in-the-loop durable suspension", () => {
     const model = new ScriptModel([
       { content: [toolUseBlock("c1", "request_refund", { amount: 50 })], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
-    const agent = new Agent({ id: "r", instructions: "", model, store, tools: [makeRefundTool(state)], durable: true, now: () => "t", newId: newIdFactory("e") });
+    const agent = new Agent({ permissions: { mode: "bypass" }, id: "r", instructions: "", model, store, tools: [makeRefundTool(state)], durable: true, now: () => "t", newId: newIdFactory("e") });
 
     const events = [];
     for await (const e of agent.query("refund 50", { sessionId: "s" })) events.push(e);
@@ -71,7 +71,7 @@ describe("§5.7/§9.4 human-in-the-loop durable suspension", () => {
     const m1 = new ScriptModel([
       { content: [toolUseBlock("c1", "request_refund", { amount: 50 })], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
-    const a1 = new Agent({ id: "r", instructions: "", model: m1, store, tools: [refund], durable: true, now: () => "t", newId: newIdFactory("e") });
+    const a1 = new Agent({ permissions: { mode: "bypass" }, id: "r", instructions: "", model: m1, store, tools: [refund], durable: true, now: () => "t", newId: newIdFactory("e") });
     for await (const _ of a1.query("refund 50", { sessionId: "s" })) { /* drain */ }
     expect(state.refunds).toBe(0);
 
@@ -80,7 +80,7 @@ describe("§5.7/§9.4 human-in-the-loop durable suspension", () => {
     const m2 = new ScriptModel([
       { content: [textBlock("refund approved and processed")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
-    const a2 = new Agent({ id: "r", instructions: "", model: m2, store, tools: [refund], durable: true, now: () => "t", newId: newIdFactory("r") });
+    const a2 = new Agent({ permissions: { mode: "bypass" }, id: "r", instructions: "", model: m2, store, tools: [refund], durable: true, now: () => "t", newId: newIdFactory("r") });
     const resumed = [];
     for await (const e of a2.resume("s", { decision: { approved: true } })) resumed.push(e);
 
@@ -99,7 +99,7 @@ describe("§5.7/§9.4 human-in-the-loop durable suspension", () => {
     const m1 = new ScriptModel([
       { content: [toolUseBlock("c1", "request_refund", { amount: 50 })], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
-    const a1 = new Agent({ id: "r", instructions: "", model: m1, store, tools: [refund], durable: true, now: () => "t", newId: newIdFactory("e") });
+    const a1 = new Agent({ permissions: { mode: "bypass" }, id: "r", instructions: "", model: m1, store, tools: [refund], durable: true, now: () => "t", newId: newIdFactory("e") });
     for await (const _ of a1.query("refund 50", { sessionId: "s" })) { /* drain */ }
 
     // Resume: the persisted tool_use is re-dispatched directly (no model re-emit).
@@ -107,7 +107,7 @@ describe("§5.7/§9.4 human-in-the-loop durable suspension", () => {
     const m2 = new ScriptModel([
       { content: [textBlock("refund declined")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
-    const a2 = new Agent({ id: "r", instructions: "", model: m2, store, tools: [refund], durable: true, now: () => "t", newId: newIdFactory("r") });
+    const a2 = new Agent({ permissions: { mode: "bypass" }, id: "r", instructions: "", model: m2, store, tools: [refund], durable: true, now: () => "t", newId: newIdFactory("r") });
     const resumed = [];
     for await (const e of a2.resume("s", { decision: { approved: false } })) resumed.push(e);
 
@@ -125,7 +125,7 @@ describe("§5.7/§9.4 human-in-the-loop durable suspension", () => {
       { content: [textBlock("done")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
     // durable NOT enabled → ctx.suspend throws; it is an ORDINARY throw → becomes a tool error result.
-    const agent = new Agent({ id: "r", instructions: "", model, store, tools: [refund], now: () => "t", newId: newIdFactory("e") });
+    const agent = new Agent({ permissions: { mode: "bypass" }, id: "r", instructions: "", model, store, tools: [refund], now: () => "t", newId: newIdFactory("e") });
     const events = [];
     for await (const e of agent.query("refund 50", { sessionId: "s" })) events.push(e);
     const toolErr = events.find((e) => e.type === "tool.result" && (e as any).callId === "c1") as any;
@@ -136,7 +136,7 @@ describe("§5.7/§9.4 human-in-the-loop durable suspension", () => {
   it("resume with a decision on a non-durable agent throws a clear error", async () => {
     const store = new InMemoryStore();
     await store.migrate();
-    const agent = new Agent({ id: "r", instructions: "", model: new ScriptModel([]), store, tools: [], now: () => "t" });
+    const agent = new Agent({ permissions: { mode: "bypass" }, id: "r", instructions: "", model: new ScriptModel([]), store, tools: [], now: () => "t" });
     await expect(async () => {
       for await (const _ of agent.resume("s", { decision: { approved: true } })) { /* */ }
     }).rejects.toThrow(/durable/i);
@@ -145,7 +145,7 @@ describe("§5.7/§9.4 human-in-the-loop durable suspension", () => {
 
 describe("resume() ownership check (§M2)", () => {
   const makeAgent = (store: InMemoryStore) =>
-    new Agent({ id: "owner-agent", instructions: "", model: new ScriptModel([
+    new Agent({ permissions: { mode: "bypass" }, id: "owner-agent", instructions: "", model: new ScriptModel([
       { content: [{ type: "text", text: "done" }], usage: { inputTokens: 1, outputTokens: 1 } },
     ]), store, durable: true, now: () => "t", newId: newIdFactory("ow") });
 
@@ -202,14 +202,13 @@ describe("resume() ownership check (§M2)", () => {
     }).rejects.toThrow(/ownership mismatch/i);
   });
 
-  it("no caller identity + session has owner → no check, succeeds (legacy path)", async () => {
+  it("no caller identity + session has owner → rejects fail-closed", async () => {
     const store = new InMemoryStore();
     await store.migrate();
     await store.createSession({ id: "sess-owned-nocheck", agentId: "owner-agent", createdAt: "t", userId: "charlie" });
     const agent = makeAgent(store);
-    // No identity passed → back-compat: skip check
-    const events: unknown[] = [];
-    for await (const e of agent.resume("sess-owned-nocheck")) events.push(e);
-    expect(events.length).toBeGreaterThan(0);
+    await expect(async () => {
+      for await (const _ of agent.resume("sess-owned-nocheck")) { /* */ }
+    }).rejects.toThrow(/ownership mismatch/i);
   });
 });

@@ -259,15 +259,18 @@ describe.each(backends)("Feature 3 — ConsentManifest enforcement (%s)", (_labe
     await store.migrate();
     try {
       const manifest: ConsentManifest = { categories: { "contact-info": "never" } };
-      // Consent must be configured at ingest so the raw text is cached for re-classification.
-      const mem = new Memory({ store, graph: store, consent: { categories: {} } });
-      await mem.ingest([
+      const writer = new Memory({ store, graph: store, consent: { categories: {} } });
+      await writer.ingest([
         { id: "mem-contact", scope, text: "reach me at baran@example.com anytime" },
         { id: "mem-plain", scope, text: "I enjoy hiking on weekends" },
       ]);
+      // A fresh instance has empty hot caches; governance must enumerate the durable store.
+      const mem = new Memory({ store, graph: store, consent: { categories: {} } });
       const res = await mem.applyConsent(scope, manifest);
       expect(res.sweptMemories).toBe(1);
       expect(res.rejected).toBe(1);
+      expect(await store.searchMemory(scope, "baran example", 10)).toEqual([]);
+      expect((await store.searchMemory(scope, "hiking", 10)).map((entry) => entry.id)).toEqual(["mem-plain"]);
     } finally {
       await store.close();
     }
@@ -308,7 +311,8 @@ describe.each(backends)("Feature 4 — exportScope (%s)", (_label, makeStore) =>
       await store.upsertBlock(scope, { label: "persona", value: "v0" });
       await store.upsertBlock(scope, { label: "persona", value: "v1" }, 0);
 
-      const exp = await mem.exportScope(scope);
+      // Export from a fresh instance to prove it does not depend on the writer's hot cache.
+      const exp = await new Memory({ store, graph: store, now: () => t2 }).exportScope(scope);
       expect(exp.schema).toBe("eidentic.memory.export.v1");
       expect(exp.exportedAt).toBe(t2);
       expect(exp.scope).toEqual(scope);

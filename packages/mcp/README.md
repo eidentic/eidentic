@@ -22,11 +22,34 @@ import { fileTools } from "@eidentic/tools";
 // Requires optional peer: pnpm add @modelcontextprotocol/sdk
 const handle = await createMcpServer(
   fileTools({ root: process.cwd() }),
-  { name: "my-tools", version: "1.0.0" },
+  {
+    name: "my-tools",
+    version: "1.0.0",
+    authenticateConnection: async (context) => {
+      const principal = await verifyTransportContext(context.requestInfo);
+      return principal ? { principal } : false;
+    },
+    authorize: (toolName, _input, { principal }) => canCall(principal, toolName),
+  },
 );
 
 await handle.serveStdio(); // blocks — wire into stdio transport
 ```
+
+MCP protocol parameters are never treated as authentication context. Agent tools also ignore
+caller-supplied `userId`, `orgId`, and `apiKey` fields by default. A verified principal containing
+`userId`/`orgId` (or a stable `id`, `subject`, or `sub`) is mapped to the agent identity. SDK
+connections without an application principal use their verified MCP `clientId`; raw credentials
+are never forwarded. Use `agentIdentity` for application-specific mapping. Authenticated agent
+calls without a stable identity are denied; `allowUntrustedIdentityArgs: true` exists only for
+legacy migration.
+
+Both `createMcpServer` and the direct `serveAgent` helper accept `authorize`, which runs after
+authentication and before `Agent.query`.
+
+Streamable HTTP is fail-closed unless `authenticateConnection` is configured. The explicit
+`allowUnauthenticatedHttp: true` escape hatch is for isolated local development only; stdio is
+unchanged.
 
 ### Consume a remote MCP server's tools
 

@@ -2,6 +2,7 @@ import { createClient } from "@libsql/client";
 import type { Client } from "@libsql/client";
 import {
   StoreConflictError,
+  legacyScopeKey,
   scopeKey,
   tokenize,
   type StorePort,
@@ -18,6 +19,7 @@ import {
   type DurablePort,
   type Checkpoint,
   type IdempotencyRecord,
+  type IdempotencyMetadata,
   type IdempotencyStatus,
   type SuspendDecision,
 } from "@eidentic/types";
@@ -72,6 +74,14 @@ function numOrNull(v: RowValue): number | null {
 
 type Stmt = { sql: string; args?: import("@libsql/client").InArgs };
 
+function sessionSelection(scope: Scope): { where: string; args: string[] } | null {
+  if (scope.kind === "agent") return { where: "agent_id = ?", args: [scope.agentId] };
+  if (scope.kind === "user") return { where: "agent_id = ? AND user_id = ?", args: [scope.agentId, scope.userId] };
+  if (scope.kind === "org") return { where: "agent_id = ? AND org_id = ?", args: [scope.agentId, scope.orgId] };
+  if (scope.kind === "thread") return { where: "agent_id = ? AND id = ?", args: [scope.agentId, scope.sessionId] };
+  return null;
+}
+
 export class LibsqlStore implements StorePort, GraphPort, DurablePort {
   private readonly client: Client;
   private factIdCounter = 0;
@@ -85,10 +95,9 @@ export class LibsqlStore implements StorePort, GraphPort, DurablePort {
    * interleave at every `await`, so two concurrent callers can both observe "no
    * current fact" and both insert — producing two valid rows.
    *
-   * A JS-level mutex prevents that interleaving: each call waits for the previous one
-   * to finish before it reads. For multi-process deployments the `client.batch("write")`
-   * call that performs the actual writes additionally serializes writers at the
-   * SQLite/libSQL level (BEGIN IMMEDIATE acquires an exclusive write lock).
+   * This mutex reduces avoidable local lock contention. Correctness across store instances and
+   * processes comes from executing the read, conditional insert, invalidation and activation in
+   * one `client.batch("write")` transaction (BEGIN IMMEDIATE).
    */
   private assertFactMutex: Promise<void> = Promise.resolve();
 
@@ -140,6 +149,14 @@ export class LibsqlStore implements StorePort, GraphPort, DurablePort {
       ...(orgId !== null ? { orgId } : {}),
       ...(apiKey !== null ? { apiKey } : {}),
     };
+  }
+
+  async replaceSessionApiKey(sessionId: string, expected: string, replacement: string): Promise<boolean> {
+    const result = await this.client.execute({
+      sql: `UPDATE sessions SET api_key = ? WHERE id = ? AND api_key = ?`,
+      args: [replacement, sessionId, expected],
+    });
+    return result.rowsAffected === 1;
   }
 
   // ---------------------------------------------------------------------------
@@ -446,6 +463,40 @@ export class LibsqlStore implements StorePort, GraphPort, DurablePort {
     });
   }
 
+  async listMemory(scope: Scope) {
+    const rs = await this.client.execute({
+      sql: `SELECT memories.ext_id AS id, memories.text AS text, mm.ingested_at, mm.metadata
+            FROM memories
+            LEFT JOIN memory_meta mm ON mm.scope_key = memories.scope_key AND mm.ext_id = memories.ext_id
+            WHERE memories.scope_key = ? ORDER BY memories.ext_id`,
+      args: [scopeKey(scope)],
+    });
+    return rs.rows.map((row) => {
+      const ingestedAt = row["ingested_at"];
+      const metadata = strOrNull(row["metadata"]);
+      return {
+        id: str(row["id"]),
+        text: str(row["text"]),
+        ...(ingestedAt !== null && ingestedAt !== undefined ? { ingestedAt: num(ingestedAt) } : {}),
+        ...(metadata !== null ? { metadata: JSON.parse(metadata) as Record<string, unknown> } : {}),
+      };
+    });
+  }
+
+  async deleteMemory(scope: Scope, ids: string[]): Promise<number> {
+    if (ids.length === 0) return 0;
+    const sk = scopeKey(scope);
+    let deleted = 0;
+    for (const id of new Set(ids)) {
+      const [memoryResult] = await this.client.batch([
+        { sql: `DELETE FROM memories WHERE scope_key = ? AND ext_id = ?`, args: [sk, id] },
+        { sql: `DELETE FROM memory_meta WHERE scope_key = ? AND ext_id = ?`, args: [sk, id] },
+      ], "write");
+      deleted += memoryResult?.rowsAffected ?? 0;
+    }
+    return deleted;
+  }
+
   // ---------------------------------------------------------------------------
   // Graph (Facts)
   // ---------------------------------------------------------------------------
@@ -476,10 +527,8 @@ export class LibsqlStore implements StorePort, GraphPort, DurablePort {
     scope: Scope,
     input: AssertFactInput,
   ): Promise<{ asserted: Fact; invalidated: Fact[] }> {
-    // Serialize concurrent assertFact calls on this store instance via a JS-level
-    // mutex.  Combined with client.batch("write") — which issues BEGIN IMMEDIATE and
-    // therefore holds an exclusive write lock at the SQLite/libSQL layer — this
-    // prevents two callers from both reading "no current fact" and both inserting.
+    // Serialize same-instance calls to avoid needless local lock contention. The database
+    // transaction in _assertFactBody is the actual cross-instance correctness boundary.
     //
     // Why not use client.transaction("write") (interactive transactions)?  The
     // @libsql/client sqlite3 driver sets its internal db reference to null after
@@ -518,23 +567,65 @@ export class LibsqlStore implements StorePort, GraphPort, DurablePort {
     const lastCorroboratedRaw = input.lastCorroboratedAt ?? Date.parse(validFrom);
     const lastCorroboratedAt = Number.isNaN(lastCorroboratedRaw) ? null : lastCorroboratedRaw;
 
-    // Read phase: find currently-valid facts for this (scope, subject, predicate).
-    // Because the JS mutex above serializes concurrent calls, no other assertFact
-    // for this store can interleave between this read and the batch write below.
-    const currentRs = await this.client.execute({
-      sql: `SELECT id, subject, predicate, object, object_kind, valid_from, valid_until, confidence, source, expires_at, supersedes, last_corroborated_at
-            FROM facts WHERE scope_key = ? AND subject = ? AND predicate = ? AND valid_until IS NULL`,
-      args: [key, input.subject, input.predicate],
-    });
-    const current = currentRs.rows;
+    // BEGIN IMMEDIATE is acquired before the first SELECT in a "write" batch. A candidate is
+    // inserted as non-current, the old row is invalidated, then the candidate is activated.
+    // Other connections observe either the entire transition or none of it, and the partial
+    // unique index remains valid at every statement boundary.
+    const results = await this.client.batch([
+      {
+        sql: `SELECT id, subject, predicate, object, object_kind, valid_from, valid_until, confidence, source, expires_at, supersedes, last_corroborated_at
+              FROM facts WHERE scope_key = ? AND subject = ? AND predicate = ? AND valid_until IS NULL`,
+        args: [key, input.subject, input.predicate],
+      },
+      {
+        sql: `WITH current AS (
+                SELECT id, object, valid_from
+                FROM facts
+                WHERE scope_key = ? AND subject = ? AND predicate = ? AND valid_until IS NULL
+              )
+              INSERT INTO facts
+                (id, scope_key, subject, predicate, object, object_kind, valid_from, valid_until, confidence, source, expires_at, supersedes, last_corroborated_at)
+              SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                CASE WHEN (SELECT COUNT(*) FROM current) = 1
+                  THEN (SELECT id FROM current LIMIT 1)
+                  ELSE NULL
+                END,
+                ?
+              WHERE NOT EXISTS (SELECT 1 FROM current WHERE object = ?)
+                AND NOT EXISTS (SELECT 1 FROM current WHERE valid_from > ?)`,
+        args: [
+          key, input.subject, input.predicate,
+          id, key, input.subject, input.predicate, input.object, objectKind, validFrom,
+          validFrom, confidence, source, expiresAt, lastCorroboratedAt,
+          input.object, validFrom,
+        ],
+      },
+      {
+        sql: `UPDATE facts
+              SET valid_until = ?
+              WHERE scope_key = ? AND subject = ? AND predicate = ?
+                AND valid_until IS NULL AND id <> ?
+                AND EXISTS (
+                  SELECT 1 FROM facts AS candidate
+                  WHERE candidate.id = ? AND candidate.valid_until = ?
+                )`,
+        args: [validFrom, key, input.subject, input.predicate, id, id, validFrom],
+      },
+      {
+        sql: `UPDATE facts SET valid_until = NULL WHERE id = ? AND valid_until = ?`,
+        args: [id, validFrom],
+      },
+    ] satisfies Stmt[], "write");
 
-    // Idempotent: same object already currently valid.
+    const current = results[0]!.rows;
+    const inserted = results[1]!.rowsAffected === 1;
+
+    // Preserve the public idempotency and temporal-order semantics, but evaluate them against
+    // the snapshot protected by the same write transaction as the transition.
     const sameRow = current.find((r) => str(r["object"]) === input.object);
     if (sameRow) {
       return { asserted: this.rowToFact(sameRow), invalidated: [] };
     }
-
-    // Guard: new validFrom must not precede any currently-valid prior fact's validFrom.
     for (const r of current) {
       if (validFrom < str(r["valid_from"])) {
         throw new Error(
@@ -542,26 +633,12 @@ export class LibsqlStore implements StorePort, GraphPort, DurablePort {
         );
       }
     }
+    if (!inserted) {
+      throw new Error("current-fact transition was rejected by the database invariant");
+    }
 
     // State-transition link: when exactly one prior fact was superseded, record its id.
     const supersedes = current.length === 1 ? str(current[0]!["id"]) : null;
-
-    // Write phase: invalidate prior facts + insert new fact, all in one batch so
-    // they commit or rollback together (BEGIN IMMEDIATE serializes at the DB layer).
-    const writeStmts: Stmt[] = [];
-    for (const r of current) {
-      writeStmts.push({
-        sql: `UPDATE facts SET valid_until = ? WHERE id = ?`,
-        args: [validFrom, str(r["id"])],
-      });
-    }
-    writeStmts.push({
-      sql: `INSERT INTO facts (id, scope_key, subject, predicate, object, object_kind, valid_from, valid_until, confidence, source, expires_at, supersedes, last_corroborated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
-      args: [id, key, input.subject, input.predicate, input.object, objectKind, validFrom, confidence, source, expiresAt, supersedes, lastCorroboratedAt],
-    });
-
-    await this.client.batch(writeStmts, "write");
 
     const invalidated: Fact[] = current.map((r) =>
       this.rowToFact({ ...r, valid_until: validFrom }),
@@ -704,36 +781,46 @@ export class LibsqlStore implements StorePort, GraphPort, DurablePort {
 
   async eraseScope(scope: Scope): Promise<{ deleted: number }> {
     const key = scopeKey(scope);
-    const agentId = "agentId" in scope ? (scope as { agentId: string }).agentId : null;
-
-    // Find session ids for this agentId (needed to delete events).
-    let sessionIds: string[] = [];
-    if (agentId !== null) {
-      const rs = await this.client.execute({
-        sql: `SELECT id FROM sessions WHERE agent_id = ?`,
-        args: [agentId],
-      });
-      sessionIds = rs.rows.map((r) => str(r["id"]));
-    }
-
-    // Build the batch of deletes.
     const stmts: Stmt[] = [
       { sql: `DELETE FROM facts WHERE scope_key = ?`, args: [key] },
       { sql: `DELETE FROM memories WHERE scope_key = ?`, args: [key] },
       { sql: `DELETE FROM memory_meta WHERE scope_key = ?`, args: [key] },
       { sql: `DELETE FROM block_history WHERE scope_key = ?`, args: [key] },
       { sql: `DELETE FROM blocks WHERE scope_key = ?`, args: [key] },
+      { sql: `DELETE FROM idempotency_keys WHERE scope_key = ?`, args: [key] },
     ];
-    for (const sid of sessionIds) {
-      stmts.push({ sql: `DELETE FROM events WHERE session_id = ?`, args: [sid] });
-    }
-    if (agentId !== null) {
-      stmts.push({ sql: `DELETE FROM sessions WHERE agent_id = ?`, args: [agentId] });
+    const selection = sessionSelection(scope);
+    if (selection) {
+      const selectedSessions = `SELECT id FROM sessions WHERE ${selection.where}`;
+      stmts.push(
+        { sql: `DELETE FROM idempotency_keys WHERE session_id IN (${selectedSessions})`, args: selection.args },
+        { sql: `DELETE FROM suspension_decisions WHERE session_id IN (${selectedSessions})`, args: selection.args },
+        { sql: `DELETE FROM checkpoints WHERE session_id IN (${selectedSessions})`, args: selection.args },
+        { sql: `DELETE FROM events WHERE session_id IN (${selectedSessions})`, args: selection.args },
+        { sql: `DELETE FROM sessions WHERE ${selection.where}`, args: selection.args },
+      );
     }
 
     const results = await this.client.batch(stmts, "write");
     const deleted = results.reduce((sum, r) => sum + r.rowsAffected, 0);
     return { deleted };
+  }
+
+  /** Run while application writers are quiesced; the batch itself is atomic. */
+  async migrateLegacyScope(scope: Scope): Promise<{ migrated: number }> {
+    const from = legacyScopeKey(scope);
+    const to = scopeKey(scope);
+    if (from === to) return { migrated: 0 };
+    const tables = ["facts", "memories", "memory_meta", "block_history", "blocks", "idempotency_keys"] as const;
+    for (const table of tables) {
+      const target = await this.client.execute({ sql: `SELECT 1 FROM ${table} WHERE scope_key = ? LIMIT 1`, args: [to] });
+      if (target.rows.length > 0) throw new StoreConflictError(`legacy scope migration target is not empty: ${to}`);
+    }
+    const results = await this.client.batch(
+      tables.map((table) => ({ sql: `UPDATE ${table} SET scope_key = ? WHERE scope_key = ?`, args: [to, from] })),
+      "write",
+    );
+    return { migrated: results.reduce((sum, result) => sum + result.rowsAffected, 0) };
   }
 
   // ---------------------------------------------------------------------------
@@ -763,27 +850,59 @@ export class LibsqlStore implements StorePort, GraphPort, DurablePort {
     };
   }
 
-  async recordIntent(key: string, argsHash: string): Promise<void> {
-    // INSERT OR IGNORE: intent is write-once; an existing row is left untouched.
-    await this.client.execute({
-      sql: `INSERT OR IGNORE INTO idempotency_keys (key, args_hash, status, result, created_at) VALUES (?, ?, 'intent', NULL, ?)`,
-      args: [key, argsHash, this.graphNow()],
-    });
+  async recordIntent(key: string, argsHash: string, metadata?: IdempotencyMetadata): Promise<void> {
+    // Intent lifecycle fields are write-once; missing ownership metadata may be enriched but never reassigned.
+    await this.client.batch([
+      {
+        sql: `INSERT OR IGNORE INTO idempotency_keys
+          (key, args_hash, status, result, created_at, scope_key, session_id, owner_key)
+          VALUES (?, ?, 'intent', NULL, ?, ?, ?, ?)`,
+        args: [key, argsHash, this.graphNow(), metadata?.scopeKey ?? null, metadata?.sessionId ?? null, metadata?.ownerKey ?? null],
+      },
+      {
+        sql: `UPDATE idempotency_keys SET
+          scope_key = COALESCE(scope_key, ?), session_id = COALESCE(session_id, ?), owner_key = COALESCE(owner_key, ?)
+          WHERE key = ?`,
+        args: [metadata?.scopeKey ?? null, metadata?.sessionId ?? null, metadata?.ownerKey ?? null, key],
+      },
+    ], "write");
   }
 
-  async recordCompletion(key: string, result: unknown): Promise<void> {
+  async claimIntent(key: string, argsHash: string, metadata?: IdempotencyMetadata): Promise<boolean> {
+    const result = await this.client.execute({
+      sql: `INSERT OR IGNORE INTO idempotency_keys
+        (key, args_hash, status, result, created_at, scope_key, session_id, owner_key)
+        VALUES (?, ?, 'intent', NULL, ?, ?, ?, ?)`,
+      args: [key, argsHash, this.graphNow(), metadata?.scopeKey ?? null, metadata?.sessionId ?? null, metadata?.ownerKey ?? null],
+    });
+    return result.rowsAffected === 1;
+  }
+
+  async releaseIntent(key: string, argsHash: string): Promise<boolean> {
+    const result = await this.client.execute({
+      sql: `DELETE FROM idempotency_keys WHERE key = ? AND args_hash = ? AND status = 'intent'`,
+      args: [key, argsHash],
+    });
+    return result.rowsAffected === 1;
+  }
+
+  async recordCompletion(key: string, result: unknown, metadata?: IdempotencyMetadata): Promise<void> {
     const serialized = JSON.stringify(result ?? null);
     // Ensure row exists (covers completion without a prior intent), then flip to applied.
     // Both operations in a single batch for atomicity.
     await this.client.batch(
       [
         {
-          sql: `INSERT OR IGNORE INTO idempotency_keys (key, args_hash, status, result, created_at) VALUES (?, '', 'intent', NULL, ?)`,
-          args: [key, this.graphNow()],
+          sql: `INSERT OR IGNORE INTO idempotency_keys
+            (key, args_hash, status, result, created_at, scope_key, session_id, owner_key)
+            VALUES (?, '', 'intent', NULL, ?, ?, ?, ?)`,
+          args: [key, this.graphNow(), metadata?.scopeKey ?? null, metadata?.sessionId ?? null, metadata?.ownerKey ?? null],
         },
         {
-          sql: `UPDATE idempotency_keys SET status = 'applied', result = ? WHERE key = ?`,
-          args: [serialized, key],
+          sql: `UPDATE idempotency_keys SET status = 'applied', result = ?,
+            scope_key = COALESCE(scope_key, ?), session_id = COALESCE(session_id, ?), owner_key = COALESCE(owner_key, ?)
+            WHERE key = ?`,
+          args: [serialized, metadata?.scopeKey ?? null, metadata?.sessionId ?? null, metadata?.ownerKey ?? null, key],
         },
       ],
       "write",
@@ -792,18 +911,24 @@ export class LibsqlStore implements StorePort, GraphPort, DurablePort {
 
   async getIdempotency(key: string): Promise<IdempotencyRecord | null> {
     const rs = await this.client.execute({
-      sql: `SELECT key, args_hash, status, result, created_at FROM idempotency_keys WHERE key = ?`,
+      sql: `SELECT key, args_hash, status, result, created_at, scope_key, session_id, owner_key FROM idempotency_keys WHERE key = ?`,
       args: [key],
     });
     const row = rs.rows[0];
     if (!row) return null;
     const resultStr = strOrNull(row["result"]);
+    const scopeKeyValue = strOrNull(row["scope_key"]);
+    const sessionId = strOrNull(row["session_id"]);
+    const ownerKey = strOrNull(row["owner_key"]);
     return {
       key: str(row["key"]),
       argsHash: str(row["args_hash"]),
       status: str(row["status"]) as IdempotencyStatus,
       ...(resultStr !== null ? { result: JSON.parse(resultStr) } : {}),
       createdAt: str(row["created_at"]),
+      ...(scopeKeyValue !== null ? { scopeKey: scopeKeyValue } : {}),
+      ...(sessionId !== null ? { sessionId } : {}),
+      ...(ownerKey !== null ? { ownerKey } : {}),
     };
   }
 

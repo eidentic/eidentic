@@ -4,9 +4,11 @@
 
 | Version | Supported |
 |---------|-----------|
-| 0.x (latest) | Yes |
+| Latest published release | Yes |
+| Older releases | No |
 
-Only the latest published 0.x release receives security fixes. Once v1.0 ships, the support window will be updated accordingly.
+Only the latest published release receives security fixes. Upgrade to the newest release before
+reporting a vulnerability so the report is tested against the maintained security boundary.
 
 ## Reporting a vulnerability
 

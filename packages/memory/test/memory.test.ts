@@ -1,11 +1,38 @@
 import { describe, it, expect, vi } from "vitest";
 import { InMemoryStore, InMemoryVectorStore, FakeEmbedder } from "@eidentic/types/testing";
-import type { Scope, RerankPort, EmbeddingPort } from "@eidentic/types";
-import { Memory } from "../src/memory.js";
+import { legacyScopeKey, scopeKey, type Scope, type RerankPort, type EmbeddingPort } from "@eidentic/types";
+import { Memory, migrateLegacyScopeVectors } from "../src/memory.js";
 import { reciprocalRankFusion } from "../src/rrf.js";
 import { editableMemoryCases } from "./_editable-cases.js";
 
 const scope: Scope = { kind: "user", agentId: "a", userId: "u" };
+
+describe("migrateLegacyScopeVectors", () => {
+  const ambiguous: Scope = { kind: "user", agentId: "acme:west", userId: "alice" };
+
+  it("requires an empty target and moves the exact legacy vector set", async () => {
+    const vector = new InMemoryVectorStore();
+    await vector.upsert({ id: "m1", scopeKey: legacyScopeKey(ambiguous), text: "legacy", vector: [1, 0] });
+    await expect(migrateLegacyScopeVectors(vector, ambiguous)).resolves.toEqual({ migrated: 1 });
+    await expect(vector.list(legacyScopeKey(ambiguous))).resolves.toEqual([]);
+    await expect(vector.list(scopeKey(ambiguous))).resolves.toMatchObject([{ id: "m1", text: "legacy" }]);
+  });
+
+  it("refuses unrelated target data but resumes an identical partial copy", async () => {
+    const vector = new InMemoryVectorStore();
+    await vector.upsert({ id: "old", scopeKey: legacyScopeKey(ambiguous), text: "old", vector: [1, 0] });
+    await vector.upsert({ id: "new", scopeKey: scopeKey(ambiguous), text: "new", vector: [0, 1] });
+    await expect(migrateLegacyScopeVectors(vector, ambiguous)).rejects.toThrow(/unrelated data/i);
+    await expect(vector.list(legacyScopeKey(ambiguous))).resolves.toHaveLength(1);
+
+    const resumed = new InMemoryVectorStore();
+    const old = { id: "old", text: "old", vector: [1, 0] };
+    await resumed.upsert({ ...old, scopeKey: legacyScopeKey(ambiguous) });
+    await resumed.upsert({ ...old, scopeKey: scopeKey(ambiguous) });
+    await expect(migrateLegacyScopeVectors(resumed, ambiguous)).resolves.toEqual({ migrated: 1 });
+    await expect(resumed.list(legacyScopeKey(ambiguous))).resolves.toEqual([]);
+  });
+});
 
 describe("reciprocalRankFusion", () => {
   it("fuses ranked lists; a single list preserves order", () => {

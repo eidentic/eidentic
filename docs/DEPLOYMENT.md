@@ -31,9 +31,9 @@ const store = new SqliteStore("./eidentic.sqlite");
 
 const agent = new Agent({
   id: "support",
+  instructions: "You are a helpful support assistant.",
   model: new AIModel(anthropic("claude-sonnet-4-5")),
   store,
-  instructions: "You are a helpful support assistant.",
 });
 
 const app = createServer({
@@ -84,6 +84,7 @@ app.use(express.json());
 const store = new SqliteStore("./eidentic.sqlite");
 const agent = new Agent({
   id: "support",
+  instructions: "You are a helpful support assistant.",
   model: new AIModel(anthropic("claude-sonnet-4-5")),
   store,
 });
@@ -230,6 +231,7 @@ import { anthropic } from "@ai-sdk/anthropic";
 const store = new SqliteStore(process.env.SQLITE_PATH ?? "./eidentic.sqlite");
 const agent = new Agent({
   id: "support",
+  instructions: "You are a helpful support assistant.",
   model: new AIModel(anthropic("claude-sonnet-4-5")),
   store,
 });
@@ -295,6 +297,7 @@ await store.migrate();
 
 const agent = new Agent({
   id: "support",
+  instructions: "You are a helpful support assistant.",
   model: new AIModel(anthropic("claude-sonnet-4-5")),
   store,
 });
@@ -303,7 +306,10 @@ export default {
   async fetch(req: Request, env: { ANTHROPIC_API_KEY: string }): Promise<Response> {
     if (req.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
 
-    const { input, sessionId } = await req.json<{ input: string; sessionId?: string }>();
+    const { input, sessionId = crypto.randomUUID() } = await req.json() as {
+      input: string;
+      sessionId?: string;
+    };
 
     const stream = new ReadableStream({
       async start(c) {
@@ -358,6 +364,7 @@ await store.migrate();
 
 const agent = new Agent({
   id: "support",
+  instructions: "You are a helpful support assistant.",
   model: new AIModel(anthropic("claude-sonnet-4-5")),
   store,
 });
@@ -397,7 +404,8 @@ For standalone API routes without Next.js:
 
 ```ts
 // api/chat.ts  (Vercel serverless function)
-import { Agent, AIModel } from "@eidentic/core";
+import { Agent } from "@eidentic/core";
+import { AIModel } from "@eidentic/model";
 import { LibsqlStore } from "@eidentic/libsql";
 import { anthropic } from "@ai-sdk/anthropic";
 
@@ -411,6 +419,7 @@ await store.migrate();
 
 const agent = new Agent({
   id: "support",
+  instructions: "You are a helpful support assistant.",
   model: new AIModel(anthropic("claude-sonnet-4-5")),
   store,
 });
@@ -469,18 +478,20 @@ npm install eidentic @eidentic/nextjs @eidentic/libsql ai @ai-sdk/anthropic
 
 ```ts
 // lib/agent.ts
-import { Agent, AIModel } from "@eidentic/core";
+import { Agent } from "@eidentic/core";
+import { AIModel } from "@eidentic/model";
 import { LibsqlStore } from "@eidentic/libsql";
 import { anthropic } from "@ai-sdk/anthropic";
 
-const store = new LibsqlStore(
-  process.env.LIBSQL_URL ?? "file:eidentic.db",
-  { authToken: process.env.LIBSQL_TOKEN }
-);
+const store = new LibsqlStore({
+  url: process.env.LIBSQL_URL ?? "file:eidentic.db",
+  authToken: process.env.LIBSQL_TOKEN,
+});
 await store.migrate();
 
 export const agent = new Agent({
   id: "support",
+  instructions: "You are a helpful support assistant.",
   model: new AIModel(anthropic("claude-sonnet-4-5")),
   store,
 });

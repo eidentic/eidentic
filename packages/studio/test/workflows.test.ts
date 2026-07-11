@@ -235,7 +235,7 @@ describe("POST /api/workflows — HTTP ingestion", () => {
   it("POST /api/workflows is auth-gated (401 without credentials)", async () => {
     const app = createStudioApi({
       agents: { [AGENT_ID]: agent },
-      auth: ApiKeyAuth({ "test-key": { userId: "u1" } }),
+      adminAuth: ApiKeyAuth({ "test-key": { userId: "u1" } }),
     });
     const trace = makeTrace([{ name: "s" }]);
     const res = await app.request("/api/workflows", {
@@ -249,7 +249,7 @@ describe("POST /api/workflows — HTTP ingestion", () => {
   it("POST /api/workflows succeeds with valid auth", async () => {
     const app = createStudioApi({
       agents: { [AGENT_ID]: agent },
-      auth: ApiKeyAuth({ "test-key": { userId: "u1" } }),
+      adminAuth: ApiKeyAuth({ "test-key": { userId: "u1" } }),
     });
     const trace = makeTrace([{ name: "s" }]);
     const res = await app.request("/api/workflows", {
@@ -272,7 +272,7 @@ describe("workflow GET routes — auth gating", () => {
   it("GET /api/workflows returns 401 without key when auth configured", async () => {
     const app = createStudioApi({
       agents: { [AGENT_ID]: agent },
-      auth: ApiKeyAuth({ "test-key": { userId: "u1" } }),
+      adminAuth: ApiKeyAuth({ "test-key": { userId: "u1" } }),
     });
     const res = await app.request("/api/workflows");
     expect(res.status).toBe(401);
@@ -281,7 +281,7 @@ describe("workflow GET routes — auth gating", () => {
   it("GET /api/workflows/:id returns 401 without key when auth configured", async () => {
     const app = createStudioApi({
       agents: { [AGENT_ID]: agent },
-      auth: ApiKeyAuth({ "test-key": { userId: "u1" } }),
+      adminAuth: ApiKeyAuth({ "test-key": { userId: "u1" } }),
     });
     const res = await app.request("/api/workflows/wr_some-id");
     expect(res.status).toBe(401);

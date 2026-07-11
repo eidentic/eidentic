@@ -74,6 +74,7 @@ describe("onPostToolUse hook", () => {
     const calls: Array<{ toolId: string; isError: boolean; output: unknown; durationMs: number; sessionId: string }> = [];
 
     const agent = new Agent({
+      permissions: { mode: "bypass" },
       id: "a",
       instructions: "",
       model,
@@ -107,6 +108,7 @@ describe("onPostToolUse hook", () => {
     const calls: Array<{ isError: boolean }> = [];
 
     const agent = new Agent({
+      permissions: { mode: "bypass" },
       id: "a",
       instructions: "",
       model,
@@ -135,6 +137,7 @@ describe("onPostToolUse hook", () => {
     const order: string[] = [];
 
     const agent = new Agent({
+      permissions: { mode: "bypass" },
       id: "a",
       instructions: "",
       model,
@@ -168,6 +171,7 @@ describe("onPostToolUse hook", () => {
     ]);
 
     const agent = new Agent({
+      permissions: { mode: "bypass" },
       id: "a",
       instructions: "",
       model,
@@ -209,6 +213,7 @@ describe("onPostToolUse hook", () => {
       { content: [toolUseBlock("tc1", "approve", { action: "deploy" })], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
     const a1 = new Agent({
+      permissions: { mode: "bypass" },
       id: "ag",
       instructions: "",
       model: m1,
@@ -228,6 +233,7 @@ describe("onPostToolUse hook", () => {
       { content: [textBlock("deployed")], usage: { inputTokens: 1, outputTokens: 1 } },
     ]);
     const a2 = new Agent({
+      permissions: { mode: "bypass" },
       id: "ag",
       instructions: "",
       model: m2,
@@ -259,6 +265,7 @@ describe("onPostToolUse hook", () => {
     const calls: string[] = [];
 
     const agent = new Agent({
+      permissions: { mode: "bypass" },
       id: "a",
       instructions: "",
       model,
@@ -292,6 +299,7 @@ describe("typed result details", () => {
     ]);
 
     const agent = new Agent({
+      permissions: { mode: "bypass" },
       id: "a",
       instructions: "",
       model,
@@ -324,6 +332,7 @@ describe("typed result details", () => {
     ]);
 
     const agent = new Agent({
+      permissions: { mode: "bypass" },
       id: "a",
       instructions: "",
       model,
@@ -354,6 +363,7 @@ describe("typed result details", () => {
     ]);
 
     const agent = new Agent({
+      permissions: { mode: "bypass" },
       id: "a",
       instructions: "",
       model,
@@ -382,6 +392,7 @@ describe("typed result details", () => {
     ]);
 
     const agent = new Agent({
+      permissions: { mode: "bypass" },
       id: "a",
       instructions: "",
       model,
@@ -407,6 +418,7 @@ describe("typed result details", () => {
     };
 
     const agent = new Agent({
+      permissions: { mode: "bypass" },
       id: "a",
       instructions: "",
       model: badModel,
@@ -444,6 +456,7 @@ describe("onTurnStart hook", () => {
     };
 
     const agent = new Agent({
+      permissions: { mode: "bypass" },
       id: "a",
       instructions: "be helpful",
       model,
@@ -480,6 +493,7 @@ describe("onTurnStart hook", () => {
     };
 
     const agent = new Agent({
+      permissions: { mode: "bypass" },
       id: "a",
       instructions: "",
       model,
@@ -517,6 +531,7 @@ describe("onTurnStart hook", () => {
     };
 
     const agent = new Agent({
+      permissions: { mode: "bypass" },
       id: "a",
       instructions: "",
       model,
@@ -562,6 +577,7 @@ describe("onTurnStart hook", () => {
     };
 
     const agent = new Agent({
+      permissions: { mode: "bypass" },
       id: "a",
       instructions: "",
       model,
@@ -593,6 +609,7 @@ describe("onTurnStart hook", () => {
     };
 
     const agent = new Agent({
+      permissions: { mode: "bypass" },
       id: "a",
       instructions: "",
       model,
@@ -626,6 +643,7 @@ describe("onTurnStart hook", () => {
     };
 
     const agent = new Agent({
+      permissions: { mode: "bypass" },
       id: "a",
       instructions: "",
       model,
@@ -654,6 +672,7 @@ describe("onTurnStart hook", () => {
     };
 
     const agent = new Agent({
+      permissions: { mode: "bypass" },
       id: "a",
       instructions: "",
       model,

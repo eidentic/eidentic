@@ -1,7 +1,14 @@
 // Pure, DOM-free NDJSON stream parser for Eidentic SSE streams.
 // Can be imported and tested without a browser or React.
 
-import type { StreamEvent, ContentBlock, Usage, SuspendRequest, CostBreakdown } from "@eidentic/types";
+import type {
+  StreamEvent,
+  ContentBlock,
+  Usage,
+  SuspendRequest,
+  CostBreakdown,
+  ResultDetails,
+} from "@eidentic/types";
 
 // --- Public state types ---
 
@@ -27,6 +34,9 @@ export interface ToolResult {
 
 export interface ResultEvent {
   subtype: string;
+  output?: unknown;
+  object?: unknown;
+  details?: ResultDetails;
   usage: Usage;
   numTurns: number;
   sessionId: string;
@@ -214,6 +224,9 @@ export function applyEvent(acc: Accumulator, event: StreamEvent): Accumulator {
       next.streamIdx = -1;
       next.result = {
         subtype: event.subtype,
+        output: event.output,
+        object: event.object,
+        details: event.details,
         usage: event.usage,
         numTurns: event.numTurns,
         sessionId: event.sessionId,
@@ -265,38 +278,83 @@ export async function* parseEidenticStream(
   // These three are outer-scope so they persist across chunk boundaries.
   let buf = "";
   let sseEventType = "";
-  let sseEventData = "";
+  let sseEventData: string[] = [];
+
+  const applyParsedEvent = function* (event: StreamEvent): Generator<ParsedStreamState> {
+    const next = applyEvent(acc, event);
+    if (next !== acc) {
+      acc = next;
+      yield toState(acc);
+    }
+  };
+
+  const parseJsonEvent = function* (
+    json: string,
+    eventType?: string,
+  ): Generator<ParsedStreamState> {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(json) as unknown;
+    } catch {
+      throw new SyntaxError("Malformed Eidentic stream JSON frame");
+    }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new SyntaxError("Malformed Eidentic stream frame: expected a JSON object");
+    }
+    const record = parsed as Record<string, unknown>;
+    const type = eventType ?? record["type"];
+    if (typeof type !== "string" || type.length === 0) {
+      throw new SyntaxError("Malformed Eidentic stream frame: missing event type");
+    }
+    const streamEvent = eventType
+      ? ({ ...record, type: eventType } as unknown as StreamEvent)
+      : (record as unknown as StreamEvent);
+    // Runtime shape errors must propagate. Ignoring one intermediate event and
+    // accepting a later terminal frame would present incomplete state as success.
+    yield* applyParsedEvent(streamEvent);
+  };
+
+  const flushSseEvent = function* (): Generator<ParsedStreamState> {
+    if (sseEventData.length > 0) {
+      // SSE's event field is optional. When omitted, accept a canonical Eidentic event whose
+      // `type` is carried inside the JSON data payload.
+      yield* parseJsonEvent(sseEventData.join("\n"), sseEventType || undefined);
+    }
+    sseEventType = "";
+    sseEventData = [];
+  };
+
+  const processLine = function* (rawLine: string): Generator<ParsedStreamState> {
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    if (line === "") {
+      yield* flushSseEvent();
+      return;
+    }
+    if (line.startsWith(":")) return; // SSE comment/heartbeat
+    if (line.startsWith("event:")) {
+      sseEventType = line.slice(6).trim();
+      return;
+    }
+    if (line.startsWith("data:")) {
+      const value = line.slice(5);
+      sseEventData.push(value.startsWith(" ") ? value.slice(1) : value);
+      return;
+    }
+    if (sseEventType || sseEventData.length > 0) {
+      // Unknown SSE field (id/retry/extensions). It is metadata, not NDJSON.
+      return;
+    }
+    if (line.trim() !== "") {
+      yield* parseJsonEvent(line); // Raw application/x-ndjson frame.
+    }
+  };
 
   const processChunk = function* (chunk: string): Generator<ParsedStreamState> {
     buf += chunk;
     const lines = buf.split("\n");
     buf = lines.pop() ?? "";
 
-    for (const line of lines) {
-      if (line.startsWith("event:")) {
-        sseEventType = line.slice(6).trim();
-      } else if (line.startsWith("data:")) {
-        sseEventData = line.slice(5).trim();
-      } else if (line === "" && sseEventType && sseEventData) {
-        try {
-          const parsed = JSON.parse(sseEventData) as Record<string, unknown>;
-          // Reconstruct a StreamEvent — the server sends the type as the SSE event field
-          // and the payload as data (without the `type` field inside JSON).
-          const streamEvent = { type: sseEventType, ...parsed } as unknown as StreamEvent;
-          const next = applyEvent(acc, streamEvent);
-          // Always yield — even for informational events — so onEvent callbacks fire.
-          // The lastEvent field lets callers identify what changed.
-          if (next !== acc) {
-            acc = next;
-            yield toState(acc);
-          }
-        } catch {
-          // Malformed JSON — ignore.
-        }
-        sseEventType = "";
-        sseEventData = "";
-      }
-    }
+    for (const line of lines) yield* processLine(line);
   };
 
   // Supports both ReadableStreamDefaultReader and AsyncIterable.
@@ -313,8 +371,12 @@ export async function* parseEidenticStream(
     }
   }
 
-  // Flush any remaining buffer content.
-  if (buf.trim()) {
-    yield* processChunk("\n");
+  // Flush TextDecoder state, a final unterminated line, and a final SSE frame
+  // that omitted the conventional trailing blank line.
+  yield* processChunk(decoder.decode());
+  if (buf.length > 0) {
+    yield* processLine(buf);
+    buf = "";
   }
+  yield* flushSseEvent();
 }

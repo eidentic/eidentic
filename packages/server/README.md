@@ -20,6 +20,7 @@ import { anthropic } from "@ai-sdk/anthropic";
 
 const agent = new Agent({
   id: "support",
+  instructions: "You are a helpful support assistant.",
   model: new AIModel(anthropic("claude-sonnet-4-5")),
   store: new SqliteStore("./eidentic.sqlite"),
 });

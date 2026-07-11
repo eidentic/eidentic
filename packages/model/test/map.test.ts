@@ -193,13 +193,22 @@ describe("mapMessages — multimodal image input", () => {
     expect(imagePart?.mediaType).toBe("image/jpeg");
   });
 
-  it("maps a user message with a URL image block to an AI SDK ImagePart with a URL object", () => {
+  it("denies a URL image block by default", () => {
     const blocks = [
       { type: "text" as const, text: "Describe this." },
       { type: "image" as const, image: { url: "https://example.com/cat.jpg" } },
     ];
     const msg: KMsg = { role: "user", content: blocks };
-    const { messages } = mapMessages([msg]);
+    expect(() => mapMessages([msg])).toThrow(/remote image URLs are denied/);
+  });
+
+  it("retains an explicitly unsafe compatibility path for provider-side image fetching", () => {
+    const blocks = [
+      { type: "text" as const, text: "Describe this." },
+      { type: "image" as const, image: { url: "https://example.com/cat.jpg" } },
+    ];
+    const msg: KMsg = { role: "user", content: blocks };
+    const { messages } = mapMessages([msg], { unsafeAllowRemoteImageUrls: true });
     const parts = messages[0]?.content as any[];
     const imagePart = parts.find((p) => p.type === "image");
     expect(imagePart?.image).toBeInstanceOf(URL);

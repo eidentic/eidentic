@@ -1,11 +1,21 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import { randomUUID } from "node:crypto";
-import { a2aRoutes, drainIterableAgent, drainPromiseResult, type AgentLike, type A2AAgentCard } from "../src/index.js";
-import { a2aTool, type A2ATransport } from "../src/index.js";
+import { a2aRoutes as guardedA2aRoutes, drainIterableAgent, drainPromiseResult, type AgentLike, type A2AAgentCard } from "../src/index.js";
+import {
+  a2aTool,
+  fetchAgentCard,
+  httpA2ATransport,
+  type A2ATransport,
+} from "../src/index.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+const a2aRoutes: typeof guardedA2aRoutes = (opts) => guardedA2aRoutes({
+  unsafeAllowUnauthenticated: opts.auth === undefined,
+  ...opts,
+});
 
 /** Send a JSON-RPC request to a Hono app using app.request (no network). */
 async function rpc(app: ReturnType<typeof a2aRoutes>, method: string, params: unknown, id: number = 1) {
@@ -26,7 +36,7 @@ async function rpc(app: ReturnType<typeof a2aRoutes>, method: string, params: un
 
 function makeAgent(outputText: string): AgentLike {
   return {
-    async *query(_input: string, _opts?: { sessionId?: string; userId?: string; orgId?: string; apiKey?: string }) {
+    async *query(_input: string, _opts?: { sessionId?: string; userId?: string; orgId?: string; apiKey?: string; signal?: AbortSignal }) {
       yield { kind: "result", output: outputText };
     },
   };
@@ -247,6 +257,28 @@ describe("a2aRoutes — task ownership (tasks/get authz)", () => {
     expect(getResult.error.message).toContain("Task not found");
   });
 
+  it("keeps the same user isolated across organizations", async () => {
+    const app = a2aRoutes({
+      card,
+      agent: makeAgent("tenant-a secret"),
+      auth: {
+        verify: (req) => ({
+          userId: "shared-user-id",
+          orgId: req.headers.get("x-api-key") ?? "",
+        }),
+      },
+    });
+    const sendResult = await sendWithKey(app, "org-a");
+    const taskId: string = sendResult.result.id;
+
+    const sameTenant = await getWithKey(app, taskId, "org-a");
+    const otherTenant = await getWithKey(app, taskId, "org-b");
+
+    expect(sameTenant.error).toBeUndefined();
+    expect(otherTenant.error?.code).toBe(-32001);
+    expect(otherTenant.error?.message).toContain("Task not found");
+  });
+
   it("unauthorized tasks/get is indistinguishable from a nonexistent task id", async () => {
     const app = a2aRoutes({
       card,
@@ -264,8 +296,17 @@ describe("a2aRoutes — task ownership (tasks/get authz)", () => {
     expect(unauthorizedResult.error.code).toBe(-32001);
   });
 
-  it("no-auth mode: any caller can access any task (backward-compatible)", async () => {
-    // No auth option — endpoint is open; ownership is not enforced.
+  it("denies the JSON-RPC endpoint when auth is omitted by default", async () => {
+    const app = guardedA2aRoutes({ card, agent: makeAgent("closed") });
+    const res = await app.request("/", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tasks/get", params: { id: "x" } }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("explicit unsafe no-auth mode preserves the legacy single-tenant behavior", async () => {
     const app = a2aRoutes({ card, agent: makeAgent("open result") });
     const sendResult = await rpc(app, "message/send", {
       message: { kind: "message", messageId: "m-open", role: "user", parts: [{ kind: "text", text: "hi" }] },
@@ -298,8 +339,8 @@ describe("a2aRoutes — task ownership (tasks/get authz)", () => {
     expect(getResult.result.id).toBe(taskId);
   });
 
-  it("passes auth principal identity into the underlying agent session options", async () => {
-    let captured: { sessionId?: string; userId?: string; orgId?: string; apiKey?: string } | undefined;
+  it("passes verified user/org identity but never persists a raw credential", async () => {
+    let captured: { sessionId?: string; userId?: string; orgId?: string; apiKey?: string; signal?: AbortSignal } | undefined;
     const agent: AgentLike = {
       async *query(_input, opts) {
         captured = opts;
@@ -322,7 +363,78 @@ describe("a2aRoutes — task ownership (tasks/get authz)", () => {
       },
     });
     expect(result.error).toBeUndefined();
-    expect(captured).toEqual({ sessionId: "ctx-a", userId: "u1", orgId: "o1", apiKey: "key-a" });
+    expect(captured).toMatchObject({ sessionId: "ctx-a", userId: "u1", orgId: "o1" });
+    expect(captured?.signal).toBeInstanceOf(AbortSignal);
+    expect(JSON.stringify(captured)).not.toContain("key-a");
+  });
+
+  it("keeps task ownership stable when a verified principal rotates credentials", async () => {
+    let activeKey = "rotating-key-v1";
+    const app = a2aRoutes({
+      card,
+      agent: makeAgent("stable task"),
+      auth: {
+        verify: () => ({ id: "stable-subject", userId: "u1", orgId: "o1", apiKey: activeKey }),
+      },
+    });
+    const created = await rpc(app, "message/send", {
+      message: { kind: "message", messageId: "rotate", role: "user", parts: [{ kind: "text", text: "hi" }] },
+    });
+
+    activeKey = "rotating-key-v2";
+    const fetched = await rpc(app, "tasks/get", { id: created.result.id }, 2);
+
+    expect(fetched.error).toBeUndefined();
+    expect(JSON.stringify(fetched)).not.toContain("rotating-key");
+  });
+
+  it("maps a raw string credential to a stable opaque identity before Agent.query", async () => {
+    const captures: Array<{ sessionId?: string; userId?: string; orgId?: string; apiKey?: string }> = [];
+    const agent: AgentLike = {
+      async *query(_input, opts) {
+        captures.push(opts ?? {});
+        yield { kind: "result", output: "ok" };
+      },
+    };
+    const app = a2aRoutes({
+      card,
+      agent,
+      auth: { verify: (req) => req.headers.get("x-api-key") ?? false },
+    });
+
+    await sendWithKey(app, "raw-secret-a");
+    await sendWithKey(app, "raw-secret-a");
+    await sendWithKey(app, "raw-secret-b");
+
+    expect(captures).toHaveLength(3);
+    expect(captures[0]?.userId).toMatch(/^a2a:[a-f0-9]{64}$/);
+    expect(captures[0]?.userId).toBe(captures[1]?.userId);
+    expect(captures[0]?.userId).not.toBe(captures[2]?.userId);
+    expect(captures.every((value) => value.apiKey === undefined)).toBe(true);
+    expect(JSON.stringify(captures)).not.toContain("raw-secret");
+  });
+
+  it("keeps raw credential forwarding behind an explicit unsafe compatibility opt-in", async () => {
+    let captured: { sessionId?: string; userId?: string; orgId?: string; apiKey?: string } | undefined;
+    const agent: AgentLike = {
+      async *query(_input, opts) {
+        captured = opts;
+        yield { kind: "result", output: "ok" };
+      },
+    };
+    const app = a2aRoutes({
+      card,
+      agent,
+      auth: { verify: () => "legacy-secret" },
+      allowRawCredentialIdentity: true,
+    });
+
+    const result = await rpc(app, "message/send", {
+      message: { kind: "message", messageId: "legacy", role: "user", parts: [{ kind: "text", text: "hi" }] },
+    });
+    expect(captured?.apiKey).toBe("legacy-secret");
+    expect(result.result.owner).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain("legacy-secret");
   });
 
   it("rejects cross-owner reuse of an existing contextId", async () => {
@@ -371,6 +483,172 @@ describe("a2aRoutes — task ownership (tasks/get authz)", () => {
     });
     const body = await second.json();
     expect(body.error?.code).toBe(-32001);
+  });
+
+  it("binds an id-only subject inside an organization to downstream session ownership", async () => {
+    const captures: Array<{ sessionId?: string; userId?: string; orgId?: string; signal?: AbortSignal }> = [];
+    const app = a2aRoutes({
+      card,
+      agent: {
+        async *query(_input, opts) {
+          captures.push(opts ?? {});
+          yield { kind: "result", output: "ok" };
+        },
+      },
+      auth: {
+        verify: (req) => ({ id: req.headers.get("x-api-key") ?? "", orgId: "shared-org" }),
+      },
+    });
+
+    const first = await app.request("/", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-api-key": "subject-a" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "message/send",
+        params: {
+          message: {
+            kind: "message",
+            messageId: "a",
+            role: "user",
+            contextId: "shared-org-context",
+            parts: [{ kind: "text", text: "hi" }],
+          },
+        },
+      }),
+    });
+    expect((await first.json()).error).toBeUndefined();
+    expect(captures[0]).toMatchObject({
+      sessionId: "shared-org-context",
+      userId: "subject-a",
+      orgId: "shared-org",
+    });
+    expect(captures[0]?.signal).toBeInstanceOf(AbortSignal);
+
+    const second = await app.request("/", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-api-key": "subject-b" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "message/send",
+        params: {
+          message: {
+            kind: "message",
+            messageId: "b",
+            role: "user",
+            contextId: "shared-org-context",
+            parts: [{ kind: "text", text: "intrude" }],
+          },
+        },
+      }),
+    });
+    expect((await second.json()).error?.code).toBe(-32001);
+    expect(captures).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Request resource limits
+// ---------------------------------------------------------------------------
+
+describe("a2aRoutes — request resource limits", () => {
+  function messageBody(parts: unknown[]) {
+    return JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "message/send",
+      params: {
+        message: { kind: "message", messageId: "limited", role: "user", parts },
+      },
+    });
+  }
+
+  it("rejects a streamed JSON body above maxBodyBytes before invoking the agent", async () => {
+    let calls = 0;
+    const app = a2aRoutes({
+      card,
+      agent: { async query() { calls++; return "no"; } },
+      maxBodyBytes: 96,
+    });
+
+    const res = await app.request("/", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: messageBody([{ kind: "text", text: "x".repeat(256) }]),
+    });
+
+    expect(res.status).toBe(413);
+    expect(calls).toBe(0);
+  });
+
+  it("rejects too many message parts", async () => {
+    const app = a2aRoutes({ card, agent: makeAgent("no"), maxParts: 1 });
+    const res = await app.request("/", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: messageBody([
+        { kind: "text", text: "one" },
+        { kind: "text", text: "two" },
+      ]),
+    });
+
+    expect(res.status).toBe(413);
+    expect(await res.json()).toMatchObject({ error: { message: expect.stringMatching(/parts|large/i) } });
+  });
+
+  it("measures the text cap in UTF-8 bytes", async () => {
+    const app = a2aRoutes({ card, agent: makeAgent("no"), maxTextBytes: 4 });
+    const res = await app.request("/", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: messageBody([{ kind: "text", text: "ééé" }]),
+    });
+
+    expect(res.status).toBe(413);
+    expect(await res.json()).toMatchObject({ error: { message: expect.stringMatching(/text|large/i) } });
+  });
+
+  it("rejects invalid non-positive resource-limit configuration", () => {
+    expect(() => a2aRoutes({ card, agent: makeAgent("no"), maxParts: 0 }))
+      .toThrow(/maxParts|positive/i);
+  });
+
+  it("rejects oversized agent output", async () => {
+    const app = a2aRoutes({ card, agent: makeAgent("12345"), maxOutputBytes: 4 });
+    const res = await app.request("/", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: messageBody([{ kind: "text", text: "hi" }]),
+    });
+    expect(res.status).toBe(502);
+    expect(await res.json()).toMatchObject({ error: { message: expect.stringMatching(/output|bytes/i) } });
+  });
+
+  it("aborts and times out a slow agent run", async () => {
+    let sawAbort = false;
+    const app = a2aRoutes({
+      card,
+      maxRunMs: 5,
+      agent: {
+        query(_input, opts) {
+          return new Promise((_resolve, reject) => {
+            opts?.signal?.addEventListener("abort", () => {
+              sawAbort = true;
+              reject(opts.signal?.reason);
+            }, { once: true });
+          });
+        },
+      },
+    });
+    const res = await app.request("/", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: messageBody([{ kind: "text", text: "hi" }]),
+    });
+    expect(res.status).toBe(504);
+    expect(sawAbort).toBe(true);
   });
 });
 
@@ -495,6 +773,24 @@ describe("a2aTool — fake transport", () => {
     expect(result.error).toContain("network unreachable");
   });
 
+  it("redacts credentials from transport and remote protocol errors", async () => {
+    const throwing = a2aTool({
+      async send() { throw new Error("Bearer transport-secret-value"); },
+    });
+    const thrown = await throwing.execute({ message: "hi" }) as { error: string };
+    expect(thrown.error).toContain("Bearer [REDACTED]");
+    expect(thrown.error).not.toContain("transport-secret-value");
+
+    const remote = a2aTool({
+      async send() {
+        return { error: { message: "request failed for sk-abcdefghijklmnopqrstuvwxyz" } };
+      },
+    });
+    const returned = await remote.execute({ message: "hi" }) as { error: string };
+    expect(returned.error).toContain("[REDACTED_CREDENTIAL]");
+    expect(returned.error).not.toContain("sk-abcdefghijklmnopqrstuvwxyz");
+  });
+
   it("returns { error } on JSON-RPC error response (no throw)", async () => {
     const errTransport: A2ATransport = {
       async send() {
@@ -529,6 +825,78 @@ describe("a2aTool — fake transport", () => {
     const parts = msg["parts"] as Array<Record<string, unknown>>;
     expect(parts[0]?.["kind"]).toBe("text");
     expect(parts[0]?.["text"]).toBe("test input");
+  });
+
+  it("propagates the tool AbortSignal to the transport", async () => {
+    let capturedSignal: AbortSignal | undefined;
+    const transport: A2ATransport = {
+      async send(_method, _params, opts) {
+        capturedSignal = opts?.signal;
+        return { result: { kind: "message", parts: [] } };
+      },
+    };
+    const controller = new AbortController();
+
+    await a2aTool(transport).execute(
+      { message: "cancelable" },
+      { signal: controller.signal },
+    );
+
+    expect(capturedSignal).toBe(controller.signal);
+  });
+});
+
+describe("httpA2ATransport resource limits", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("rejects a response that exceeds the streaming byte cap", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      JSON.stringify({ result: { text: "x".repeat(256) } }),
+      { status: 200 },
+    )));
+    const transport = httpA2ATransport("https://agent.example", {
+      maxResponseBytes: 64,
+    });
+
+    await expect(transport.send("message/send", {})).rejects.toThrow(/response|large|64/i);
+  });
+
+  it("aborts a request when its timeout expires", async () => {
+    vi.stubGlobal("fetch", vi.fn((_url: string, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+      })));
+    const transport = httpA2ATransport("https://agent.example", { timeoutMs: 10 });
+
+    await expect(transport.send("message/send", {})).rejects.toThrow(/timed out|timeout/i);
+  });
+
+  it("honors a per-call AbortSignal", async () => {
+    vi.stubGlobal("fetch", vi.fn((_url: string, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+      })));
+    const transport = httpA2ATransport("https://agent.example", { timeoutMs: 60_000 });
+    const controller = new AbortController();
+    const pending = transport.send("message/send", {}, { signal: controller.signal });
+
+    controller.abort(new Error("caller cancelled"));
+
+    await expect(pending).rejects.toThrow(/caller cancelled/i);
+  });
+
+  it("applies the same response cap to agent-card discovery", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      JSON.stringify({ name: "x".repeat(128), description: "large" }),
+      { status: 200 },
+    )));
+
+    await expect(fetchAgentCard("https://agent.example", {
+      maxResponseBytes: 32,
+    })).rejects.toThrow(/response|large|32/i);
   });
 });
 

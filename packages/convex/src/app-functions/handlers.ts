@@ -205,6 +205,20 @@ const getSession = defineQuery("getSession", {
   },
 });
 
+const replaceSessionApiKey = defineMutation("replaceSessionApiKey", {
+  args: { sessionId: v.string(), expected: v.string(), replacement: v.string() },
+  returns: v.boolean(),
+  handler: async (ctx: MCtx, { sessionId, expected, replacement }) => {
+    const row = await ctx.db
+      .query(tables.session)
+      .withIndex("by_session_id", (q: any) => q.eq("sessionId", sessionId))
+      .first();
+    if (!row || row.apiKey !== expected) return false;
+    await ctx.db.patch(row._id, { apiKey: replacement });
+    return true;
+  },
+});
+
 const listSessions = defineQuery("listSessions", {
   args: {
     agentId: v.optional(v.string()),
@@ -492,6 +506,42 @@ const searchMemory = defineQuery("searchMemory", {
   },
 });
 
+const listMemory = defineQuery("listMemory", {
+  args: { scopeKey: v.string() },
+  handler: async (ctx: QCtx, { scopeKey }) => {
+    const rows = await ctx.db
+      .query(tables.memory)
+      .withIndex("by_scope", (q: any) => q.eq("scopeKey", scopeKey))
+      .collect();
+    return rows.sort((a: any, b: any) => a.extId.localeCompare(b.extId)).map((entry: any) => ({
+      id: entry.extId,
+      text: entry.text,
+      ...(entry.ingestedAt !== undefined ? { ingestedAt: entry.ingestedAt } : {}),
+      ...(entry.metadata !== undefined ? { metadata: entry.metadata } : {}),
+    }));
+  },
+});
+
+const deleteMemory = defineMutation("deleteMemory", {
+  args: { scopeKey: v.string(), ids: v.array(v.string()) },
+  returns: v.number(),
+  handler: async (ctx: MCtx, { scopeKey, ids }) => {
+    const targets = new Set(ids);
+    if (targets.size === 0) return 0;
+    const rows = await ctx.db
+      .query(tables.memory)
+      .withIndex("by_scope", (q: any) => q.eq("scopeKey", scopeKey))
+      .collect();
+    let deleted = 0;
+    for (const row of rows) {
+      if (!targets.has(row.extId)) continue;
+      await ctx.db.delete(row._id);
+      deleted++;
+    }
+    return deleted;
+  },
+});
+
 // ---------------------------------------------------------------------------
 // Graph (Facts)
 // ---------------------------------------------------------------------------
@@ -720,9 +770,24 @@ const sweepExpired = defineMutation("sweepExpired", {
 // ---------------------------------------------------------------------------
 
 const eraseScope = defineMutation("eraseScope", {
-  args: { scopeKey: v.string(), agentId: v.optional(v.string()) },
+  args: {
+    scopeKey: v.string(),
+    // `kind` is optional for wire compatibility with older agent-scope clients, whose only
+    // session selector was agentId. New clients always send the full scope discriminator.
+    kind: v.optional(v.union(
+      v.literal("agent"),
+      v.literal("user"),
+      v.literal("org"),
+      v.literal("thread"),
+      v.literal("shared"),
+    )),
+    agentId: v.optional(v.string()),
+    userId: v.optional(v.string()),
+    orgId: v.optional(v.string()),
+    sessionId: v.optional(v.string()),
+  },
   returns: v.object({ deleted: v.number() }),
-  handler: async (ctx: MCtx, { scopeKey, agentId }) => {
+  handler: async (ctx: MCtx, { scopeKey, kind, agentId, userId, orgId, sessionId }) => {
     let deleted = 0;
 
     const facts = await ctx.db.query(tables.fact).withIndex("by_scope", (q: any) => q.eq("scopeKey", scopeKey)).collect();
@@ -734,28 +799,82 @@ const eraseScope = defineMutation("eraseScope", {
     const blocks = await ctx.db.query(tables.block).withIndex("by_scope_label", (q: any) => q.eq("scopeKey", scopeKey)).collect();
     for (const r of blocks) { await ctx.db.delete(r._id); deleted += 1; }
 
-    // Sessions are agent-scoped (no per-user scope_key). Erase all sessions for this agentId and
-    // their events. Mirrors libsql/InMemoryStore semantics.
-    if (agentId !== undefined) {
-      const sessions = await ctx.db
-        .query(tables.session)
-        .withIndex("by_agent", (q: any) => q.eq("agentId", agentId))
+    const scopedIdempotency = await ctx.db
+      .query(tables.idempotency)
+      .withIndex("by_scope", (q: any) => q.eq("scopeKey", scopeKey))
+      .collect();
+    for (const row of scopedIdempotency) { await ctx.db.delete(row._id); deleted += 1; }
+
+    const scopeKind = kind ?? (agentId !== undefined ? "agent" : "shared");
+    let sessions: any[] = [];
+    if (agentId !== undefined && scopeKind === "agent") {
+      sessions = await ctx.db.query(tables.session).withIndex("by_agent", (q: any) => q.eq("agentId", agentId)).collect();
+    } else if (agentId !== undefined && userId !== undefined && scopeKind === "user") {
+      sessions = await ctx.db.query(tables.session).withIndex("by_agent_user", (q: any) => q.eq("agentId", agentId).eq("userId", userId)).collect();
+    } else if (agentId !== undefined && orgId !== undefined && scopeKind === "org") {
+      sessions = await ctx.db.query(tables.session).withIndex("by_agent_org", (q: any) => q.eq("agentId", agentId).eq("orgId", orgId)).collect();
+    } else if (agentId !== undefined && sessionId !== undefined && scopeKind === "thread") {
+      const session = await ctx.db.query(tables.session).withIndex("by_session_id", (q: any) => q.eq("sessionId", sessionId)).first();
+      if (session?.agentId === agentId) sessions = [session];
+    }
+
+    for (const s of sessions) {
+      const idempotency = await ctx.db
+        .query(tables.idempotency)
+        .withIndex("by_session", (q: any) => q.eq("sessionId", s.sessionId))
         .collect();
-      for (const s of sessions) {
-        const events = await ctx.db
-          .query(tables.event)
-          .withIndex("by_session_seq", (q: any) => q.eq("sessionId", s.sessionId))
-          .collect();
-        for (const e of events) {
-          await ctx.db.delete(e._id);
-          deleted += 1;
-        }
-        await ctx.db.delete(s._id);
+      for (const row of idempotency) { await ctx.db.delete(row._id); deleted += 1; }
+      const decisions = await ctx.db
+        .query(tables.decision)
+        .withIndex("by_session_call", (q: any) => q.eq("sessionId", s.sessionId))
+        .collect();
+      for (const row of decisions) { await ctx.db.delete(row._id); deleted += 1; }
+      const checkpoints = await ctx.db
+        .query(tables.checkpoint)
+        .withIndex("by_session_seq", (q: any) => q.eq("sessionId", s.sessionId))
+        .collect();
+      for (const row of checkpoints) { await ctx.db.delete(row._id); deleted += 1; }
+      const events = await ctx.db
+        .query(tables.event)
+        .withIndex("by_session_seq", (q: any) => q.eq("sessionId", s.sessionId))
+        .collect();
+      for (const e of events) {
+        await ctx.db.delete(e._id);
         deleted += 1;
       }
+      await ctx.db.delete(s._id);
+      deleted += 1;
     }
 
     return { deleted };
+  },
+});
+
+// Explicit operator migration only. Never called from normal reads: legacy delimiter keys can be
+// ambiguous, so the caller must provide the authoritative v2 destination.
+const migrateLegacyScope = defineMutation("migrateLegacyScope", {
+  args: { fromScopeKey: v.string(), toScopeKey: v.string() },
+  returns: v.object({ migrated: v.number() }),
+  handler: async (ctx: MCtx, { fromScopeKey, toScopeKey }) => {
+    if (fromScopeKey === toScopeKey) return { migrated: 0 };
+    const scopedTables = [
+      { table: tables.fact, index: "by_scope" },
+      { table: tables.memory, index: "by_scope" },
+      { table: tables.blockHistory, index: "by_scope_label_version" },
+      { table: tables.block, index: "by_scope_label" },
+      { table: tables.vector, index: "by_scope" },
+      { table: tables.idempotency, index: "by_scope" },
+    ];
+    for (const { table, index } of scopedTables) {
+      const target = await ctx.db.query(table).withIndex(index, (q: any) => q.eq("scopeKey", toScopeKey)).first();
+      if (target) throw new Error(`legacy scope migration target is not empty: ${toScopeKey}`);
+    }
+    let migrated = 0;
+    for (const { table, index } of scopedTables) {
+      const rows = await ctx.db.query(table).withIndex(index, (q: any) => q.eq("scopeKey", fromScopeKey)).collect();
+      for (const row of rows) { await ctx.db.patch(row._id, { scopeKey: toScopeKey }); migrated += 1; }
+    }
+    return { migrated };
   },
 });
 
@@ -900,12 +1019,20 @@ const recordIntent = defineMutation("recordIntent", {
   },
   returns: v.null(),
   handler: async (ctx: MCtx, { key, argsHash, now, scopeKey, sessionId, ownerKey }) => {
-    // Write-once: an existing row is left untouched so a re-run cannot downgrade applied → intent.
+    // Lifecycle fields are write-once. Missing ownership can be enriched, but existing ownership
+    // is immutable so a colliding later write cannot reassign another tenant's durable record.
     const existing = await ctx.db
       .query(tables.idempotency)
       .withIndex("by_key", (q: any) => q.eq("key", key))
       .first();
-    if (existing) return null;
+    if (existing) {
+      const ownership: Record<string, string> = {};
+      if (existing.scopeKey === undefined && scopeKey !== undefined) ownership["scopeKey"] = scopeKey;
+      if (existing.sessionId === undefined && sessionId !== undefined) ownership["sessionId"] = sessionId;
+      if (existing.ownerKey === undefined && ownerKey !== undefined) ownership["ownerKey"] = ownerKey;
+      if (Object.keys(ownership).length > 0) await ctx.db.patch(existing._id, ownership);
+      return null;
+    }
     await ctx.db.insert(tables.idempotency, {
       key,
       status: "intent",
@@ -916,6 +1043,55 @@ const recordIntent = defineMutation("recordIntent", {
       ...(ownerKey !== undefined ? { ownerKey } : {}),
     });
     return null;
+  },
+});
+
+const claimIntent = defineMutation("claimIntent", {
+  args: {
+    key: v.string(),
+    argsHash: v.string(),
+    now: v.string(),
+    scopeKey: v.optional(v.string()),
+    sessionId: v.optional(v.string()),
+    ownerKey: v.optional(v.string()),
+  },
+  returns: v.boolean(),
+  handler: async (ctx: MCtx, { key, argsHash, now, scopeKey, sessionId, ownerKey }) => {
+    const existing = await ctx.db
+      .query(tables.idempotency)
+      .withIndex("by_key", (q: any) => q.eq("key", key))
+      .first();
+    if (existing) return false;
+    await ctx.db.insert(tables.idempotency, {
+      key,
+      status: "intent",
+      argsHash,
+      createdAt: now,
+      ...(scopeKey !== undefined ? { scopeKey } : {}),
+      ...(sessionId !== undefined ? { sessionId } : {}),
+      ...(ownerKey !== undefined ? { ownerKey } : {}),
+    });
+    return true;
+  },
+});
+
+const releaseIntent = defineMutation("releaseIntent", {
+  args: {
+    key: v.string(),
+    argsHash: v.string(),
+    scopeKey: v.optional(v.string()),
+    sessionId: v.optional(v.string()),
+    ownerKey: v.optional(v.string()),
+  },
+  returns: v.boolean(),
+  handler: async (ctx: MCtx, { key, argsHash }) => {
+    const existing = await ctx.db
+      .query(tables.idempotency)
+      .withIndex("by_key", (q: any) => q.eq("key", key))
+      .first();
+    if (!existing || existing.status !== "intent" || existing.argsHash !== argsHash) return false;
+    await ctx.db.delete(existing._id);
+    return true;
   },
 });
 
@@ -941,9 +1117,9 @@ const recordCompletion = defineMutation("recordCompletion", {
       await ctx.db.patch(existing._id, {
         status: "applied",
         result,
-        ...(scopeKey !== undefined ? { scopeKey } : {}),
-        ...(sessionId !== undefined ? { sessionId } : {}),
-        ...(ownerKey !== undefined ? { ownerKey } : {}),
+        ...(existing.scopeKey === undefined && scopeKey !== undefined ? { scopeKey } : {}),
+        ...(existing.sessionId === undefined && sessionId !== undefined ? { sessionId } : {}),
+        ...(existing.ownerKey === undefined && ownerKey !== undefined ? { ownerKey } : {}),
       });
     } else {
       await ctx.db.insert(tables.idempotency, {
@@ -1025,6 +1201,7 @@ const getDecision = defineQuery("getDecision", {
     functions: {
       createSession,
       getSession,
+      replaceSessionApiKey,
       listSessions,
       appendEvents,
       readEvents,
@@ -1036,12 +1213,15 @@ const getDecision = defineQuery("getDecision", {
       listBlocks,
       indexMemory,
       searchMemory,
+      listMemory,
+      deleteMemory,
       assertFact,
       queryFacts,
       corroborate,
       expireFacts,
       sweepExpired,
       eraseScope,
+      migrateLegacyScope,
       vectorUpsert,
       vectorSearch,
       vectorDelete,
@@ -1050,6 +1230,8 @@ const getDecision = defineQuery("getDecision", {
       writeCheckpoint,
       lastCheckpoint,
       recordIntent,
+      claimIntent,
+      releaseIntent,
       recordCompletion,
       getIdempotency,
       recordDecision,

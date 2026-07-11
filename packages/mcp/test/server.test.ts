@@ -1,7 +1,18 @@
 import { describe, it, expect } from "vitest";
 import { z } from "zod";
 import { createTool } from "@eidentic/core";
-import { serveTools, serveAgent, type McpServerLike, type AgentLike } from "../src/index.js";
+import {
+  serveTools,
+  serveAgent,
+  type McpServerLike,
+  type AgentLike,
+  type McpTransportContext,
+  type McpAgentIdentity,
+} from "../src/index.js";
+
+// Public-type surface compile check for security integration hooks.
+const _publicTypeCheck: [McpTransportContext?, McpAgentIdentity?] = [];
+void _publicTypeCheck;
 
 // ---------------------------------------------------------------------------
 // Faithful in-memory McpServerLike fake
@@ -14,19 +25,19 @@ import { serveTools, serveAgent, type McpServerLike, type AgentLike } from "../s
 // interface the schema sentinel is the method string ("tools/list" / "tools/call").
 // ---------------------------------------------------------------------------
 class FakeMcpServer implements McpServerLike {
-  private handlers = new Map<string, (req: any) => Promise<any>>();
+  private handlers = new Map<string, (req: any, extra?: any) => Promise<any>>();
 
-  setRequestHandler(schema: unknown, handler: (req: any) => Promise<any>): void {
+  setRequestHandler(schema: unknown, handler: (req: any, extra?: any) => Promise<any>): void {
     // Schema is the string sentinel passed by serveTools ("tools/list" / "tools/call").
     const key = String(schema);
     this.handlers.set(key, handler);
   }
 
   /** Invoke a registered handler directly (simulates the SDK's request dispatch). */
-  async invoke(method: string, req: unknown = {}): Promise<any> {
+  async invoke(method: string, req: unknown = {}, extra?: unknown): Promise<any> {
     const handler = this.handlers.get(method);
     if (!handler) throw new Error(`FakeMcpServer: no handler registered for '${method}'`);
-    return handler(req);
+    return handler(req, extra);
   }
 
   async connect(_transport: unknown): Promise<void> { /* noop */ }
@@ -55,6 +66,16 @@ const boomTool = createTool({
   description: "Always throws.",
   inputSchema: z.object({}),
   execute: async () => { throw new Error("kaboom from boom tool"); },
+});
+
+const secretTool = createTool({
+  id: "secret",
+  description: "Returns and throws credential-shaped test data.",
+  inputSchema: z.object({ fail: z.boolean().default(false) }),
+  execute: async ({ input }) => {
+    if (input.fail) throw new Error("Bearer transport-secret-value");
+    return { apiKey: "transport-secret-value", nested: { ok: true } };
+  },
 });
 
 // ---------------------------------------------------------------------------
@@ -123,6 +144,16 @@ describe("serveTools — tools/call (happy path)", () => {
     expect(result.isError).toBeFalsy();
     expect(result.content[0].text).toBe(JSON.stringify("Hello, World!"));
   });
+
+  it("redacts credential fields from successful tool output", async () => {
+    const fake = new FakeMcpServer();
+    serveTools(fake, [secretTool]);
+    const result = await fake.invoke("tools/call", {
+      params: { name: "secret", arguments: { fail: false } },
+    });
+    expect(result.content[0].text).not.toContain("transport-secret-value");
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ apiKey: "***", nested: { ok: true } });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -152,6 +183,17 @@ describe("serveTools — tools/call (error cases)", () => {
 
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain("kaboom");
+  });
+
+  it("redacts bearer credentials from tool errors", async () => {
+    const fake = new FakeMcpServer();
+    serveTools(fake, [secretTool]);
+    const result = await fake.invoke("tools/call", {
+      params: { name: "secret", arguments: { fail: true } },
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("Bearer [REDACTED]");
+    expect(result.content[0].text).not.toContain("transport-secret-value");
   });
 
   it("returns isError:true for invalid arguments (parse failure)", async () => {
@@ -483,6 +525,95 @@ describe("serveAgent — error terminal isError", () => {
 // ---------------------------------------------------------------------------
 
 describe("serveTools — authenticateConnection hook", () => {
+  it("receives SDK transport metadata rather than mistaking protocol params for auth context", async () => {
+    const fake = new FakeMcpServer();
+    const seen: unknown[] = [];
+    serveTools(fake, [addTool], {
+      authenticateConnection: (context) => {
+        seen.push(context);
+        return { principal: { subject: "trusted-client" } };
+      },
+    });
+
+    const request = { params: { name: "add", arguments: { a: 1, b: 2 } } };
+    const extra = {
+      authInfo: { clientId: "transport-client" },
+      requestInfo: { headers: { authorization: "Bearer transport-token" } },
+    };
+    const result = await fake.invoke("tools/call", request, extra);
+
+    expect(result.isError).toBeFalsy();
+    expect(seen).toEqual([
+      expect.objectContaining({ request, transport: extra, authInfo: extra.authInfo, requestInfo: extra.requestInfo }),
+    ]);
+  });
+
+  it("passes only the authenticated principal to authorization, context creation, and audit", async () => {
+    const fake = new FakeMcpServer();
+    const principal = { subject: "verified-user" };
+    const seen: { authorize?: unknown; context?: unknown; audit?: unknown } = {};
+    const events: Array<{ principal?: unknown }> = [];
+    serveTools(fake, [addTool], {
+      authenticateConnection: () => ({ principal }),
+      authorize: (_name, _input, context) => {
+        seen.authorize = context.principal;
+        return true;
+      },
+      ctxFactory: (context) => {
+        seen.context = context.principal;
+        return {};
+      },
+      onAudit: (event) => events.push(event),
+    });
+
+    await fake.invoke(
+      "tools/call",
+      { params: { name: "add", arguments: { a: 4, b: 5 } } },
+      { authInfo: { clientId: "transport-client" } },
+    );
+
+    seen.audit = events[0]?.principal;
+    expect(seen).toEqual({ authorize: principal, context: principal, audit: principal });
+  });
+
+  it("does not expose raw SDK auth credentials to downstream hooks or audit", async () => {
+    const fake = new FakeMcpServer();
+    const contexts: unknown[] = [];
+    const events: Array<{ principal?: unknown }> = [];
+    serveTools(fake, [addTool], {
+      authorize: (_name, _input, context) => {
+        contexts.push(context);
+        return true;
+      },
+      ctxFactory: (context) => {
+        contexts.push(context);
+        return {};
+      },
+      onAudit: (event) => events.push(event),
+    });
+
+    await fake.invoke(
+      "tools/call",
+      { params: { name: "add", arguments: { a: 2, b: 3 } } },
+      {
+        authInfo: {
+          token: "transport-secret-token",
+          clientId: "safe-client",
+          scopes: ["tools:call"],
+        },
+        requestInfo: { headers: { authorization: "Bearer request-info-secret" } },
+      },
+    );
+
+    expect(contexts).toEqual([
+      { request: expect.any(Object), principal: { clientId: "safe-client", scopes: ["tools:call"] } },
+      { request: expect.any(Object), principal: { clientId: "safe-client", scopes: ["tools:call"] } },
+    ]);
+    const serialized = JSON.stringify({ contexts, events });
+    expect(serialized).not.toContain("transport-secret-token");
+    expect(serialized).not.toContain("request-info-secret");
+  });
+
   it("option omitted → tools/list succeeds (unchanged behaviour)", async () => {
     const fake = new FakeMcpServer();
     serveTools(fake, [addTool]);
@@ -506,6 +637,19 @@ describe("serveTools — authenticateConnection hook", () => {
   it("authenticateConnection returning false → tools/list rejected with auth error", async () => {
     const fake = new FakeMcpServer();
     serveTools(fake, [addTool], { authenticateConnection: () => false });
+
+    const result = await fake.invoke("tools/list");
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("not authenticated");
+  });
+
+  it("treats an empty authentication result object as a denial", async () => {
+    const fake = new FakeMcpServer();
+    serveTools(fake, [addTool], {
+      // Runtime regression: JavaScript callers can still return an object that
+      // does not contain the required principal field.
+      authenticateConnection: () => ({} as { principal: unknown }),
+    });
 
     const result = await fake.invoke("tools/list");
     expect(result.isError).toBe(true);
@@ -592,6 +736,141 @@ describe("serveTools — authenticateConnection hook", () => {
     });
     expect(greetResult.isError).toBe(true);
     expect(greetResult.content[0].text).toContain("not authorized");
+  });
+});
+
+describe("serveAgent — trusted identity", () => {
+  it("ignores caller-supplied identity fields by default", async () => {
+    let captured: unknown;
+    const agent: AgentLike = {
+      async query(_input, options) {
+        captured = options;
+        return "ok";
+      },
+    };
+    const fake = new FakeMcpServer();
+    serveAgent(fake, "agent", agent);
+
+    const listed = await fake.invoke("tools/list");
+    expect(listed.tools[0].inputSchema.properties).not.toHaveProperty("userId");
+    expect(listed.tools[0].inputSchema.properties).not.toHaveProperty("orgId");
+    expect(listed.tools[0].inputSchema.properties).not.toHaveProperty("apiKey");
+
+    await fake.invoke("tools/call", {
+      params: {
+        name: "agent",
+        arguments: { input: "hello", userId: "spoofed", orgId: "spoofed-org", apiKey: "secret" },
+      },
+    });
+    expect(captured).toEqual(expect.objectContaining({ sessionId: expect.any(String) }));
+    expect(captured).not.toEqual(expect.objectContaining({ userId: expect.anything() }));
+    expect(captured).not.toEqual(expect.objectContaining({ orgId: expect.anything() }));
+    expect(captured).not.toEqual(expect.objectContaining({ apiKey: expect.anything() }));
+  });
+
+  it("maps a verified transport principal to agent identity through an explicit trusted hook", async () => {
+    let captured: unknown;
+    const agent: AgentLike = {
+      async query(_input, options) {
+        captured = options;
+        return "ok";
+      },
+    };
+    const fake = new FakeMcpServer();
+    serveAgent(fake, "agent", agent, "Agent", {
+      authenticateConnection: () => ({ principal: { subject: "verified-user" } }),
+      agentIdentity: (principal) => ({ userId: (principal as { subject: string }).subject }),
+    });
+
+    await fake.invoke(
+      "tools/call",
+      { params: { name: "agent", arguments: { input: "hello", userId: "spoofed" } } },
+      { authInfo: { clientId: "transport-client" } },
+    );
+    expect(captured).toEqual(expect.objectContaining({ userId: "verified-user" }));
+  });
+
+  it("binds a verified SDK clientId to a stable credential-free agent identity by default", async () => {
+    let captured: unknown;
+    const agent: AgentLike = {
+      async query(_input, options) {
+        captured = options;
+        return "ok";
+      },
+    };
+    const fake = new FakeMcpServer();
+    serveAgent(fake, "agent", agent);
+
+    await fake.invoke(
+      "tools/call",
+      { params: { name: "agent", arguments: { input: "hello", sessionId: "shared" } } },
+      { authInfo: { token: "never-persist", clientId: "verified-client", scopes: [] } },
+    );
+
+    expect(captured).toEqual({
+      sessionId: "shared",
+      userId: "mcp-client:verified-client",
+    });
+    expect(JSON.stringify(captured)).not.toContain("never-persist");
+  });
+
+  it("denies an authenticated agent call when no stable principal identity is available", async () => {
+    let calls = 0;
+    const agent: AgentLike = {
+      async query() {
+        calls++;
+        return "should not run";
+      },
+    };
+    const fake = new FakeMcpServer();
+    serveAgent(fake, "agent", agent, "Agent", {
+      authenticateConnection: () => true,
+    });
+
+    const result = await fake.invoke("tools/call", {
+      params: { name: "agent", arguments: { input: "hello" } },
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/identity|principal/i);
+    expect(calls).toBe(0);
+  });
+
+  it("applies per-call authorization before invoking a directly served agent", async () => {
+    let calls = 0;
+    const agent: AgentLike = {
+      async query() {
+        calls++;
+        return "should not run";
+      },
+    };
+    const fake = new FakeMcpServer();
+    serveAgent(fake, "agent", agent, "Agent", {
+      authorize: () => false,
+    });
+
+    const result = await fake.invoke("tools/call", {
+      params: { name: "agent", arguments: { input: "hello" } },
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("not authorized");
+    expect(calls).toBe(0);
+  });
+
+  it("keeps the legacy identity fields behind an explicit unsafe compatibility opt-in", async () => {
+    let captured: unknown;
+    const agent: AgentLike = {
+      async query(_input, options) {
+        captured = options;
+        return "ok";
+      },
+    };
+    const fake = new FakeMcpServer();
+    serveAgent(fake, "agent", agent, "Agent", { allowUntrustedIdentityArgs: true });
+
+    await fake.invoke("tools/call", {
+      params: { name: "agent", arguments: { input: "hello", userId: "legacy-user" } },
+    });
+    expect(captured).toEqual(expect.objectContaining({ userId: "legacy-user" }));
   });
 });
 

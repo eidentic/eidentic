@@ -40,7 +40,7 @@ For Deno, Cloudflare Workers, or other edge runtimes, skip the `eidentic` umbrel
 
 ```ts
 import { Agent } from "@eidentic/core";
-import { createAIModel } from "@eidentic/model";
+import { AIModel } from "@eidentic/model";
 import { LibsqlStore } from "@eidentic/libsql"; // or PostgresStore from @eidentic/postgres
 ```
 

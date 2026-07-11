@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { StoredEvent } from "@eidentic/types";
-import { replayHash } from "../src/replay-hash.js";
+import { chainHash, replayHash, REPLAY_HASH_ALGORITHM } from "../src/replay-hash.js";
 import { textBlock, toolUseBlock, type StreamEvent } from "@eidentic/types";
 import { InMemoryStore, MockModel } from "@eidentic/types/testing";
 import { Agent } from "../src/agent.js";
@@ -11,6 +11,9 @@ const ev = (seq: number, kind: StoredEvent["kind"], payload: unknown, meta?: Sto
   ({ id: `e${seq}`, sessionId: "s", seq, kind, schemaVersion: 1, payload, ...(meta ? { meta } : {}), createdAt: "t" });
 
 describe("replayHash", () => {
+  it("publishes the persisted algorithm identifier", () => {
+    expect(REPLAY_HASH_ALGORITHM).toBe("eidentic-chain-sha256-v1");
+  });
   it("is deterministic for identical replay-state", async () => {
     const a = [ev(0, "user", "hi"), ev(1, "assistant", { content: [{ type: "text", text: "yo" }] })];
     const b = [ev(0, "user", "hi"), ev(1, "assistant", { content: [{ type: "text", text: "yo" }] })];
@@ -45,8 +48,6 @@ describe("replayHash", () => {
 // ---------------------------------------------------------------------------
 // Fix 6: delta-seeded resume hash must equal the full-rehash value
 // ---------------------------------------------------------------------------
-
-import { chainHash } from "../src/loop.js";
 
 describe("Fix 6 — delta-seeded resume hash == full-rehash (integrity invariant)", () => {
   it("hash seeded from a mid-point checkpoint equals the hash computed from the full log", async () => {

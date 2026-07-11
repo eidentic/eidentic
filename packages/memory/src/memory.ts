@@ -1,5 +1,6 @@
 import {
   addUsage,
+  legacyScopeKey,
   scopeKey,
   tokenize,
   isToolUse,
@@ -28,6 +29,21 @@ function subjectForEvent(event: MemoryEvent): string {
   if (s.kind === "org") return `org:${s.orgId}`;
   // shared scope: no per-user identity available; use the block id as a stable but non-user token
   return `shared:${s.blockId}`;
+}
+
+function memoryCacheKey(scopeKeyValue: string, id: string): string {
+  return JSON.stringify([scopeKeyValue, id]);
+}
+
+function memoryCacheOwner(key: string): { scopeKey: string; id: string } | null {
+  try {
+    const value = JSON.parse(key) as unknown;
+    if (!Array.isArray(value) || value.length !== 2 ||
+        typeof value[0] !== "string" || typeof value[1] !== "string") return null;
+    return { scopeKey: value[0], id: value[1] };
+  } catch {
+    return null;
+  }
 }
 import { reciprocalRankFusion } from "./rrf.js";
 import { BlockEditor, type BlockSpec } from "./blocks.js";
@@ -120,21 +136,70 @@ function cosineSim(a: number[], b: number[]): number {
   return dot / (Math.sqrt(ma) * Math.sqrt(mb) || 1);
 }
 const ZERO_USAGE: Usage = { inputTokens: 0, outputTokens: 0 };
+/** Hard default ceiling for one archival-dedup pass (50M pairs at 10k entries is not acceptable). */
+const DEFAULT_DEDUPE_COMPARISON_BUDGET = 100_000;
+const DEFAULT_DEDUPE_MERGE_BUDGET = 100;
+const DEFAULT_DEDUPE_MERGE_TOKEN_BUDGET = 100_000;
 // addUsage is imported from @eidentic/types (canonical shared implementation).
+
+/**
+ * Candidate ordering for archival dedup.
+ *
+ * Small/exhaustive passes retain the historical `(i, j)` ordering exactly. Budgeted passes compare
+ * every adjacent pair before widening the index distance, so work is spread across the whole scope
+ * rather than spending the entire budget on the first few entries.
+ */
+function* dedupePairIndices(entryCount: number, budgeted: boolean): Generator<readonly [number, number]> {
+  if (!budgeted) {
+    for (let i = 0; i < entryCount; i++) {
+      for (let j = i + 1; j < entryCount; j++) yield [i, j] as const;
+    }
+    return;
+  }
+  for (let distance = 1; distance < entryCount; distance++) {
+    for (let i = 0; i + distance < entryCount; i++) yield [i, i + distance] as const;
+  }
+}
 
 export interface DedupeOptions {
   /** Cosine similarity at/above which two passages are treated as near-duplicates. Default 0.95. */
   threshold?: number;
   /** The (slow, capable) model that produces the canonical merged passage. No model ⇒ no-op. */
   mergeModel?: ModelPort;
-  /** Injectable clock (ISO) — unused for the merge itself but kept for symmetry/future audit. */
+  /** @deprecated This option has no effect and will be removed in the next major version. */
   now?: () => string;
+  /**
+   * Hard ceiling on candidate-pair work in one pass. Default 100,000. `0` performs no comparisons.
+   * Raise deliberately for an offline maintenance window; the result reports when this truncates a
+   * pass so callers can partition the scope or schedule another pass.
+   */
+  maxComparisons?: number;
+  /** Hard ceiling on successful LLM merges in one pass. Default 100. */
+  maxMerges?: number;
+  /** Hard cumulative input+output token budget for merge calls. Default 100,000. */
+  maxMergeTokens?: number;
+  /** Cancels candidate scanning and is forwarded to merge-model calls. */
+  signal?: AbortSignal;
 }
 export interface DedupeResult {
   /** Number of duplicate passages merged away (collapsed into a canonical). */
   merged: number;
   /** Aggregated usage of every merge LLM call — account to cost.background (§6.5 transparency). */
   usage: Usage;
+  /** Cosine comparisons actually performed. Present when a vector scan was attempted. */
+  comparisons?: number;
+  /** Candidate pair slots examined, including pairs skipped because one entry was already merged. */
+  candidatePairsExamined?: number;
+  /** Configured hard ceiling for candidate-pair work in this pass. */
+  comparisonBudget?: number;
+  /** Theoretical all-pairs count at the start of the pass. */
+  totalPairs?: number;
+  /** True when unexamined candidate pairs remained because `comparisonBudget` was reached. */
+  truncated?: boolean;
+  /** Configured successful-merge ceiling for this pass. */
+  mergeBudget?: number;
+  /** Configured cumulative merge-token ceiling for this pass. */
+  mergeTokenBudget?: number;
 }
 
 /**
@@ -460,6 +525,42 @@ export class ConsentRejectedError extends Error {
   }
 }
 
+/**
+ * Explicitly move vectors written with the pre-v2 delimiter key to an operator-selected scope.
+ * Normal recall never invokes this helper. The target must be empty, and `list` is required so
+ * migration cannot guess, merge tenants, or silently lose vector payloads.
+ */
+export async function migrateLegacyScopeVectors(vector: VectorPort, scope: Scope): Promise<{ migrated: number }> {
+  const from = legacyScopeKey(scope);
+  const to = scopeKey(scope);
+  if (from === to) return { migrated: 0 };
+  if (!vector.list) throw new Error("legacy vector scope migration requires VectorPort.list");
+  const source = await vector.list(from);
+  if (source.length === 0) return { migrated: 0 };
+  const target = await vector.list(to);
+  const sourceById = new Map(source.map((entry) => [entry.id, entry]));
+  const samePayload = (a: VectorEntry, b: VectorEntry) =>
+    a.text === b.text && a.vector.length === b.vector.length && a.vector.every((value, index) => value === b.vector[index]);
+  for (const entry of target) {
+    const expected = sourceById.get(entry.id);
+    if (!expected || !samePayload(entry, expected)) {
+      throw new Error(`legacy vector scope migration target contains unrelated data: ${to}`);
+    }
+  }
+  const targetIds = new Set(target.map((entry) => entry.id));
+  for (const entry of source) if (!targetIds.has(entry.id)) await vector.upsert({ ...entry, scopeKey: to });
+  const verified = await vector.list(to);
+  if (verified.length !== source.length || verified.some((entry) => {
+    const expected = sourceById.get(entry.id);
+    return !expected || !samePayload(entry, expected);
+  })) throw new Error("legacy vector scope migration copy verification failed; source was retained");
+  const erased = await vector.eraseScope(from);
+  if (erased.deleted !== source.length) {
+    throw new Error(`legacy vector scope migration source count changed (expected ${source.length}, erased ${erased.deleted})`);
+  }
+  return { migrated: source.length };
+}
+
 /** Health snapshot for one always-in-context block (§6.5). */
 export interface BlockHealth {
   label: string;
@@ -484,14 +585,14 @@ export class Memory implements EditableMemoryPort {
   /** True when a graph backend was provided at construction time. */
   readonly graphEnabled: boolean;
   /**
-   * In-process hot cache for event metadata, keyed by event id. Populated by `ingest` when
+   * In-process hot cache for event metadata, keyed by an injective `[scopeKey,eventId]` tuple.
    * `event.metadata` is present. Used by `retrieve` as a fallback when the store does not yet
    * return a persisted value (e.g. same-process ingest without a round-trip). The authoritative
    * values are now persisted through `indexMemory` and returned by `searchMemory`.
    */
   private readonly metadataStore = new Map<string, { source?: string; page?: number; [k: string]: unknown }>();
   /**
-   * In-process hot cache for ingest timestamps (epoch ms), keyed by event id. Populated on every
+   * In-process hot cache for ingest timestamps, keyed by an injective `[scopeKey,eventId]` tuple.
    * `ingest` call. Used by recency-decay ranking in `retrieve` as a fallback when the store does
    * not yet return a persisted value. The authoritative values are now persisted through
    * `indexMemory` and returned by `searchMemory`.
@@ -510,7 +611,7 @@ export class Memory implements EditableMemoryPort {
    */
   private readonly seenNormTexts = new Set<string>();
   /**
-   * Raw ingested text cache: id → text, populated during `ingest`. Lets `applyConsent` re-classify
+   * Raw ingested text cache: `[scope,id]` → text, populated during `ingest`.
    * stored entries and `exportScope`/`mergeScopes` recover entry text without a store scan (the
    * lexical FTS index has no "list all entries for scope" primitive). In-process only — cleared on
    * restart / eviction; facts (passive extraction) are the durable, restart-safe consent carrier.
@@ -656,9 +757,10 @@ export class Memory implements EditableMemoryPort {
     const ids = this.scopedIds.get(sk);
     if (ids) {
       for (const id of ids) {
-        this.metadataStore.delete(id);
-        this.ingestedAtStore.delete(id);
-        this.textStore.delete(id);
+        const key = memoryCacheKey(sk, id);
+        this.metadataStore.delete(key);
+        this.ingestedAtStore.delete(key);
+        this.textStore.delete(key);
       }
       this.scopedIds.delete(sk);
     }
@@ -683,16 +785,16 @@ export class Memory implements EditableMemoryPort {
   private evictFromMap<V>(map: Map<string, V>, excess: number): void {
     if (excess <= 0) return;
     let evicted = 0;
-    for (const id of map.keys()) {
+    for (const key of map.keys()) {
       if (evicted >= excess) break;
-      map.delete(id);
+      map.delete(key);
       // Keep the text cache bounded alongside the metadata/ingestedAt maps.
-      this.textStore.delete(id);
-      // Remove from scopedIds so eraseScope doesn't try to delete already-evicted ids.
-      // We don't know the scope key from the id alone, so we scan all scope sets.
-      // This is an O(scopes) scan but eviction is rare (only at cap boundary).
-      for (const [, ids] of this.scopedIds) {
-        ids.delete(id);
+      this.textStore.delete(key);
+      const owner = memoryCacheOwner(key);
+      if (owner) {
+        const ids = this.scopedIds.get(owner.scopeKey);
+        ids?.delete(owner.id);
+        if (ids?.size === 0) this.scopedIds.delete(owner.scopeKey);
       }
       evicted++;
     }
@@ -780,10 +882,8 @@ export class Memory implements EditableMemoryPort {
    * Category is re-derived at sweep time via the manifest's classifier (deterministic), so no extra
    * per-row category column is needed. Returns an audit count — erasures are never silent.
    *
-   * NOTE: memory-entry erasure removes the entry from the in-memory hot caches and the vector store
-   * (when configured). The lexical FTS index has no row-delete primitive, so a swept memory id may
-   * survive in the FTS index; its hot-cache metadata/recency is removed and the vector is deleted, so
-   * it no longer contributes the semantic signal. A future `StorePort.removeMemory` would fully drop it.
+   * Lexical rows are enumerated and deleted through the durable StorePort, so this remains complete
+   * after restart. Hot caches and the optional vector index are purged only after durable deletion.
    */
   async applyConsent(scope: Scope, manifest: ConsentManifest): Promise<ConsentResult> {
     const result: ConsentResult = { rejected: 0, sweptFacts: 0, sweptMemories: 0 };
@@ -819,36 +919,42 @@ export class Memory implements EditableMemoryPort {
       }
     }
 
-    // 2. Memory entries — re-classify and erase forbidden ones from caches + vector store.
+    // 2. Memory entries — enumerate the durable lexical store, then erase exact forbidden ids.
     const sk = scopeKey(scope);
-    const ids = this.scopedIds.get(sk);
-    if (ids) {
-      for (const id of [...ids]) {
-        // Re-classify by the cached raw text (populated during ingest). Entries with no cached text
-        // (e.g. ingested in a prior process before restart, or evicted under maxInMemoryEntries) are
-        // skipped — facts remain the authoritative, restart-safe consent carrier and ARE swept above.
-        const probeText = this.textStore.get(id);
-        if (!probeText) continue;
-        const matched = resolveConsent(manifest, probeText);
-        if (!matched) continue;
-        let erase = matched.policy === "never";
-        if (!erase && matched.policy !== "never") {
-          const ttl = consentTtlMs(manifest, matched.policy);
-          const ingestedAt = this.ingestedAtStore.get(id);
-          if (ingestedAt !== undefined && !Number.isNaN(nowMs) && nowMs - ingestedAt > ttl) erase = true;
-        }
-        if (erase) {
-          this.metadataStore.delete(id);
-          this.ingestedAtStore.delete(id);
-          this.textStore.delete(id);
-          ids.delete(id);
-          if (this.semantic && this.opts.vector) {
-            try { await this.opts.vector.delete(id, sk); } catch { /* best-effort */ }
-          }
-          result.sweptMemories += 1;
-          if (matched.policy === "never") result.rejected += 1;
+    const durableEntries = await this.opts.store.listMemory(scope);
+    const toDelete: string[] = [];
+    const neverIds = new Set<string>();
+    for (const entry of durableEntries) {
+      const matched = resolveConsent(manifest, entry.text);
+      if (!matched) continue;
+      let erase = matched.policy === "never";
+      if (!erase && matched.policy !== "never") {
+        const ttl = consentTtlMs(manifest, matched.policy);
+        if (entry.ingestedAt !== undefined && !Number.isNaN(nowMs) && nowMs - entry.ingestedAt > ttl) erase = true;
+      }
+      if (!erase) continue;
+      toDelete.push(entry.id);
+      if (matched.policy === "never") neverIds.add(entry.id);
+    }
+    if (toDelete.length > 0) {
+      const deleted = await this.opts.store.deleteMemory(scope, toDelete);
+      if (deleted !== toDelete.length) {
+        throw new Error(`Memory consent sweep deleted ${deleted}/${toDelete.length} durable entries`);
+      }
+      const hotIds = this.scopedIds.get(sk);
+      for (const id of toDelete) {
+        const cacheKey = memoryCacheKey(sk, id);
+        this.metadataStore.delete(cacheKey);
+        this.ingestedAtStore.delete(cacheKey);
+        this.textStore.delete(cacheKey);
+        hotIds?.delete(id);
+        if (this.semantic && this.opts.vector) {
+          try { await this.opts.vector.delete(id, sk); } catch { /* best-effort */ }
         }
       }
+      if (hotIds?.size === 0) this.scopedIds.delete(sk);
+      result.sweptMemories = deleted;
+      result.rejected += neverIds.size;
     }
 
     return result;
@@ -860,18 +966,13 @@ export class Memory implements EditableMemoryPort {
    * the FULL temporal knowledge graph (all fact versions incl. supersedes + lastCorroboratedAt),
    * always-in-context blocks, and per-block version history.
    *
-   * Pure read-composition over existing ports — no new store methods. Memory entries are gathered
-   * from the in-process index (ids ingested this process) plus the store's lexical search is NOT used
-   * (it requires a query); instead entries come from the scope id index + their cached text. For a
-   * complete export across restarts, run the export in the same process that ingested, or treat this
-   * as a best-effort portability artifact for the live working set plus the durably-stored facts/blocks.
+   * Memory entries are enumerated from the durable store, so exports are complete across process
+   * restarts and independent of the bounded hot caches.
    *
    * Event-sourced session history is intentionally NOT included — sessions are conversation transcripts,
    * not memory; export them separately via `StorePort.readEvents` if needed.
    */
   async exportScope(scope: Scope): Promise<MemoryExport> {
-    const sk = scopeKey(scope);
-
     // Facts: full timeline (valid + invalidated) for the scope.
     const facts: Fact[] = this.opts.graph
       ? await this.opts.graph.queryFacts({ scope, includeInvalidated: true })
@@ -884,25 +985,7 @@ export class Memory implements EditableMemoryPort {
       blockHistory[b.label] = await this.opts.store.getBlockHistory(scope, b.label);
     }
 
-    // Memory entries: reconstruct from the in-process scope id index + caches. Text comes from the
-    // in-process `textStore` (populated on ingest); ids that predate this process (e.g. after a
-    // restart) export id + provenance metadata + ingestedAt with text omitted. This keeps export
-    // dependency-free of a new store list method while remaining a faithful artifact for the working set.
-    const memories: MemoryExport["memories"] = [];
-    const ids = this.scopedIds.get(sk);
-    if (ids) {
-      for (const id of ids) {
-        const text = this.textStore.get(id) ?? "";
-        const ingestedAt = this.ingestedAtStore.get(id);
-        const metadata = this.metadataStore.get(id);
-        memories.push({
-          id,
-          text,
-          ...(ingestedAt !== undefined ? { ingestedAt } : {}),
-          ...(metadata !== undefined ? { metadata } : {}),
-        });
-      }
-    }
+    const memories: MemoryExport["memories"] = await this.opts.store.listMemory(scope);
 
     return {
       schema: "eidentic.memory.export.v1",
@@ -950,9 +1033,7 @@ export class Memory implements EditableMemoryPort {
 
     // 1. Memories — re-index under `to` with provenance. Text comes from the export composition.
     const snapshot = await this.exportScope(from);
-    const memEntries = snapshot.memories
-      .filter((m) => m.text.length > 0) // only entries whose text we can faithfully re-index
-      .map((m) => ({
+    const memEntries = snapshot.memories.map((m) => ({
         scope: to,
         id: m.id,
         text: m.text,
@@ -967,9 +1048,10 @@ export class Memory implements EditableMemoryPort {
       if (!toIds) { toIds = new Set<string>(); this.scopedIds.set(toKey, toIds); }
       for (const m of memEntries) {
         toIds.add(m.id);
-        if (m.ingestedAt !== undefined) this.ingestedAtStore.set(m.id, m.ingestedAt);
-        this.metadataStore.set(m.id, m.metadata);
-        this.textStore.set(m.id, m.text);
+        const cacheKey = memoryCacheKey(toKey, m.id);
+        if (m.ingestedAt !== undefined) this.ingestedAtStore.set(cacheKey, m.ingestedAt);
+        this.metadataStore.set(cacheKey, m.metadata);
+        this.textStore.set(cacheKey, m.text);
         if (this.semantic && this.opts.embedder && this.opts.vector) {
           const vec = await this.opts.embedder.embed(m.text);
           await this.opts.vector.upsert({ id: m.id, scopeKey: toKey, text: m.text, vector: vec });
@@ -1020,15 +1102,8 @@ export class Memory implements EditableMemoryPort {
     // we never reach here and the source is untouched (caller can safely re-run — re-indexing is
     // idempotent by id and fact re-assert is idempotent on the same object).
     //
-    // Memory ids are reused under the target scope (we re-index the SAME id). The from-scope and
-    // to-scope therefore share entries in the in-memory hot caches keyed by id. Before erasing the
-    // source, detach the copied ids from the from-scope's `scopedIds` set so `eraseScope` does not
-    // purge the shared cache entries that now belong to the target. The store-level erase still
-    // removes the source rows by scope_key (a distinct key), so source data is fully cleared.
-    const fromIds = this.scopedIds.get(fromKey);
-    if (fromIds) {
-      for (const m of memEntries) fromIds.delete(m.id);
-    }
+    // Hot caches are keyed by the full `[scope,id]` tuple, so erasing the source cannot purge the
+    // newly copied target entries even when ids are intentionally reused.
     await this.eraseScope(from);
 
     return counts;
@@ -1083,17 +1158,18 @@ export class Memory implements EditableMemoryPort {
     // Recency: record ingest timestamp (epoch ms) for each event using the injectable clock.
     const nowMs = Date.parse(this.clock());
     for (const e of filtered) {
-      if (e.metadata !== undefined) {
-        this.metadataStore.set(e.id, e.metadata);
-      }
-      this.ingestedAtStore.set(e.id, nowMs);
-      // Track scope → id membership so eraseScope can precisely purge in-memory maps.
       const sk = scopeKey(e.scope);
+      const cacheKey = memoryCacheKey(sk, e.id);
+      if (e.metadata !== undefined) {
+        this.metadataStore.set(cacheKey, e.metadata);
+      }
+      this.ingestedAtStore.set(cacheKey, nowMs);
+      // Track scope → id membership so eraseScope can precisely purge in-memory maps.
       let ids = this.scopedIds.get(sk);
       if (!ids) { ids = new Set<string>(); this.scopedIds.set(sk, ids); }
       ids.add(e.id);
       // Cache raw text so applyConsent can re-classify and exportScope/mergeScopes can recover text.
-      this.textStore.set(e.id, e.text);
+      this.textStore.set(cacheKey, e.text);
     }
 
     // FIX 3: enforce bounded map sizes to prevent unbounded memory growth in long-lived processes.
@@ -1170,6 +1246,7 @@ export class Memory implements EditableMemoryPort {
 
   async retrieve(query: RetrievalQuery): Promise<RetrievedMemory> {
     const k = query.topK ?? this.opts.topK ?? 20;
+    const queryScopeKey = scopeKey(query.scope);
     // Fetch a wider candidate pool per signal before RRF fusion (Fix §6.4 recall quality):
     // an item ranked just outside k in one signal may be top in another — fetching k*3 before fusion
     // prevents it from being dropped before RRF can rescue it.
@@ -1198,11 +1275,12 @@ export class Memory implements EditableMemoryPort {
       // Persisted values come through on the snippet itself (set by searchMemory).
       // In-memory cache fills in any gap (e.g. same-process ingest, fact: entries).
       const persistedMeta = s.metadata;
-      const cachedMeta = this.metadataStore.get(s.id);
+      const cacheKey = memoryCacheKey(queryScopeKey, s.id);
+      const cachedMeta = this.metadataStore.get(cacheKey);
       const resolvedMeta = persistedMeta ?? cachedMeta;
 
       const persistedIngestedAt = s.ingestedAt;
-      const cachedIngestedAt = this.ingestedAtStore.get(s.id);
+      const cachedIngestedAt = this.ingestedAtStore.get(cacheKey);
       const resolvedIngestedAt = persistedIngestedAt ?? cachedIngestedAt;
 
       return {
@@ -1221,9 +1299,9 @@ export class Memory implements EditableMemoryPort {
     // Build an ingestedAt map that merges persisted values (from withMeta) with the
     // in-memory cache. The persisted values already live on the snippet after the map above,
     // so we just need to collect them into a Map for applyRecencyDecay.
-    const ingestedAtMerged = new Map<string, number>(this.ingestedAtStore);
+    const ingestedAtMerged = new Map<string, number>();
     for (const s of withMeta) {
-      if (s.ingestedAt !== undefined && !ingestedAtMerged.has(s.id)) {
+      if (s.ingestedAt !== undefined) {
         ingestedAtMerged.set(s.id, s.ingestedAt);
       }
     }
@@ -1242,17 +1320,14 @@ export class Memory implements EditableMemoryPort {
    * No-op (returns { merged: 0, usage: 0 }) when semantic is off, no `mergeModel` is given, or the
    * vector adapter cannot `list` a scope.
    *
-   * FIX 5 (E-P2) — O(n²) complexity note:
-   * The current implementation compares every pair of entries (O(n²) all-pairs cosine). For scopes
-   * with a very large number of archived passages this can be slow. A safer replacement would use
-   * the vector store's own `search` (ANN) to find above-threshold candidates per passage, reducing
-   * to O(n · k) where k is the number of near-neighbours. However, that would change dedup semantics
-   * (ANN may miss exact duplicates at recall < 1) and risks breaking existing dedup behaviour.
-   * Deferred: ANN-based dedup is tracked as a follow-up improvement.
-   * SAFETY GUARD: if the entry count exceeds 10_000 we skip dedup and return a no-op to prevent
-   * runaway O(n²) cost (50M pairs). The caller should partition large scopes before deduplicating.
+   * Pair work is bounded by `maxComparisons` (default 100,000). Small scopes whose complete pair
+   * count fits the budget retain the historical exhaustive ordering and semantics. Larger scopes use
+   * a deterministic widening-window order: all adjacent entries are considered before distance-two
+   * entries, and so on, spreading the budget across the full scope. `DedupeResult.truncated` and the
+   * comparison counters make partial passes explicit rather than silently skipping the entire scope.
    */
   async deduplicateArchival(scope: Scope, opts: DedupeOptions = {}): Promise<DedupeResult> {
+    if (opts.signal?.aborted) throw new DOMException("archival dedup aborted", "AbortError");
     const threshold = opts.threshold ?? 0.95;
     const mergeModel = opts.mergeModel;
     const vector = this.opts.vector;
@@ -1262,57 +1337,90 @@ export class Memory implements EditableMemoryPort {
     }
     const sk = scopeKey(scope);
     const entries: VectorEntry[] = await vector.list(sk);
-
-    // FIX 5: safety guard — skip brute-force O(n²) dedup for very large scopes.
-    const DEDUP_N_LIMIT = 10_000;
-    if (entries.length > DEDUP_N_LIMIT) {
-      return { merged: 0, usage: { ...ZERO_USAGE } };
+    const comparisonBudget = opts.maxComparisons ?? DEFAULT_DEDUPE_COMPARISON_BUDGET;
+    const mergeBudget = opts.maxMerges ?? DEFAULT_DEDUPE_MERGE_BUDGET;
+    const mergeTokenBudget = opts.maxMergeTokens ?? DEFAULT_DEDUPE_MERGE_TOKEN_BUDGET;
+    if (!Number.isSafeInteger(comparisonBudget) || comparisonBudget < 0) {
+      throw new RangeError("Memory.deduplicateArchival: maxComparisons must be a non-negative safe integer");
     }
+    if (!Number.isSafeInteger(mergeBudget) || mergeBudget < 0) {
+      throw new RangeError("Memory.deduplicateArchival: maxMerges must be a non-negative safe integer");
+    }
+    if (!Number.isSafeInteger(mergeTokenBudget) || mergeTokenBudget < 0) {
+      throw new RangeError("Memory.deduplicateArchival: maxMergeTokens must be a non-negative safe integer");
+    }
+    const totalPairs = entries.length * (entries.length - 1) / 2;
+    const budgeted = totalPairs > comparisonBudget;
     const merged = new Set<string>();
     let mergedCount = 0;
     let usage: Usage = { ...ZERO_USAGE };
+    let comparisons = 0;
+    let candidatePairsExamined = 0;
+    let truncated = false;
 
-    for (let i = 0; i < entries.length; i++) {
+    for (const [i, j] of dedupePairIndices(entries.length, budgeted)) {
+      if (opts.signal?.aborted) throw new DOMException("archival dedup aborted", "AbortError");
+      if (mergedCount >= mergeBudget || usage.inputTokens + usage.outputTokens >= mergeTokenBudget) {
+        truncated = true;
+        break;
+      }
+      // Once fewer than two live entries remain, every later pair would be skipped.
+      if (entries.length - merged.size < 2) break;
+      if (candidatePairsExamined >= comparisonBudget) {
+        truncated = true;
+        break;
+      }
+      candidatePairsExamined += 1;
       const a = entries[i]!;
       if (merged.has(a.id)) continue;
-      for (let j = i + 1; j < entries.length; j++) {
-        const b = entries[j]!;
-        if (merged.has(b.id)) continue;
-        if (cosineSim(a.vector, b.vector) < threshold) continue;
+      const b = entries[j]!;
+      if (merged.has(b.id)) continue;
+      comparisons += 1;
+      if (cosineSim(a.vector, b.vector) < threshold) continue;
 
-        const res = await mergeModel.complete({
-          messages: [
-            { role: "system", content: MERGE_SYSTEM },
-            { role: "user", content: `Passage A:\n${a.text}\n\nPassage B:\n${b.text}` },
-          ],
-          tools: [MERGE_PASSAGES_TOOL],
-        });
-        usage = addUsage(usage, res.usage);
+      const res = await mergeModel.complete({
+        messages: [
+          { role: "system", content: MERGE_SYSTEM },
+          { role: "user", content: `Passage A:\n${a.text}\n\nPassage B:\n${b.text}` },
+        ],
+        tools: [MERGE_PASSAGES_TOOL],
+        ...(opts.signal ? { signal: opts.signal } : {}),
+      });
+      usage = addUsage(usage, res.usage);
 
-        const call = res.content.find((blk) => isToolUse(blk) && blk.name === "merge_passages");
-        const canonicalRaw = call && isToolUse(call) ? (call.input as { passage?: unknown }).passage : undefined;
-        const canonical = typeof canonicalRaw === "string" ? canonicalRaw.trim() : "";
-        if (!canonical) continue; // malformed/empty → DATA SAFETY: leave BOTH intact
+      const call = res.content.find((blk) => isToolUse(blk) && blk.name === "merge_passages");
+      const canonicalRaw = call && isToolUse(call) ? (call.input as { passage?: unknown }).passage : undefined;
+      const canonical = typeof canonicalRaw === "string" ? canonicalRaw.trim() : "";
+      if (!canonical) continue; // malformed/empty → DATA SAFETY: leave BOTH intact
 
-        const vec = await embedder.embed(canonical);
-        await vector.delete(b.id, sk);
-        await vector.upsert({ id: a.id, scopeKey: sk, text: canonical, vector: vec });
-        // Reconcile FTS: the vector store is fully deduped (b's vector deleted, a re-upserted), but
-        // `StorePort` has no row-delete primitive, so both ids are re-indexed to the canonical text.
-        // No stale duplicate *content* survives; b.id does remain as a second lexical row carrying the
-        // canonical text (so a lexical search may return both ids for one logical passage). A future
-        // `StorePort.removeMemory` would physically drop b.id — deferred (see changeset).
-        await this.opts.store.indexMemory([
-          { scope, id: a.id, text: canonical },
-          { scope, id: b.id, text: canonical },
-        ]);
-        a.text = canonical;
-        a.vector = vec;
-        merged.add(b.id);
-        mergedCount += 1;
-      }
+      if (opts.signal?.aborted) throw new DOMException("archival dedup aborted", "AbortError");
+      const vec = await embedder.embed(canonical);
+      await vector.delete(b.id, sk);
+      await vector.upsert({ id: a.id, scopeKey: sk, text: canonical, vector: vec });
+      await this.opts.store.indexMemory([{ scope, id: a.id, text: canonical }]);
+      await this.opts.store.deleteMemory(scope, [b.id]);
+      const bCacheKey = memoryCacheKey(sk, b.id);
+      this.metadataStore.delete(bCacheKey);
+      this.ingestedAtStore.delete(bCacheKey);
+      this.textStore.delete(bCacheKey);
+      this.scopedIds.get(sk)?.delete(b.id);
+      this.textStore.set(memoryCacheKey(sk, a.id), canonical);
+      a.text = canonical;
+      a.vector = vec;
+      merged.add(b.id);
+      mergedCount += 1;
     }
-    return { merged: mergedCount, usage };
+    return {
+      merged: mergedCount,
+      usage,
+      comparisons,
+      candidatePairsExamined,
+      comparisonBudget,
+      totalPairs,
+      truncated,
+      mergeBudget,
+      mergeTokenBudget,
+    };
   }
 
   /**
