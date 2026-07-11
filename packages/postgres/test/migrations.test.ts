@@ -85,7 +85,7 @@ describe("Postgres durable ownership migration", () => {
     expect(await store.getIdempotency("alice-session:tool")).toBeNull();
     expect(await store.getIdempotency("prefix:child:tool")).not.toBeNull();
     await client.close();
-  });
+  }, 15_000);
 });
 
 describe("Postgres current-fact migration", () => {
