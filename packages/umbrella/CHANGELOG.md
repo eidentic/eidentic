@@ -1,5 +1,12 @@
 # eidentic
 
+## 1.0.1
+
+### Patch Changes
+
+- Updated dependencies [66dad79]
+  - @eidentic/cli@0.3.0
+
 ## 1.0.0
 
 ### Major Changes
