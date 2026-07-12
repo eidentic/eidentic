@@ -1,5 +1,12 @@
 # create-eidentic
 
+## 0.3.0
+
+### Minor Changes
+
+- 66dad79: Add a directory-first agent project format, safe interactive local chat, deterministic tool
+  discovery, and lifecycle-aware live reload while preserving legacy `eidentic.config.*` projects.
+
 ## 0.2.1
 
 ### Patch Changes
