@@ -1,5 +1,12 @@
 # @eidentic/langfuse
 
+## 0.1.8
+
+### Patch Changes
+
+- Updated dependencies [0461c45]
+  - @eidentic/types@1.1.0
+
 ## 0.1.7
 
 ### Patch Changes

@@ -1,5 +1,12 @@
 # @eidentic/libsql
 
+## 0.3.1
+
+### Patch Changes
+
+- Updated dependencies [0461c45]
+  - @eidentic/types@1.1.0
+
 ## 0.3.0
 
 ### Minor Changes

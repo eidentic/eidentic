@@ -1,6 +1,6 @@
 {
   "name": "@eidentic/qdrant",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "type": "module",
   "license": "Apache-2.0",
   "publishConfig": {

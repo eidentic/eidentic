@@ -1,5 +1,13 @@
 # @eidentic/browser
 
+## 0.2.1
+
+### Patch Changes
+
+- Updated dependencies [0461c45]
+  - @eidentic/core@1.1.0
+  - @eidentic/tools@0.2.1
+
 ## 0.2.0
 
 ### Minor Changes

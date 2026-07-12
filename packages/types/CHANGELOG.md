@@ -1,5 +1,15 @@
 # @eidentic/types
 
+## 1.1.0
+
+### Minor Changes
+
+- 0461c45: Add contextual, least-privilege tool secret capabilities with required-value access and strict
+  declaration validation. Resolved values are now sanitized before tool output, errors, hooks,
+  durable state, events, or model context can observe them. Directory projects automatically wire an
+  environment-backed capability from tool declarations, and `eidentic doctor` reports missing secret
+  names without printing values.
+
 ## 1.0.0
 
 ### Major Changes
