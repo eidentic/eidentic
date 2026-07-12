@@ -285,17 +285,23 @@ describe("loadProject directory mode", () => {
   it("preserves an explicitly configured secret provider", async () => {
     writeFileSync(join(root, "agent", "instructions.md"), "Use configured secrets.");
     writeFileSync(join(root, "agent", "agent.ts"), "export default {};\n");
-    const calls: string[] = [];
+    const api = createTool({
+      id: "custom_api",
+      description: "Use a custom vault",
+      inputSchema: z.object({}),
+      requiredSecrets: ["SERVICE_TOKEN"],
+      execute: async ({ ctx }) => ({ present: Boolean(await ctx!.secrets!.get("SERVICE_TOKEN")) }),
+    });
     const config = await loadProject(resolveProject(root)!, {
       env: { SERVICE_TOKEN: "environment-value" },
       importDirectoryModule: async () => ({
         model: new MockModel([response]),
         store: new InMemoryStore(),
-        secrets: { get: async (ref: string) => { calls.push(ref); return "custom-value"; } },
+        tools: [api],
+        secrets: { get: async () => "custom-value" },
       }),
     });
 
     expect(config.requiredSecrets).toEqual([]);
-    expect(calls).toEqual([]);
   });
 });

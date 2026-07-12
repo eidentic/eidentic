@@ -47,4 +47,18 @@ describe("public boundary sanitation", () => {
     });
     expect(getterRuns).toBe(0);
   });
+
+  it("does not invoke proxy reflection traps", () => {
+    let trapRuns = 0;
+    const value = new Proxy({}, {
+      ownKeys: () => { trapRuns += 1; return ["secret"]; },
+      getOwnPropertyDescriptor: () => {
+        trapRuns += 1;
+        return { configurable: true, enumerable: true, value: "secret-value" };
+      },
+    });
+
+    expect(sanitizeBoundaryValueWithSecrets(value, new Set(["secret-value"]))).toBe("[PROXY]");
+    expect(trapRuns).toBe(0);
+  });
 });

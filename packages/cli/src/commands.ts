@@ -33,7 +33,7 @@ export interface SkillBankLike {
 
 export interface EidenticConfig {
   agents: Record<string, Agent>;
-  /** Secret names declared by directory tools. Values are never stored here. */
+  /** Environment secret names declared by directory tools for name-only diagnostics. */
   requiredSecrets?: readonly string[];
   auth?: AuthPort;
   port?: number;
@@ -573,7 +573,12 @@ export async function loadProject(
       ...(tools.length > 0 ? { tools } : {}),
       ...(secrets !== undefined ? { secrets } : {}),
     });
-    return { agents: { [id]: agent }, requiredSecrets, close: () => definition.store.close() };
+    return {
+      agents: { [id]: agent },
+      // `doctor` can only diagnose the environment-backed default. Custom vaults own diagnostics.
+      requiredSecrets: definition.secrets ? [] : requiredSecrets,
+      close: () => definition.store.close(),
+    };
   } catch (error) {
     await definition.store.close();
     throw error;

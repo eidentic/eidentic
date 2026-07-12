@@ -1,3 +1,5 @@
+import { isProxy } from "node:util/types";
+
 const SECRET_SHAPE = /\b(?:sk|rk|pk)-[A-Za-z0-9_-]{16,}\b/g;
 const BEARER = /\bBearer\s+[^\s,;]+/gi;
 const SECRET_ASSIGNMENT = /\b(api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)=([^\s&#]+)/gi;
@@ -74,6 +76,7 @@ export function sanitizeBoundaryValueWithSecrets(
     if (current === null || typeof current === "number" || typeof current === "boolean" || current === undefined) return current;
     if (typeof current === "bigint") return current.toString();
     if (typeof current !== "object") return `[${typeof current}]`;
+    if (isProxy(current)) return "[PROXY]";
     if (++visited > 10_000) return "[TRUNCATED_NODES]";
     if (depth >= maxDepth) return "[TRUNCATED_DEPTH]";
     if (seen.has(current)) return "[CIRCULAR]";
