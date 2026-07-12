@@ -1,5 +1,23 @@
 # @eidentic/cli
 
+## 0.4.0
+
+### Minor Changes
+
+- 0461c45: Add contextual, least-privilege tool secret capabilities with required-value access and strict
+  declaration validation. Resolved values are now sanitized before tool output, errors, hooks,
+  durable state, events, or model context can observe them. Directory projects automatically wire an
+  environment-backed capability from tool declarations, and `eidentic doctor` reports missing secret
+  names without printing values.
+
+### Patch Changes
+
+- Updated dependencies [0461c45]
+  - @eidentic/core@1.1.0
+  - @eidentic/eval@0.1.8
+  - @eidentic/server@1.0.1
+  - @eidentic/studio@0.3.1
+
 ## 0.3.0
 
 ### Minor Changes

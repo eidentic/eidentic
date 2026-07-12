@@ -1,5 +1,13 @@
 # @eidentic/workflow
 
+## 0.2.4
+
+### Patch Changes
+
+- Updated dependencies [0461c45]
+  - @eidentic/types@1.1.0
+  - @eidentic/core@1.1.0
+
 ## 0.2.3
 
 ### Patch Changes
