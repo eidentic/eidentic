@@ -86,16 +86,17 @@ const callApi = createTool({
   id: "call_api",
   description: "Call an external API using the configured API key.",
   sideEffect: "read-only",
+  requiredSecrets: ["API_KEY"],
   inputSchema: z.object({ endpoint: z.string() }),
   execute: async ({ input, ctx }) => {
     // The tool fetches the secret at call time from ctx — it is NEVER part of the
     // prompt, messages, or any value the model receives or can observe.
-    const apiKey = await ctx?.secrets?.get("API_KEY");
+    const apiKey = await ctx!.secrets!.require("API_KEY");
+    // Use apiKey only in the outbound request; never return it or a partial preview.
+    void apiKey;
     return {
       endpoint: input.endpoint,
-      // Redact in output for demonstration (real code would use the key directly).
-      keyPresent: apiKey !== undefined,
-      keyPreview: apiKey ? `${apiKey.slice(0, 4)}…` : "(missing)",
+      keyPresent: true,
     };
   },
 });

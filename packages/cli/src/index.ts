@@ -40,7 +40,18 @@ const doctorCmd = defineCommand({
     description: "Check environment readiness: Node version, model-provider key, config file.",
   },
   async run() {
-    const report = doctor();
+    let requiredSecrets: readonly string[] = [];
+    const project = resolveProject(process.cwd());
+    if (project?.kind === "directory") {
+      try {
+        const config = await loadProject(project);
+        requiredSecrets = config.requiredSecrets ?? [];
+        await config.close?.();
+      } catch (error) {
+        consola.warn(`Could not inspect directory tool secrets: ${(error as Error).message}`);
+      }
+    }
+    const report = doctor(process.env, process.cwd(), requiredSecrets);
     for (const check of report.checks) {
       if (check.ok) {
         consola.log(`  ${pc.green("✓")} ${check.name}: ${check.detail}`);

@@ -13,6 +13,26 @@ const echo = createTool({
 });
 
 describe("tool registry & dispatch", () => {
+  it("validates and freezes least-privilege secret declarations", () => {
+    const refs = ["API_KEY"];
+    const tool = createTool({
+      id: "secret_tool", description: "uses a secret", requiredSecrets: refs,
+      inputSchema: z.object({}), execute: async () => ({}),
+    });
+    refs.push("LATE_SECRET");
+    expect(tool.requiredSecrets).toEqual(["API_KEY"]);
+    expect(Object.isFrozen(tool.requiredSecrets)).toBe(true);
+
+    expect(() => createTool({
+      id: "bad", description: "bad", requiredSecrets: ["../TOKEN"],
+      inputSchema: z.object({}), execute: async () => ({}),
+    })).toThrow(/invalid secret ref/i);
+    expect(() => createTool({
+      id: "duplicate", description: "duplicate", requiredSecrets: ["TOKEN", "TOKEN"],
+      inputSchema: z.object({}), execute: async () => ({}),
+    })).toThrow(/duplicate secret ref/i);
+  });
+
   it("exposes schemas and dispatches a valid call", async () => {
     const reg = new ToolRegistry([echo]);
     expect(reg.schemas().map((s) => s.name)).toEqual(["echo"]);
@@ -93,6 +113,52 @@ describe("ToolRegistry durable idempotency", () => {
     const rec = await durable.getIdempotency(idempotencyLedgerKey(undefined, "write:a"));
     expect(rec?.status).toBe("applied");
     expect(rec?.result).toEqual({ sent: 1 });
+  });
+
+  it("records only redacted secret-bearing output in the durable ledger", async () => {
+    const durable = await makeDurable();
+    const secret = "durable-secret-value";
+    const tool = createTool({
+      id: "secret_write", description: "writes", sideEffect: "destructive",
+      requiredSecrets: ["TOKEN"], inputSchema: z.object({}),
+      idempotencyKey: () => "one",
+      execute: async ({ ctx }) => ({ response: await ctx!.secrets!.require("TOKEN") }),
+    });
+    const reg = new ToolRegistry([tool], {
+      durable,
+      secrets: { get: async () => secret },
+      sessionId: "secret-session",
+    });
+    const [result] = await reg.dispatch([{ callId: "c1", name: "secret_write", input: {} }]);
+    const stored = await durable.getIdempotency(idempotencyLedgerKey("secret-session", "one"), { sessionId: "secret-session" });
+
+    expect(JSON.stringify(result)).not.toContain(secret);
+    expect(JSON.stringify(stored)).not.toContain(secret);
+    expect(stored?.result).toEqual({ response: "[REDACTED_SECRET]" });
+  });
+
+  it("redacts a legacy cached durable result using the tool's currently declared secrets", async () => {
+    const durable = await makeDurable();
+    const secret = "legacy-durable-credential";
+    const legacyTool = createTool({
+      id: "legacy_secret", description: "old tool", sideEffect: "destructive",
+      inputSchema: z.object({}), idempotencyKey: () => "same",
+      execute: async () => ({ response: secret }),
+    });
+    await new ToolRegistry([legacyTool], { durable, sessionId: "legacy-session" })
+      .dispatch([{ callId: "old", name: "legacy_secret", input: {} }]);
+
+    const hardenedTool = createTool({
+      id: "legacy_secret", description: "new tool", sideEffect: "destructive",
+      requiredSecrets: ["TOKEN"], inputSchema: z.object({}), idempotencyKey: () => "same",
+      execute: async () => { throw new Error("must remain skipped"); },
+    });
+    const [replayed] = await new ToolRegistry([hardenedTool], {
+      durable, sessionId: "legacy-session", secrets: { get: async () => secret },
+    }).dispatch([{ callId: "new", name: "legacy_secret", input: {} }]);
+
+    expect(replayed?.meta?.durableSkipped).toBe(true);
+    expect(replayed?.output).toEqual({ response: "[REDACTED_SECRET]" });
   });
 
   it("skip-on-applied: a second dispatch with the same key returns the cached result WITHOUT executing", async () => {

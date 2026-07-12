@@ -1042,6 +1042,7 @@ export class Agent {
     if (isBaseline) return this.registry;
 
     return new ToolRegistry(filteredTools, {
+      agentId: this.config.id,
       ...(durable ? { durable } : {}),
       ...(permissions ? { permissions } : {}),
       ...(secrets ? { secrets } : {}),

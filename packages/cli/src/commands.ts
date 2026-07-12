@@ -16,7 +16,7 @@ import {
 import { join, resolve, relative, sep, isAbsolute, dirname, extname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createJiti } from "jiti";
-import { Agent, type AgentConfig, type Tool } from "@eidentic/core";
+import { Agent, EnvSecrets, type AgentConfig, type Tool } from "@eidentic/core";
 import type { AuthPort } from "@eidentic/server";
 import { createServer } from "@eidentic/server";
 import type { Hono } from "hono";
@@ -33,6 +33,8 @@ export interface SkillBankLike {
 
 export interface EidenticConfig {
   agents: Record<string, Agent>;
+  /** Environment secret names declared by directory tools for name-only diagnostics. */
+  requiredSecrets?: readonly string[];
   auth?: AuthPort;
   port?: number;
   basePath?: string;
@@ -332,6 +334,7 @@ const PROVIDER_KEYS = [
 export function doctor(
   env: Record<string, string | undefined> = process.env as Record<string, string | undefined>,
   cwd: string = process.cwd(),
+  requiredSecrets: readonly string[] = [],
 ): DoctorReport {
   const checks: DoctorCheck[] = [];
 
@@ -380,6 +383,16 @@ export function doctor(
     detail: dotEnvExists ? `Found ${join(cwd, ".env")}` : `No .env in ${cwd} (optional — set env vars another way)`,
   });
 
+  if (requiredSecrets.length > 0) {
+    const refs = [...new Set(requiredSecrets)].sort((a, b) => a.localeCompare(b, "en"));
+    const missing = refs.filter((ref) => !env[ref]);
+    checks.push({
+      name: "Tool secrets",
+      ok: missing.length === 0,
+      detail: refs.map((ref) => `${ref}: ${env[ref] ? "set" : "missing"}`).join(", "),
+    });
+  }
+
   const ok = checks.every((c) => c.ok);
   return { checks, ok };
 }
@@ -408,6 +421,8 @@ export type DirectoryAgentDefinition = Omit<AgentConfig, "id" | "instructions"> 
 export interface LoadProjectOptions {
   importDirectoryModule?: (modulePath?: string) => Promise<unknown>;
   importToolModule?: (modulePath: string) => Promise<unknown>;
+  /** Environment source for the auto-wired directory secret provider. */
+  env?: Record<string, string | undefined>;
 }
 
 const MAX_INSTRUCTIONS_BYTES = 256 * 1024;
@@ -547,8 +562,23 @@ export async function loadProject(
       if (seenToolIds.has(tool.id)) throw new Error(`Duplicate tool id in directory project: ${tool.id}`);
       seenToolIds.add(tool.id);
     }
-    const agent = new Agent({ ...definition, id, instructions, ...(tools.length > 0 ? { tools } : {}) });
-    return { agents: { [id]: agent }, close: () => definition.store.close() };
+    const requiredSecrets = [...new Set(tools.flatMap((tool) => tool.requiredSecrets))]
+      .sort((a, b) => a.localeCompare(b, "en"));
+    const secrets = definition.secrets
+      ?? (requiredSecrets.length > 0 ? new EnvSecrets(requiredSecrets, opts.env ?? process.env) : undefined);
+    const agent = new Agent({
+      ...definition,
+      id,
+      instructions,
+      ...(tools.length > 0 ? { tools } : {}),
+      ...(secrets !== undefined ? { secrets } : {}),
+    });
+    return {
+      agents: { [id]: agent },
+      // `doctor` can only diagnose the environment-backed default. Custom vaults own diagnostics.
+      requiredSecrets: definition.secrets ? [] : requiredSecrets,
+      close: () => definition.store.close(),
+    };
   } catch (error) {
     await definition.store.close();
     throw error;

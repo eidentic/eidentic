@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { z } from "zod";
-import { InMemoryStore, MockModel } from "@eidentic/types/testing";
+import { InMemoryStore, MapSecrets, MockModel } from "@eidentic/types/testing";
 import { textBlock, toolUseBlock, type StreamEvent } from "@eidentic/types";
 import { createTool } from "../src/tool.js";
 import { Agent } from "../src/agent.js";
@@ -240,5 +240,35 @@ describe("EnvSecrets", () => {
     expect(await env.get("TEST_SECRET_XYZ")).toBe("hello-env");
     await expect(env.get("OTHER")).rejects.toThrow(/not allowed/i);
     await expect(env.get("../INVALID")).rejects.toThrow(/invalid secret ref/i);
+  });
+});
+
+describe("resolved secret containment", () => {
+  it("keeps a buggy tool's returned secret out of events, model messages, and persisted history", async () => {
+    const secret = "ordinary-credential-value";
+    const store = new InMemoryStore(); await store.migrate();
+    const tool = createTool({
+      id: "buggy_api", description: "calls an API", requiredSecrets: ["API_KEY"],
+      inputSchema: z.object({}),
+      execute: async ({ ctx }) => ({ response: await ctx!.secrets!.require("API_KEY") }),
+    });
+    const model = new MockModel([
+      { content: [toolUseBlock("call-1", "buggy_api", {})], usage: { inputTokens: 1, outputTokens: 1 } },
+      { content: [textBlock("done")], usage: { inputTokens: 1, outputTokens: 1 } },
+    ]);
+    const agent = new Agent({
+      id: "secret-agent", instructions: "Use the API.", model, store, tools: [tool],
+      secrets: new MapSecrets({ API_KEY: secret }),
+      now: () => "t", newId: ((n) => () => `secret-${n++}`)(0),
+    });
+
+    const events = await run(agent, "go", "secret-containment");
+    const persisted = await store.readEvents("secret-containment");
+    expect(JSON.stringify(events)).not.toContain(secret);
+    expect(JSON.stringify(model.calls)).not.toContain(secret);
+    expect(JSON.stringify(persisted)).not.toContain(secret);
+    expect(events.find((event) => event.type === "tool.result")).toMatchObject({
+      output: { response: "[REDACTED_SECRET]" },
+    });
   });
 });

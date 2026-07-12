@@ -1,10 +1,10 @@
 import { z } from "zod";
 import { sha256Hex } from "./sha256.js";
-import type { AuditSink, DurablePort, LoggerPort, PermissionDecision, PermissionPolicy, Scope, SecretsPort, SuspendDecision, SuspendRequest, ToolSchema } from "@eidentic/types";
+import type { AuditSink, DurablePort, LoggerPort, PermissionDecision, PermissionPolicy, Scope, SecretAccessContext, SecretCapability, SecretsPort, SuspendDecision, SuspendRequest, ToolSchema } from "@eidentic/types";
 import { canonicalJson, scopeKey } from "@eidentic/types";
 import { evaluatePermission, argScopedDenies, filterToolsForSchema } from "./permission.js";
 import { NoopLogger, envLogger } from "./logger.js";
-import { sanitizeBoundaryText, sanitizeBoundaryValue } from "./boundary.js";
+import { sanitizeBoundaryText, sanitizeBoundaryTextWithSecrets, sanitizeBoundaryValue, sanitizeBoundaryValueWithSecrets } from "./boundary.js";
 
 async function stableArgsHash(input: unknown): Promise<string> {
   return sha256Hex(canonicalJson(input));
@@ -54,7 +54,7 @@ export interface ToolContext {
    * will produce cryptic `TypeError: Cannot read properties of undefined` errors at dispatch time.
    */
   scope?: Scope;
-  secrets?: SecretsPort;
+  secrets?: SecretCapability;
   signal?: AbortSignal;
   /**
    * Human-in-the-loop suspension (§5.7). On the FIRST run this throws a `SuspendSignal` to pause the
@@ -119,7 +119,14 @@ export interface ToolResult {
 }
 
 export function createTool<I, O>(def: ToolDef<I, O>): Tool {
-  const requiredSecrets = Object.freeze([...(def.requiredSecrets ?? [])]);
+  const requiredSecrets = [...(def.requiredSecrets ?? [])];
+  const seenSecretRefs = new Set<string>();
+  for (const ref of requiredSecrets) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(ref)) throw new Error(`invalid secret ref '${ref}'`);
+    if (seenSecretRefs.has(ref)) throw new Error(`duplicate secret ref '${ref}'`);
+    seenSecretRefs.add(ref);
+  }
+  Object.freeze(requiredSecrets);
   return {
     id: def.id,
     description: def.description,
@@ -138,6 +145,8 @@ export function createTool<I, O>(def: ToolDef<I, O>): Tool {
 }
 
 export interface RegistryOpts {
+  /** Owning agent id, used only as immutable secret-access metadata. */
+  agentId?: string;
   durable?: DurablePort;
   permissions?: PermissionPolicy;
   secrets?: SecretsPort;
@@ -193,6 +202,7 @@ export class ToolRegistry {
   private readonly scope?: Scope;
   private readonly signal?: AbortSignal;
   private readonly sessionId?: string;
+  private readonly agentId?: string;
   private readonly logger: LoggerPort;
   private readonly activeSkillAllowedTools?: () => readonly string[] | null;
 
@@ -208,6 +218,7 @@ export class ToolRegistry {
     this.scope = opts?.scope;
     this.signal = opts?.signal;
     this.sessionId = opts?.sessionId;
+    this.agentId = opts?.agentId;
     this.activeSkillAllowedTools = opts?.activeSkillAllowedTools;
     // Default to envLogger so warn/error always surface (e.g. "destructive tool without idempotencyKey").
     // When a logger is explicitly injected (via Agent.buildRegistry), it takes precedence.
@@ -358,10 +369,10 @@ export class ToolRegistry {
     const durable = this.durable;
     const sessionId = this.sessionId;
     const callId = call.callId;
-    const scopedSecrets = this.secretCapabilitiesFor(tool);
+    const secretAccess = this.secretCapabilitiesFor(tool);
     const ctx: ToolContext = {
       ...(this.scope !== undefined ? { scope: this.scope } : {}),
-      ...(scopedSecrets !== undefined ? { secrets: scopedSecrets } : {}),
+      ...(secretAccess !== undefined ? { secrets: secretAccess.capability } : {}),
       ...(this.signal !== undefined ? { signal: this.signal } : {}),
       suspend: async (request: SuspendRequest): Promise<SuspendDecision> => {
         if (!durable || sessionId === undefined) {
@@ -418,12 +429,31 @@ export class ToolRegistry {
               meta: { durableSkipped: true, durablePending: true },
             };
           }
+          if (secretAccess) {
+            try {
+              await secretAccess.resolveDeclared();
+            } catch (error) {
+              return {
+                callId: call.callId,
+                toolName: call.name,
+                isError: true,
+                output: {
+                  error: sanitizeBoundaryTextWithSecrets(
+                    error instanceof Error ? error.message : String(error),
+                    secretAccess.resolvedValues,
+                    500,
+                  ),
+                },
+                meta: { durableSkipped: true },
+              };
+            }
+          }
           this.logger.log("debug", "eidentic:tool", "result", { tool: call.name, ok: true, durableSkipped: true });
           const skipped: ToolResult = {
             callId: call.callId,
             toolName: call.name,
             isError: false,
-            output: sanitizeBoundaryValue(existing.result),
+            output: sanitizeBoundaryValueWithSecrets(existing.result, secretAccess?.resolvedValues ?? new Set()),
             meta: { durableSkipped: true },
           };
           await this.firePostHook(tool.id, parsed.value, skipped, dispatchStart);
@@ -448,7 +478,7 @@ export class ToolRegistry {
         }
 
         try {
-          const r = await this.execOne(call, tool, parsed.value, ctx);
+          const r = await this.execOne(call, tool, parsed.value, ctx, secretAccess?.resolvedValues);
           if (!r.isError) await this.durable.recordCompletion(key, r.output, idempotencyMetadata);
           this.logger.log("debug", "eidentic:tool", "result", { tool: call.name, ok: !r.isError });
           await this.firePostHook(tool.id, parsed.value, r, dispatchStart);
@@ -464,7 +494,7 @@ export class ToolRegistry {
       // Destructive/idempotent tool WITHOUT a key under durable: dispatch normally but mark unprotected (v1 policy).
       if (tool.sideEffect === "destructive") {
         this.logger.log("warn", "eidentic:tool", `destructive tool '${tool.id}' ran under durable execution without an idempotencyKey — exactly-once is NOT guaranteed for it`);
-        const r = await this.execOne(call, tool, parsed.value, ctx);
+        const r = await this.execOne(call, tool, parsed.value, ctx, secretAccess?.resolvedValues);
         this.logger.log("debug", "eidentic:tool", "result", { tool: call.name, ok: !r.isError, durableUnprotected: true });
         const wrapped = { ...r, meta: { ...r.meta, durableUnprotected: true } };
         await this.firePostHook(tool.id, parsed.value, wrapped, dispatchStart);
@@ -472,7 +502,7 @@ export class ToolRegistry {
       }
     }
 
-    const result = await this.execOne(call, tool, parsed.value, ctx);
+    const result = await this.execOne(call, tool, parsed.value, ctx, secretAccess?.resolvedValues);
     this.logger.log("debug", "eidentic:tool", "result", { tool: call.name, ok: !result.isError });
     await this.firePostHook(tool.id, parsed.value, result, dispatchStart);
     return result;
@@ -486,19 +516,50 @@ export class ToolRegistry {
   }
 
   /** Expose only refs declared by this tool; never pass the ambient vault object through. */
-  private secretCapabilitiesFor(tool: Tool): SecretsPort | undefined {
+  private secretCapabilitiesFor(tool: Tool): {
+    capability: SecretCapability;
+    resolvedValues: Set<string>;
+    resolveDeclared(): Promise<void>;
+  } | undefined {
     if (!this.secrets || tool.requiredSecrets.length === 0) return undefined;
     const source = this.secrets;
     const allowed = new Set(tool.requiredSecrets);
+    const resolvedValues = new Set<string>();
+    const cache = new Map<string, string | undefined>();
+    const immutableScope = this.scope === undefined ? undefined : Object.freeze({ ...this.scope }) as Scope;
+    const context: SecretAccessContext = Object.freeze({
+      ...(this.agentId !== undefined ? { agentId: this.agentId } : {}),
+      toolId: tool.id,
+      ...(this.sessionId !== undefined ? { sessionId: this.sessionId } : {}),
+      ...(immutableScope !== undefined ? { scope: immutableScope } : {}),
+    });
+    const get = async (ref: string): Promise<string | undefined> => {
+      if (!allowed.has(ref)) {
+        this.logger.log("warn", "eidentic:secrets", "access denied", { tool: tool.id, ref });
+        throw new Error(`secret capability denied: tool '${tool.id}' did not declare '${ref}'`);
+      }
+      if (cache.has(ref)) return cache.get(ref);
+      const value = await source.get(ref, context);
+      cache.set(ref, value);
+      if (value !== undefined && value !== "") resolvedValues.add(value);
+      this.logger.log("debug", "eidentic:secrets", "access", { tool: tool.id, ref, found: value !== undefined });
+      return value;
+    };
+    const requireSecret = async (ref: string): Promise<string> => {
+      const value = await get(ref);
+      if (value === undefined || value === "") {
+        throw new Error(`required secret '${ref}' is not configured`);
+      }
+      return value;
+    };
     return {
-      get: async (ref: string): Promise<string | undefined> => {
-        if (!allowed.has(ref)) {
-          this.logger.log("warn", "eidentic:secrets", "access denied", { tool: tool.id, ref });
-          throw new Error(`secret capability denied: tool '${tool.id}' did not declare '${ref}'`);
-        }
-        const value = await source.get(ref);
-        this.logger.log("debug", "eidentic:secrets", "access", { tool: tool.id, ref, found: value !== undefined });
-        return value;
+      resolvedValues,
+      resolveDeclared: async () => {
+        await Promise.all(tool.requiredSecrets.map((ref) => requireSecret(ref)));
+      },
+      capability: {
+        get,
+        require: requireSecret,
       },
     };
   }
@@ -558,13 +619,19 @@ export class ToolRegistry {
     }
   }
 
-  private async execOne(call: ToolCall, tool: Tool, value: unknown, ctx: ToolContext): Promise<ToolResult> {
+  private async execOne(
+    call: ToolCall,
+    tool: Tool,
+    value: unknown,
+    ctx: ToolContext,
+    resolvedSecrets: ReadonlySet<string> = new Set(),
+  ): Promise<ToolResult> {
     try {
-      const output = sanitizeBoundaryValue(await tool.execute(value, ctx));
+      const output = sanitizeBoundaryValueWithSecrets(await tool.execute(value, ctx), resolvedSecrets);
       return { callId: call.callId, toolName: call.name, isError: false, output };
     } catch (e) {
       if (e instanceof SuspendSignal) throw e; // §5.7: NOT a tool error — propagate to the loop.
-      const error = sanitizeBoundaryText(e instanceof Error ? e.message : String(e), 500);
+      const error = sanitizeBoundaryTextWithSecrets(e instanceof Error ? e.message : String(e), resolvedSecrets, 500);
       return { callId: call.callId, toolName: call.name, isError: true, output: { error } };
     }
   }
