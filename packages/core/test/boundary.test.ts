@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { sanitizeBoundaryText, sanitizeBoundaryValue } from "../src/boundary.js";
+import { sanitizeBoundaryText, sanitizeBoundaryValue, sanitizeBoundaryValueWithSecrets } from "../src/boundary.js";
 
 describe("public boundary sanitation", () => {
   it("redacts nested credential keys and credential-shaped strings", () => {
@@ -31,5 +31,20 @@ describe("public boundary sanitation", () => {
     const value: Record<string, unknown> = {};
     value["self"] = value;
     expect(sanitizeBoundaryValue(value)).toEqual({ self: "[CIRCULAR]" });
+  });
+
+  it("redacts resolved values without invoking getters", () => {
+    let getterRuns = 0;
+    const value = {
+      exact: "1234",
+      embedded: "before ordinary-credential-value after",
+      get dangerous() { getterRuns += 1; return "ordinary-credential-value"; },
+    };
+    expect(sanitizeBoundaryValueWithSecrets(value, new Set(["1234", "ordinary-credential-value"]))).toEqual({
+      exact: "[REDACTED_SECRET]",
+      embedded: "before [REDACTED_SECRET] after",
+      dangerous: "[ACCESSOR]",
+    });
+    expect(getterRuns).toBe(0);
   });
 });

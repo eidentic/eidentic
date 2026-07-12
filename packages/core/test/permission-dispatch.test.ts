@@ -427,9 +427,48 @@ describe("ToolContext injection", () => {
     const reg = new ToolRegistry([t], { secrets });
     const [r] = await reg.dispatch([{ callId: "c1", name: "api_call", input: {} }]);
     expect(r!.isError).toBe(false);
-    expect((r!.output as { key: string }).key).toBe("sk-123");
+    expect((r!.output as { key: string }).key).toBe("[REDACTED_SECRET]");
     expect(capturedCtx?.secrets).toBeDefined();
     expect(capturedCtx?.secrets).not.toBe(secrets);
+  });
+
+  it("redacts resolved secrets from nested outputs, errors, and post-tool hooks", async () => {
+    const hookOutputs: unknown[] = [];
+    const secrets = new MapSecrets({ LONG_SECRET: "credential-value-123", SHORT_PIN: "1234" });
+    const outputTool = createTool({
+      id: "leaky_output", description: "buggy output", requiredSecrets: ["LONG_SECRET", "SHORT_PIN"],
+      inputSchema: z.object({}),
+      execute: async ({ ctx }) => {
+        const long = await ctx!.secrets!.require("LONG_SECRET");
+        const short = await ctx!.secrets!.require("SHORT_PIN");
+        return { exact: short, nested: [`prefix ${long} suffix`], lookalike: "12345" };
+      },
+    });
+    const errorTool = createTool({
+      id: "leaky_error", description: "buggy error", requiredSecrets: ["LONG_SECRET"],
+      inputSchema: z.object({}),
+      execute: async ({ ctx }) => {
+        const secret = await ctx!.secrets!.require("LONG_SECRET");
+        throw new Error(`upstream rejected ${secret}`);
+      },
+    });
+    const reg = new ToolRegistry([outputTool, errorTool], {
+      secrets,
+      onPostToolUse: ({ output }) => { hookOutputs.push(output); },
+    });
+    const results = await reg.dispatch([
+      { callId: "c1", name: "leaky_output", input: {} },
+      { callId: "c2", name: "leaky_error", input: {} },
+    ]);
+
+    expect(results[0]!.output).toEqual({
+      exact: "[REDACTED_SECRET]",
+      nested: ["prefix [REDACTED_SECRET] suffix"],
+      lookalike: "12345",
+    });
+    expect(JSON.stringify(results)).not.toContain("credential-value-123");
+    expect(JSON.stringify(results)).not.toContain('"1234"');
+    expect(JSON.stringify(hookOutputs)).not.toContain("credential-value-123");
   });
 
   it("tool secret capabilities deny undeclared refs and omit ambient access", async () => {

@@ -6,7 +6,7 @@ export { Agent } from "./agent.js";
 export type { AgentConfig, MultimodalPolicy, QueryOptions, QueryPrincipal, GuardrailInput, SubAgent, TreeBudget, EraseScopeResult } from "./agent.js";
 export type { ModelResponseLimits } from "./loop.js";
 export { credentialFingerprint, fingerprintSessionOwner, matchesSessionOwner } from "./session.js";
-export { sanitizeBoundaryText, sanitizeBoundaryValue } from "./boundary.js";
+export { sanitizeBoundaryText, sanitizeBoundaryTextWithSecrets, sanitizeBoundaryValue, sanitizeBoundaryValueWithSecrets } from "./boundary.js";
 export { createTool, ToolRegistry, SuspendSignal } from "./tool.js";
 export type { Tool, ToolDef, ToolCall, ToolResult, SideEffect, ToolContext, RegistryOpts } from "./tool.js";
 export { memoryTools, isEditableMemory } from "./memory-tools.js";
