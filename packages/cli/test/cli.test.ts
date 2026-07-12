@@ -98,6 +98,20 @@ describe("doctor()", () => {
       expect(typeof check.detail).toBe("string");
     }
   });
+
+  it("reports declared tool secrets by name without exposing values", () => {
+    const report = doctor(
+      { ANTHROPIC_API_KEY: "provider-value", PRESENT_TOKEN: "sensitive-value" },
+      "/tmp/nonexistent-xyz",
+      ["PRESENT_TOKEN", "MISSING_TOKEN"],
+    );
+    const check = report.checks.find((item) => item.name === "Tool secrets");
+
+    expect(check).toMatchObject({ ok: false });
+    expect(check?.detail).toContain("PRESENT_TOKEN: set");
+    expect(check?.detail).toContain("MISSING_TOKEN: missing");
+    expect(check?.detail).not.toContain("sensitive-value");
+  });
 });
 
 // ---------------------------------------------------------------------------

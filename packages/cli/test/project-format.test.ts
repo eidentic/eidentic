@@ -249,4 +249,53 @@ describe("loadProject directory mode", () => {
     expect(events.some((event) => event.type === "tool.result")).toBe(true);
     expect(events.at(-1)).toMatchObject({ type: "result", output: "done" });
   });
+
+  it("auto-wires only secrets declared by directory tools", async () => {
+    mkdirSync(join(root, "agent", "tools"));
+    writeFileSync(join(root, "agent", "instructions.md"), "Use the API tool.");
+    writeFileSync(join(root, "agent", "agent.ts"), "export default {};\n");
+    writeFileSync(join(root, "agent", "tools", "api.ts"), "export default {};\n");
+    const api = createTool({
+      id: "api",
+      description: "Use an API credential",
+      inputSchema: z.object({}),
+      requiredSecrets: ["SERVICE_TOKEN"],
+      execute: async ({ ctx }) => ({ token: await ctx!.secrets!.require("SERVICE_TOKEN") }),
+    });
+    const model = new MockModel([
+      { content: [toolUseBlock("call-1", "api", {})], usage: { inputTokens: 1, outputTokens: 1 } },
+      { content: [textBlock("done")], usage: { inputTokens: 1, outputTokens: 1 } },
+    ]);
+    const config = await loadProject(resolveProject(root)!, {
+      env: { SERVICE_TOKEN: "directory-secret", UNDECLARED_TOKEN: "must-not-be-exposed" },
+      importDirectoryModule: async () => ({ model, store: new InMemoryStore() }),
+      importToolModule: async () => api,
+    });
+
+    const events = [];
+    for await (const event of config.agents.agent!.query("call", { sessionId: "secret" })) events.push(event);
+
+    expect(config.requiredSecrets).toEqual(["SERVICE_TOKEN"]);
+    expect(JSON.stringify(events)).not.toContain("directory-secret");
+    expect(events.find((event) => event.type === "tool.result")).toMatchObject({
+      output: { token: "***" },
+    });
+  });
+
+  it("preserves an explicitly configured secret provider", async () => {
+    writeFileSync(join(root, "agent", "instructions.md"), "Use configured secrets.");
+    writeFileSync(join(root, "agent", "agent.ts"), "export default {};\n");
+    const calls: string[] = [];
+    const config = await loadProject(resolveProject(root)!, {
+      env: { SERVICE_TOKEN: "environment-value" },
+      importDirectoryModule: async () => ({
+        model: new MockModel([response]),
+        store: new InMemoryStore(),
+        secrets: { get: async (ref: string) => { calls.push(ref); return "custom-value"; } },
+      }),
+    });
+
+    expect(config.requiredSecrets).toEqual([]);
+    expect(calls).toEqual([]);
+  });
 });

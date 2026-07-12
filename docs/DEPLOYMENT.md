@@ -173,8 +173,28 @@ LIBSQL_TOKEN=...
 DATABASE_URL=postgresql://user:pass@host:5432/db
 ```
 
-Eidentic's `EnvSecrets` adapter (used by default) reads secrets from
-`process.env` at call time and **never surfaces them to the model**.
+For directory projects, declare each tool credential once and Eidentic automatically creates an
+environment-backed, per-tool capability containing only those names:
+
+```ts
+export default createTool({
+  id: "billing_lookup",
+  description: "Look up a billing record",
+  inputSchema: z.object({ id: z.string() }),
+  requiredSecrets: ["BILLING_API_KEY"],
+  execute: async ({ input, ctx }) => {
+    const apiKey = await ctx!.secrets!.require("BILLING_API_KEY");
+    // Send apiKey to the service, but never return or log it.
+    return lookupBilling(input.id, apiKey);
+  },
+});
+```
+
+Run `eidentic doctor` to see which declared secret **names** are set or missing. Values are never
+printed. Programmatic configs opt in with `secrets: new EnvSecrets(["BILLING_API_KEY"])`, or supply
+a custom `SecretsPort` backed by your production vault. Resolved values are redacted at the tool
+boundary before output reaches events, hooks, durable state, or the model; this safety net does not
+replace careful tool code or a real production secret manager.
 
 ---
 
