@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { sha256Hex } from "./sha256.js";
-import type { AuditSink, DurablePort, LoggerPort, PermissionDecision, PermissionPolicy, Scope, SecretsPort, SuspendDecision, SuspendRequest, ToolSchema } from "@eidentic/types";
+import type { AuditSink, DurablePort, LoggerPort, PermissionDecision, PermissionPolicy, Scope, SecretAccessContext, SecretCapability, SecretsPort, SuspendDecision, SuspendRequest, ToolSchema } from "@eidentic/types";
 import { canonicalJson, scopeKey } from "@eidentic/types";
 import { evaluatePermission, argScopedDenies, filterToolsForSchema } from "./permission.js";
 import { NoopLogger, envLogger } from "./logger.js";
@@ -54,7 +54,7 @@ export interface ToolContext {
    * will produce cryptic `TypeError: Cannot read properties of undefined` errors at dispatch time.
    */
   scope?: Scope;
-  secrets?: SecretsPort;
+  secrets?: SecretCapability;
   signal?: AbortSignal;
   /**
    * Human-in-the-loop suspension (§5.7). On the FIRST run this throws a `SuspendSignal` to pause the
@@ -119,7 +119,14 @@ export interface ToolResult {
 }
 
 export function createTool<I, O>(def: ToolDef<I, O>): Tool {
-  const requiredSecrets = Object.freeze([...(def.requiredSecrets ?? [])]);
+  const requiredSecrets = [...(def.requiredSecrets ?? [])];
+  const seenSecretRefs = new Set<string>();
+  for (const ref of requiredSecrets) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(ref)) throw new Error(`invalid secret ref '${ref}'`);
+    if (seenSecretRefs.has(ref)) throw new Error(`duplicate secret ref '${ref}'`);
+    seenSecretRefs.add(ref);
+  }
+  Object.freeze(requiredSecrets);
   return {
     id: def.id,
     description: def.description,
@@ -138,6 +145,8 @@ export function createTool<I, O>(def: ToolDef<I, O>): Tool {
 }
 
 export interface RegistryOpts {
+  /** Owning agent id, used only as immutable secret-access metadata. */
+  agentId?: string;
   durable?: DurablePort;
   permissions?: PermissionPolicy;
   secrets?: SecretsPort;
@@ -193,6 +202,7 @@ export class ToolRegistry {
   private readonly scope?: Scope;
   private readonly signal?: AbortSignal;
   private readonly sessionId?: string;
+  private readonly agentId?: string;
   private readonly logger: LoggerPort;
   private readonly activeSkillAllowedTools?: () => readonly string[] | null;
 
@@ -208,6 +218,7 @@ export class ToolRegistry {
     this.scope = opts?.scope;
     this.signal = opts?.signal;
     this.sessionId = opts?.sessionId;
+    this.agentId = opts?.agentId;
     this.activeSkillAllowedTools = opts?.activeSkillAllowedTools;
     // Default to envLogger so warn/error always surface (e.g. "destructive tool without idempotencyKey").
     // When a logger is explicitly injected (via Agent.buildRegistry), it takes precedence.
@@ -486,18 +497,33 @@ export class ToolRegistry {
   }
 
   /** Expose only refs declared by this tool; never pass the ambient vault object through. */
-  private secretCapabilitiesFor(tool: Tool): SecretsPort | undefined {
+  private secretCapabilitiesFor(tool: Tool): SecretCapability | undefined {
     if (!this.secrets || tool.requiredSecrets.length === 0) return undefined;
     const source = this.secrets;
     const allowed = new Set(tool.requiredSecrets);
-    return {
-      get: async (ref: string): Promise<string | undefined> => {
+    const immutableScope = this.scope === undefined ? undefined : Object.freeze({ ...this.scope }) as Scope;
+    const context: SecretAccessContext = Object.freeze({
+      ...(this.agentId !== undefined ? { agentId: this.agentId } : {}),
+      toolId: tool.id,
+      ...(this.sessionId !== undefined ? { sessionId: this.sessionId } : {}),
+      ...(immutableScope !== undefined ? { scope: immutableScope } : {}),
+    });
+    const get = async (ref: string): Promise<string | undefined> => {
         if (!allowed.has(ref)) {
           this.logger.log("warn", "eidentic:secrets", "access denied", { tool: tool.id, ref });
           throw new Error(`secret capability denied: tool '${tool.id}' did not declare '${ref}'`);
         }
-        const value = await source.get(ref);
+        const value = await source.get(ref, context);
         this.logger.log("debug", "eidentic:secrets", "access", { tool: tool.id, ref, found: value !== undefined });
+        return value;
+    };
+    return {
+      get,
+      require: async (ref: string): Promise<string> => {
+        const value = await get(ref);
+        if (value === undefined || value === "") {
+          throw new Error(`required secret '${ref}' is not configured`);
+        }
         return value;
       },
     };

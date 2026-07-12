@@ -28,9 +28,23 @@ export interface PermissionPolicy {
   default?: PermissionDecision;
 }
 
+/** Immutable metadata supplied to a vault for tenant-aware policy and auditing. */
+export interface SecretAccessContext {
+  agentId?: string;
+  sessionId?: string;
+  toolId: string;
+  scope?: Scope;
+}
+
 /** Credential vault: the model never sees secrets; tools fetch them at call time (§10.3). */
 export interface SecretsPort {
+  get(ref: string, context?: SecretAccessContext): Promise<string | undefined>;
+}
+
+/** Per-tool least-privilege view over a SecretsPort. It has no enumeration or ambient access. */
+export interface SecretCapability {
   get(ref: string): Promise<string | undefined>;
+  require(ref: string): Promise<string>;
 }
 
 /** Result of running code in a `SandboxPort`. `exitCode` 0 = success; non-zero = failure. */

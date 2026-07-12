@@ -375,6 +375,42 @@ describe("Fix 2 — malformed deny patterns fail-safe (empty argGlob → match-a
 // ─── ctx injection (secrets + scope) ─────────────────────────────────────────
 
 describe("ToolContext injection", () => {
+  it("passes immutable access context to the vault and require fails clearly when missing", async () => {
+    const contexts: unknown[] = [];
+    const secrets = {
+      async get(ref: string, context?: unknown) {
+        contexts.push(context);
+        return ref === "PRESENT" ? "available-value" : undefined;
+      },
+    };
+    const tool = createTool({
+      id: "contextual", description: "uses contextual secrets", requiredSecrets: ["PRESENT", "MISSING"],
+      inputSchema: z.object({}),
+      execute: async ({ ctx }) => {
+        expect(await ctx!.secrets!.require("PRESENT")).toBe("available-value");
+        await expect(ctx!.secrets!.require("MISSING")).rejects.toThrow(/required secret.*MISSING.*not configured/i);
+        return { ok: true };
+      },
+    });
+    const reg = new ToolRegistry([tool], {
+      agentId: "agent-1",
+      secrets,
+      sessionId: "session-1",
+      scope: { kind: "user", agentId: "agent-1", userId: "user-1" },
+    });
+    await reg.dispatch([{ callId: "c1", name: "contextual", input: {} }]);
+
+    expect(contexts).toHaveLength(2);
+    expect(contexts[0]).toEqual({
+      agentId: "agent-1",
+      toolId: "contextual",
+      sessionId: "session-1",
+      scope: { kind: "user", agentId: "agent-1", userId: "user-1" },
+    });
+    expect(Object.isFrozen(contexts[0])).toBe(true);
+    expect(Object.isFrozen((contexts[0] as { scope: unknown }).scope)).toBe(true);
+  });
+
   it("tool receives ctx.secrets from the registry config", async () => {
     let capturedCtx: ToolContext | undefined;
     const t = createTool({

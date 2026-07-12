@@ -13,6 +13,26 @@ const echo = createTool({
 });
 
 describe("tool registry & dispatch", () => {
+  it("validates and freezes least-privilege secret declarations", () => {
+    const refs = ["API_KEY"];
+    const tool = createTool({
+      id: "secret_tool", description: "uses a secret", requiredSecrets: refs,
+      inputSchema: z.object({}), execute: async () => ({}),
+    });
+    refs.push("LATE_SECRET");
+    expect(tool.requiredSecrets).toEqual(["API_KEY"]);
+    expect(Object.isFrozen(tool.requiredSecrets)).toBe(true);
+
+    expect(() => createTool({
+      id: "bad", description: "bad", requiredSecrets: ["../TOKEN"],
+      inputSchema: z.object({}), execute: async () => ({}),
+    })).toThrow(/invalid secret ref/i);
+    expect(() => createTool({
+      id: "duplicate", description: "duplicate", requiredSecrets: ["TOKEN", "TOKEN"],
+      inputSchema: z.object({}), execute: async () => ({}),
+    })).toThrow(/duplicate secret ref/i);
+  });
+
   it("exposes schemas and dispatches a valid call", async () => {
     const reg = new ToolRegistry([echo]);
     expect(reg.schemas().map((s) => s.name)).toEqual(["echo"]);
