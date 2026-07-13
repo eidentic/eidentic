@@ -116,8 +116,8 @@
   },
   "devDependencies": {
     "@edge-runtime/vm": "^5.0.0",
-    "convex": "^1.41.0",
-    "convex-test": "^0.0.53"
+    "convex": "^1.42.1",
+    "convex-test": "^0.0.54"
   },
   "description": "Convex store adapter for Eidentic — durable agent memory, session state, and a temporal knowledge graph backed by Convex (StorePort + GraphPort + VectorPort).",
   "keywords": [
