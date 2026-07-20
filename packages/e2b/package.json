@@ -48,7 +48,7 @@
     }
   },
   "devDependencies": {
-    "@e2b/code-interpreter": "^2.6.0"
+    "@e2b/code-interpreter": "^2.6.1"
   },
   "description": "E2B Firecracker sandbox adapter for Eidentic — run untrusted code in isolated microVMs via the E2B API.",
   "keywords": [

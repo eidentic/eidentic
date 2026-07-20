@@ -38,7 +38,7 @@
   },
   "dependencies": {
     "@eidentic/core": "workspace:*",
-    "hono": "^4.12.25",
+    "hono": "^4.12.31",
     "zod": "^4.0.0"
   },
   "description": "Agent-to-Agent (A2A) interoperability for Eidentic — expose an agent as an A2A endpoint or call a remote A2A agent as a tool.",
