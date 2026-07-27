@@ -32,7 +32,7 @@
     "typecheck:templates": "tsc --noEmit -p tsconfig.templates.json"
   },
   "dependencies": {
-    "@clack/prompts": "^1.5.1",
+    "@clack/prompts": "^1.7.0",
     "@eidentic/core": "workspace:*",
     "@eidentic/eval": "workspace:*",
     "@eidentic/server": "workspace:*",
@@ -47,8 +47,8 @@
     "@eidentic/skills": "workspace:^",
     "@eidentic/types": "workspace:*",
     "@types/react": "^19.0.0",
-    "hono": "^4.12.25",
-    "react": "^19.0.0",
+    "hono": "^4.12.32",
+    "react": "^19.2.8",
     "zod": "^4.0.0"
   },
   "keywords": [

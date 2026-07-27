@@ -49,7 +49,7 @@
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.4.6",
-    "pg": "^8.21.0",
+    "pg": "^8.22.0",
     "@types/pg": "^8.11.0"
   },
   "description": "PostgreSQL store adapter for Eidentic — durable agent memory, sessions, facts, and durable-execution state over pg / pglite.",
