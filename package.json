@@ -23,12 +23,12 @@
     "release": "pnpm run release:publish"
   },
   "devDependencies": {
-    "@changesets/cli": "^2.31.0",
-    "turbo": "^2.9.18",
+    "@changesets/cli": "^2.31.1",
+    "turbo": "^2.10.7",
     "typescript": "^5.9.0",
     "tsup": "^8.3.0",
-    "vitest": "^4.1.9",
+    "vitest": "^4.1.10",
     "vite": "^6.0.0",
-    "@types/node": "^22.19.21"
+    "@types/node": "^22.20.1"
   }
 }
