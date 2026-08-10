@@ -39,15 +39,15 @@
     "@eidentic/server": "workspace:*",
     "@eidentic/types": "workspace:*",
     "@eidentic/workflow": "workspace:*",
-    "@hono/node-server": "^2.0.5",
-    "hono": "^4.12.25"
+    "@hono/node-server": "^2.1.0",
+    "hono": "^4.13.1"
   },
   "devDependencies": {
-    "@types/react": "^19.1.0",
-    "@types/react-dom": "^19.1.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
     "@vitejs/plugin-react": "^4.5.2",
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
     "vite": "^6.3.5"
   },
   "description": "Local dev studio for Eidentic — inspect agent sessions, memory, skills, and workflow runs via a web dashboard.",

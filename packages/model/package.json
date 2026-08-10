@@ -34,11 +34,11 @@
   },
   "dependencies": {
     "@eidentic/types": "workspace:*",
-    "ai": "^7.0.2"
+    "ai": "^7.0.56"
   },
   "devDependencies": {
-    "@ai-sdk/anthropic": "^4.0.0",
-    "tsx": "^4.19.0"
+    "@ai-sdk/anthropic": "^4.0.34",
+    "tsx": "^4.23.10"
   },
   "description": "Model and embedder wrappers for Eidentic — AIModel and AIEmbedder over AI SDK providers, with live price tables and Ollama support.",
   "keywords": [
