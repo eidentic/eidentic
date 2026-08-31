@@ -49,7 +49,7 @@
     }
   },
   "devDependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "zod": "^4.0.0"
   },
   "description": "Model Context Protocol (MCP) host and server for Eidentic — expose agent tools via MCP, or consume remote MCP servers, with OAuth 2.1 support.",

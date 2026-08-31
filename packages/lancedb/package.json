@@ -38,7 +38,7 @@
   },
   "dependencies": {
     "@eidentic/types": "workspace:*",
-    "@lancedb/lancedb": "^0.30.0",
+    "@lancedb/lancedb": "^0.37.1",
     "apache-arrow": "^18.1.0"
   },
   "description": "LanceDB vector store adapter for Eidentic — high-performance local/embedded vector search for agent memory.",

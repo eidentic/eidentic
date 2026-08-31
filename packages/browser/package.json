@@ -50,7 +50,7 @@
     }
   },
   "devDependencies": {
-    "playwright-core": "^1.61.0"
+    "playwright-core": "^1.62.1"
   },
   "description": "Tenant-run-isolated browser automation for Eidentic with ephemeral Playwright-compatible contexts and guarded egress.",
   "keywords": [
