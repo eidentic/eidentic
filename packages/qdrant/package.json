@@ -48,7 +48,7 @@
     }
   },
   "devDependencies": {
-    "@qdrant/js-client-rest": "^1.18.0"
+    "@qdrant/js-client-rest": "^1.19.0"
   },
   "description": "Qdrant vector store adapter for Eidentic — fast ANN search for agent memory using a Qdrant-compatible API.",
   "keywords": [

@@ -39,7 +39,7 @@
   "dependencies": {
     "@eidentic/core": "workspace:*",
     "@eidentic/types": "workspace:*",
-    "zod": "^4.0.0"
+    "zod": "^4.5.4"
   },
   "description": "Built-in agent tools for Eidentic — file I/O, bash execution, web fetch, web search (Tavily / Exa / Serper / SearXNG), and sandbox confinement.",
   "keywords": [

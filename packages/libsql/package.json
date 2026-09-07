@@ -38,7 +38,7 @@
   },
   "dependencies": {
     "@eidentic/types": "workspace:*",
-    "@libsql/client": "^0.17.4"
+    "@libsql/client": "^0.18.0"
   },
   "description": "LibSQL / Turso store adapter for Eidentic — durable agent memory and session state over libSQL (edge-compatible, no native addon).",
   "keywords": [
