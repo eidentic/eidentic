@@ -39,7 +39,7 @@
   "dependencies": {
     "@eidentic/core": "workspace:*",
     "@eidentic/tools": "workspace:*",
-    "zod": "^4.0.0"
+    "zod": "^4.5.4"
   },
   "peerDependencies": {
     "playwright-core": ">=1.40"
@@ -50,7 +50,7 @@
     }
   },
   "devDependencies": {
-    "playwright-core": "^1.61.0"
+    "playwright-core": "^1.62.1"
   },
   "description": "Tenant-run-isolated browser automation for Eidentic with ephemeral Playwright-compatible contexts and guarded egress.",
   "keywords": [
