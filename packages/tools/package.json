@@ -39,9 +39,10 @@
   "dependencies": {
     "@eidentic/core": "workspace:*",
     "@eidentic/types": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "zod": "^4.0.0"
   },
-  "description": "Built-in agent tools for Eidentic — file I/O, bash execution, web fetch, web search (Tavily / Exa / Serper / SearXNG), and sandbox confinement.",
+  "description": "Built-in agent tools for Eidentic — file I/O, bash execution, web fetch, web search (Parallel / Tavily / Exa / Serper / SearXNG), and sandbox confinement.",
   "keywords": [
     "ai",
     "agents",

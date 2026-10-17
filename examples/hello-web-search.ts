@@ -4,8 +4,7 @@
  * Shows:
  *   1. A fake WebSearchPort (canned results) wired into a MockModel agent — web_search
  *      tool call flows end-to-end through dispatch and produces results.
- *   2. webSearchFromEnv returning null with an empty env — the tool returns the helpful
- *      unconfigured message instead of throwing.
+ *   2. Explicit search disable; webSearchFromEnv still returns null for an empty env.
  *   3. The env auto-detect priority: TAVILY_API_KEY > EXA_API_KEY > SERPER_API_KEY > SEARXNG_URL.
  *
  * Infra-free — no real API keys required. Run:  pnpm hello:web-search
@@ -81,47 +80,13 @@ for await (const ev of agent.query("What is Eidentic?", { sessionId: "s1" })) {
 }
 
 // ---------------------------------------------------------------------------
-// PART 2 — webSearchFromEnv with empty env → null; tool returns helpful message
+// PART 2 — explicit search disable (the no-key default is now Parallel MCP)
 // ---------------------------------------------------------------------------
 
-console.log("\n=== PART 2: webSearchFromEnv with empty env ===");
-
-const noProvider = webSearchFromEnv({} /* empty env — no keys */);
-console.log("webSearchFromEnv({}) →", noProvider); // null
-
-// The tool itself is still present by default — it just returns a helpful message.
-const unconfiguredTools = webTools({
-  allowlist: [],
-  fetchImpl: dummyFetch,
-  // no searchProvider, no search fn, empty env (via mocked process.env patch)
-});
-const webSearch = unconfiguredTools.find((t) => t.id === "web_search")!;
-console.log("web_search tool present:", webSearch !== undefined);
-
-// Temporarily clear env keys so env auto-detect yields null
-const saved = {
-  TAVILY_API_KEY: process.env["TAVILY_API_KEY"],
-  EXA_API_KEY: process.env["EXA_API_KEY"],
-  SERPER_API_KEY: process.env["SERPER_API_KEY"],
-  SEARXNG_URL: process.env["SEARXNG_URL"],
-};
-delete process.env["TAVILY_API_KEY"];
-delete process.env["EXA_API_KEY"];
-delete process.env["SERPER_API_KEY"];
-delete process.env["SEARXNG_URL"];
-
-const unconfiguredOut = (await webSearch.execute({ query: "anything" })) as {
-  configured?: boolean;
-  message?: string;
-};
-console.log("\nunconfigured tool output:");
-console.log("  configured:", unconfiguredOut.configured); // false
-console.log("  message:", unconfiguredOut.message);
-
-// Restore env
-for (const [k, v] of Object.entries(saved)) {
-  if (v !== undefined) process.env[k] = v;
-}
+console.log("\n=== PART 2: explicit search disable ===");
+console.log("webSearchFromEnv({}) →", webSearchFromEnv({})); // null: no configured env provider
+const disabledTools = webTools({ allowlist: [], webSearch: false });
+console.log("web_search tool present:", disabledTools.some((tool) => tool.id === "web_search")); // false
 
 // ---------------------------------------------------------------------------
 // PART 3 — env auto-detect priority demonstration

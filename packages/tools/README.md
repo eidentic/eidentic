@@ -1,7 +1,7 @@
 # @eidentic/tools
 
 Built-in agent tools for Eidentic — file read/write/list, bash command execution,
-resilient HTTP fetch, web search (Tavily / Exa / Serper / SearXNG), and a sandbox
+resilient HTTP fetch, web search (Parallel / Tavily / Exa / Serper / SearXNG), and a sandbox
 confinement helper. All tools respect Eidentic's deny-by-default permission model.
 
 ## Install
@@ -13,7 +13,7 @@ pnpm add @eidentic/tools
 ## Usage
 
 ```ts
-import { fileTools, bashTool, webTools, webSearchFromEnv } from "@eidentic/tools";
+import { fileTools, bashTool, webTools } from "@eidentic/tools";
 import { Agent, NoopSandbox } from "eidentic";
 
 const agent = new Agent({
@@ -26,7 +26,6 @@ const agent = new Agent({
     bashTool(new NoopSandbox()),            // bash (swap NoopSandbox for a real sandbox)
     ...webTools({
       allowlist: ["docs.example.com"],
-      searchProvider: webSearchFromEnv() ?? undefined,
     }), // web_fetch, web_search
   ],
   // Deny-by-default: only the tools above are available
@@ -48,14 +47,35 @@ The same boundary is available to adapters through `assertSafeEgressUrl`, `safeF
 
 ### Web search providers
 
-`webSearchFromEnv()` picks a provider from environment variables:
+`webTools()` uses free [Parallel Search MCP](https://docs.parallel.ai/integrations/mcp/search-mcp)
+when no search provider is configured. Search runs in anonymous Fast mode without an
+account or API key. Queries are sent to `https://search.parallel.ai/mcp` only when the
+agent invokes `web_search`; registering the tools makes no network request. Results keep
+the existing `{ title, url, snippet }` shape. Anonymous service limits apply; provider and
+transport failures return `{ error }` without switching providers.
+
+Resolution order is `searchProvider`, the legacy `search` callback, environment providers
+below, then Parallel. Explicit providers and configured credentials retain their precedence.
+`webSearchFromEnv()` continues to return `null` when no environment provider is configured.
+For an explicit Parallel provider, use `parallelSearch({ timeoutMs: 10_000 })` as
+`searchProvider`; its deadline covers MCP connection, tool discovery and search. Cancellation
+from the agent is forwarded to those requests. `maxResults` (1–20, default 5) limits the
+returned results locally.
+
+**Migration:** previously an enabled, unconfigured `web_search` returned
+`{ configured: false, message }`. It now searches with Parallel. Set `webSearch: false` to
+exclude search, deny `web_search` in the agent's permission policy to prevent execution, or
+supply your chosen `searchProvider` to control where queries go. `web_fetch` still uses the
+existing HTTPS/allowlist boundary; this search adapter does not enable MCP page fetching.
+
+`webSearchFromEnv()` picks the first configured provider in this order:
 
 | Env var | Provider |
 |---|---|
 | `TAVILY_API_KEY` | Tavily |
 | `EXA_API_KEY` | Exa |
 | `SERPER_API_KEY` | Serper |
-| `SEARXNG_BASE_URL` | SearXNG (self-hosted) |
+| `SEARXNG_URL` | SearXNG (self-hosted) |
 
 ## Links
 

@@ -32,3 +32,6 @@ export {
   webSearchFromEnv,
 } from "./search.js";
 export type { AdapterOptions, WebSearchPort, WebSearchOptions } from "./search.js";
+
+export { parallelSearch } from "./parallel-search.js";
+export type { ParallelSearchOptions } from "./parallel-search.js";
