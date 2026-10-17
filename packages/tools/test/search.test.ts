@@ -294,7 +294,7 @@ describe("web_search tool integration", () => {
     expect((out.results[0] as Record<string, unknown>)["title"]).toBe("T1");
   });
 
-  it("returns { configured: false, message } when nothing is configured (empty env)", async () => {
+  it("returns a provider error when the keyless default receives an invalid MCP response", async () => {
     // webTools reads process.env lazily per call; we rely on the fact that in CI
     // neither TAVILY_API_KEY nor EXA_API_KEY nor SERPER_API_KEY nor SEARXNG_URL are set.
     // To be safe, we override the env by temporarily clearing the keys we care about.
@@ -311,9 +311,8 @@ describe("web_search tool integration", () => {
     try {
       const tools = webTools({ allowlist: ["example.com"], fetchImpl: dummyFetch });
       const webSearch = byId(tools, "web_search");
-      const out = (await webSearch.execute({ query: "test" })) as { configured: boolean; message: string };
-      expect(out.configured).toBe(false);
-      expect(out.message).toMatch(/TAVILY_API_KEY/);
+      const out = (await webSearch.execute({ query: "test" })) as { error: string };
+      expect(out.error).toMatch(/content type/i);
     } finally {
       // Restore
       for (const [k, v] of Object.entries(saved)) {

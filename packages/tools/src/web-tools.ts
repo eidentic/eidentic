@@ -2,6 +2,7 @@ import { z } from "zod";
 import { createTool, type Tool, type ToolContext } from "@eidentic/core";
 import type { WebSearchPort } from "@eidentic/types";
 import { webSearchFromEnv } from "./search.js";
+import { parallelSearch } from "./parallel-search.js";
 import {
   parseSafeEgressUrl,
   safeFetchText,
@@ -41,22 +42,21 @@ export interface WebToolsOptions {
   /** Custom hostname resolver used when `resolveHosts` is enabled. */
   resolveHost?: (hostname: string) => Promise<string[]>;
   /**
-   * BYO search provider (like the embedder — no default). When omitted, NO web_search tool
-   * is returned. The provider reads any API key from `ctx.secrets` (§10.3) — NEVER a model
-   * parameter.
+   * Legacy search provider. Takes precedence over environment providers and Parallel.
+   * The provider reads any API key from `ctx.secrets` (§10.3) — NEVER a model parameter.
    * @deprecated Prefer `searchProvider` (typed WebSearchPort). This legacy fn is still
    *   supported for backward compatibility.
    */
   search?: (query: string, ctx?: ToolContext) => Promise<import("@eidentic/types").WebSearchResult[]>;
   /**
-   * Pluggable WebSearchPort (Tavily/Exa/Serper/SearXNG/custom). When set, preferred over
+   * Pluggable WebSearchPort (Parallel/Tavily/Exa/Serper/SearXNG/custom). When set, preferred over
    * the legacy `search` fn and env auto-detect. Model never sees the API key (§10.3).
    */
   searchProvider?: WebSearchPort;
   /**
-   * When false, excludes the web_search tool entirely. Default: include the tool (it returns
-   * a helpful unconfigured message when no provider is resolvable, so the model understands
-   * what it needs to do).
+   * When false, excludes the web_search tool entirely. Default: include the tool and use
+   * anonymous Parallel Search MCP when no explicit or environment provider is configured.
+   * Queries then go to https://search.parallel.ai/mcp without an account or API key.
    */
   webSearch?: boolean;
 }
@@ -132,11 +132,12 @@ function legacyAsPort(
  *   Body consumption has a decompressed-byte cap and timeout.
  *
  * - `web_search` is included by default (when `opts.webSearch !== false`). When no provider
- *   is resolvable (no searchProvider, no legacy search fn, no env key/URL), the tool returns
- *   a helpful unconfigured message — it never throws. Resolution order per call:
+ *   is configured (no searchProvider, no legacy search fn, no env key/URL), it uses
+ *   anonymous Parallel Search MCP. Resolution order per call:
  *     1. opts.searchProvider  (typed WebSearchPort)
  *     2. opts.search          (legacy fn, backward compat)
  *     3. webSearchFromEnv()   (TAVILY_API_KEY → EXA_API_KEY → SERPER_API_KEY → SEARXNG_URL)
+ *     4. parallelSearch()    (keyless Fast mode; no fallback after a chosen provider fails)
  *   Model never sees API keys (§10.3 invariant preserved).
  */
 export function webTools(opts: WebToolsOptions): Tool[] {
@@ -187,29 +188,21 @@ export function webTools(opts: WebToolsOptions): Tool[] {
         id: "web_search",
         description:
           "Search the web for a query and return ranked results (title, url, snippet). " +
-          "Credentials are read from environment variables or the injected provider (§10.3) — the model never sees any API key.",
+          "Uses keyless Parallel search unless a provider is configured. " +
+          "Credentials stay in environment variables or the injected provider (§10.3).",
         inputSchema: z.object({
           query: z.string().describe("Search query"),
           maxResults: z.number().int().min(1).max(20).optional().describe("Max results to return (default 5)"),
         }),
         sideEffect: "read-only",
         execute: async ({ input, ctx }) => {
-          // Resolution order: searchProvider > legacy search fn > env auto-detect.
+          // Resolution order: explicit > legacy > configured environment > keyless Parallel.
           // Keys come from env/provider — never a model param (§10.3).
           const provider =
             opts.searchProvider ??
             legacyAsPort(opts.search, ctx) ??
-            webSearchFromEnv();
-
-          if (!provider) {
-            return {
-              configured: false,
-              message:
-                "web_search is not configured. Set TAVILY_API_KEY (free 1k/mo at tavily.com), " +
-                "EXA_API_KEY, or SERPER_API_KEY in the environment, or run a SearXNG instance " +
-                "and set SEARXNG_URL. Or pass searchProvider to webTools().",
-            };
-          }
+            webSearchFromEnv(undefined, opts.fetchImpl) ??
+            parallelSearch({ fetch: opts.fetchImpl });
 
           try {
             const results = await provider.search(input.query, {

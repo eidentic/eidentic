@@ -92,10 +92,8 @@ describe("webTools — sealed web_fetch + egress allowlist (§5.6)", () => {
     expect(byId(tools, "web_fetch").sideEffect).toBe("read-only");
   });
 
-  it("web_search is present by default even without a provider (returns unconfigured message)", async () => {
-    // Pass an explicit empty env so env auto-detect yields null regardless of CI environment.
-    // We cannot inject env into webTools directly — the env check happens lazily per call.
-    // Here we call with no search options; the tool self-describes when unconfigured.
+  it("web_search is present by default without an explicit provider", async () => {
+    // Registering tools does not make a search request.
     const tools = webTools({ allowlist: ["example.com"], fetchImpl: fakeFetch("x"), webSearch: true });
     expect(tools.find((t) => t.id === "web_search")).toBeDefined();
   });
