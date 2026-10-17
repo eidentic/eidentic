@@ -4,7 +4,8 @@
 
 Use anonymous Parallel Search MCP (Fast mode) for an enabled `web_search` when no
 provider is configured. Add `parallelSearch()` with a bounded MCP deadline,
-cancellation and the existing title/URL/snippet result contract.
+cancellation and the existing title/URL/snippet result contract. Require MCP SDK
+1.31 or newer.
 
 Migration: unconfigured search now sends queries to `https://search.parallel.ai/mcp`
 instead of returning `{ configured: false, message }`. Set `webSearch: false`, deny
